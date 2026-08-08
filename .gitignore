@@ -1,0 +1,19 @@
+/.vscode
+/__pycache__
+**/__pycache__/
+*.pyc
+/References
+/urdf_to_mjcf_tool
+
+# Local CAD model files and control records
+/SW_Model/
+/CONTROL_*.md
+
+/brake_selftest.csv
+/velocity_tracking_analysis.csv
+/velocity_tracking_analysis.json
+/velocity_tracking_analysis.png
+/URDF_Model/export.log
+/SW_Model/drawing/*.log
+/SW_Model/drawing/*.dwl
+/SW_Model/drawing/*.dwl2
