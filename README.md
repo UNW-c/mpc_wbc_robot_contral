@@ -1,8 +1,9 @@
-# CirclegRobot
+# Circleg Robot
 
-CirclegRobot 是一个基于 MuJoCo 的轮圈腿式平衡机器人仿真与控制项目。
+Circleg  Robot 是一个基于 MuJoCo 的轮圈腿式平衡机器人仿真与控制项目。
 项目使用统一的轮毂 LQR 控制器，同时支持固定腿长、腿长调节、线速度、偏航角速度以及 Xbox/SDL 兼容手柄输入。
-
+![CirclegRobot 仿真示意图](URDF_Model/images/image.png)
+![CirclegRobot 模型示意图](URDF_Model/images/image-1.png)
 ## 环境安装
 
 项目推荐使用 Conda 环境。以下命令可在 Windows PowerShell 或 Linux Shell 中执行：
@@ -83,4 +84,7 @@ requirements.txt            # Python 运行依赖
 
 ## 开源说明
 
-本仓库用于 CirclegRobot 项目的开源协作。提交代码或修改模型时，请保持左右轮轴方向、腿长机构定义和模型坐标约定一致，并在提交前完成至少一次平地和 rough 地形仿真测试。
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，
+项目仅供个人学习、学术研究和技术交流使用。
+
+项目中的控制算法、模型参数和仿真结果不代表经过工程认证的产品方案。
