@@ -2,8 +2,18 @@
 /__pycache__
 **/__pycache__/
 *.pyc
+
+# Virtual environment
+/.venv/
 /References
 /urdf_to_mjcf_tool
+
+# Downloaded third-party reference material (papers, upstream repos, surveys)
+# INDEX.md 保留在版本控制内，二进制资料不入库
+/docs/references/mpc-wbc/papers/
+/docs/references/mpc-wbc/repos/
+/docs/references/mpc-wbc/reports/
+/docs/references/mpc-wbc/_tmp/
 
 # Local CAD model files and control records
 /SW_Model/
@@ -17,3 +27,12 @@
 /SW_Model/drawing/*.log
 /SW_Model/drawing/*.dwl
 /SW_Model/drawing/*.dwl2
+
+# 仿真数据与寻优产物（体积大，不入库）
+/artifacts/
+
+# PDF 文本提取工具（辅助工具，不入库）
+/.pdf-tools/
+
+# Windows 保留名残留文件
+/nul

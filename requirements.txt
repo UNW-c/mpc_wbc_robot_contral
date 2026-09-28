@@ -5,3 +5,11 @@ numpy>=1.24.0
 scipy>=1.10.0
 pygame>=2.5.0
 pynput>=1.7.7
+
+# Upper-level MPC (Algorithm/mpc). osqp only needs to be present when the MPC is
+# enabled; the legacy LQR path still runs without it.
+osqp>=0.6,<2.0
+ruckig>=0.9
+
+# Tests (pytest.ini + tests/).
+pytest>=8.0

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import mujoco
 import numpy as np
 from scipy.linalg import solve_continuous_are
 
@@ -56,6 +55,18 @@ class PendulumParameters:
         return cls(mass, wheel_mass, wheel_inertia, height, inertia)
 
 
+def measure_contact_linearization(model: Any, data: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Public entry point for the contact linearization shared with ``Algorithm.mpc``.
+
+    Returns ``(A, B)`` for the state order ``[x, pitch, x_dot, pitch_dot]``, where the
+    single input is the differential-mode wheel torque (``j2 = +u``, ``j4 = -u``).
+
+    Caveat: ``j1``/``j3`` torques are zero here, i.e. the hips are *free*.  Once a
+    whole-body controller holds the hips, re-measure with that constraint applied.
+    """
+    return LQRDesign._measure_contact_linearization(model, data)
+
+
 @dataclass(frozen=True)
 class LQRDesign:
     """One shared local linearization used by both wheel controllers."""
@@ -83,6 +94,11 @@ class LQRDesign:
     @staticmethod
     def _measure_contact_linearization(model: Any, data: Any) -> tuple[np.ndarray, np.ndarray]:
         """Numerically linearize [x, pitch, x_dot, pitch_dot] in rolling contact."""
+        # 局部导入：本模块唯一的 MuJoCo 依赖就在这个方法里，放在顶层会让
+        # ``lqr_gain_from_linearization`` 这样的纯数值工具被迫绑定到仿真运行时，
+        # 上层 MPC 也就无法在无 MuJoCo 的环境里做单元测试。
+        import mujoco
+
         qpos0 = np.asarray(data.qpos, dtype=float).copy()
         qvel0 = np.asarray(data.qvel, dtype=float).copy()
         qpos_eps = 1.0e-5

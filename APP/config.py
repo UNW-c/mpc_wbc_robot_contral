@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from Algorithm.mpc import MPCSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +87,19 @@ class KeyboardConfig:
 class RobotConfig:
     wheel_radius: float = 0.160
     wheel_torque_limit: float = 5.0
+
+
+def default_mpc_settings() -> "MPCSettings":
+    """上层 MPC 的默认设置。
+
+    延迟导入 ``Algorithm.mpc``：它依赖 osqp，而 osqp 只在启用 MPC 时才需要，
+    不应该让原有 LQR 通路因为缺少可选依赖而起不来。
+    """
+    from Algorithm.mpc import MPCSettings
+
+    return MPCSettings(
+        wheel_torque_limit=RobotConfig().wheel_torque_limit,
+    )
 
 
 @dataclass(frozen=True)
