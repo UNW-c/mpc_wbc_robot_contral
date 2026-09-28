@@ -44,7 +44,7 @@ class MPCSettings:
     # 用于放开 MPC 可用俯仰幅度（换制动能力）。注意这是硬约束，不是权重：
     # 只调 QPWeights.pitch/pitch_rate 无法突破它。原值 0.30 rad 是旧的工作点。
     pitch_limit: float = 0.785
-    speed_limit: float = 1.60
+    speed_limit: float = 4.80  # MPC 速度状态带；随 max_speed=4.0 提高（2026-09-28）
     enable_state_bounds: bool = True
     max_consecutive_failures: int = 3
     # 状态预推时长：估计延迟 + 求解耗时（方案 §3.4）。0 表示不补偿。

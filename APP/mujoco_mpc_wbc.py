@@ -63,7 +63,7 @@ class SimulationConfig:
     wbc_dt: float = 0.004
     residual_tolerance: float = 1e-7
     force_tolerance: float = 1e-6
-    speed_guard: float = 1.60
+    speed_guard: float = 4.80  # 随 max_speed=4.0 提高（2026-09-28）
     # 实验性 |roll|/|pitch| 停机线，取自用户的 45° 上限。
     # 它是测试保护，不是控制器参数；超过即停机并记为失败。
     attitude_guard: float = 0.785
@@ -791,6 +791,9 @@ def main():
             return MotionCommand(velocity=keyboard.read(), yaw_rate=keyboard.read_yaw_rate())
 
         with mujoco_viewer.launch_passive(simulation.robot.model, simulation.robot.data) as viewer:
+            # 2026-09-28 用户要求：相机跟随机身（而不是固定视角）。
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+            viewer.cam.trackbodyid = int(simulation.robot.model.body("base_link").id)
             summary = simulation.run(driving, duration, viewer, allow_driving=True)
     else:
         summary = simulation.run(command, duration)
