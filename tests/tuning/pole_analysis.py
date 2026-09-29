@@ -51,6 +51,59 @@ def _model_and_scale():
     return model, discrete, scale
 
 
+_STATE_NAMES = ("s", "v", "theta", "theta_dot", "psi", "psi_dot", "q_c", "q_c_dot")
+_LONGITUDINAL_INDICES = (0, 1, 2, 3, 6, 7)
+
+
+def closed_loop_analysis(values: dict) -> dict:
+    """完整闭环分析：极点、特征向量归属、纵向子块的极点与阻尼比（#26）。
+
+    无约束 LTI 下 MPC（终端 Riccati）等价于无限时域 LQR，所以用 eig(A-BK)。
+    """
+    from scipy.linalg import solve_discrete_are
+
+    model, discrete, scale = _model_and_scale()
+    weights = replace(MPCSettings().weights,
+                      position=values.get("position", 80000.0),
+                      velocity=values.get("velocity", 2000.0),
+                      pitch=values.get("pitch", 51200.0),
+                      pitch_rate=values.get("pitch_rate", 960.0),
+                      hip_angle=values.get("hip_angle", 50.0),
+                      hip_rate=values.get("hip_rate", 10.0),
+                      terminal_scale=values.get("terminal_scale", 5.0))
+    A = discrete.A
+    B = discrete.B * scale[None, :]
+    Q = np.diag(weights.state_diagonal(A.shape[0]))
+    R = np.diag(np.maximum(weights.input_diagonal(model.input_dim) * scale ** 2, 1e-9))
+    P = np.asarray(solve_discrete_are(A, B, Q, R), dtype=float)
+    gain = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+    eigenvalues, eigenvectors = np.linalg.eig(A - B @ gain)
+    continuous = np.log(eigenvalues) / _DT
+    entries = []
+    for index, pole in enumerate(continuous):
+        vector = np.abs(eigenvectors[:, index])
+        total = float(np.sum(vector)) or 1.0
+        shares = vector / total
+        order = np.argsort(shares)[::-1]
+        components = [(int(i), float(shares[i])) for i in order if shares[i] > 0.05]
+        longitudinal_share = float(np.sum(shares[list(_LONGITUDINAL_INDICES)]))
+        damping = (-pole.real / abs(pole)) if abs(pole) > 1e-9 else float("nan")
+        entries.append(dict(pole=pole, components=components,
+                            longitudinal_share=longitudinal_share, zeta=float(damping)))
+    longitudinal = [entry for entry in entries if entry["longitudinal_share"] >= 0.5]
+    dominant = max(longitudinal, key=lambda entry: entry["pole"].real) if longitudinal else None
+    return dict(entries=entries, longitudinal=longitudinal, dominant=dominant)
+
+
+def longitudinal_damping(values: dict) -> tuple:
+    """纵向子块的最慢极点实部与阻尼比（供 #29d 的 ζ 预检使用）。"""
+    analysis = closed_loop_analysis(values)
+    dominant = analysis["dominant"]
+    if dominant is None:
+        return float("nan"), float("nan")
+    return float(dominant["pole"].real), float(dominant["zeta"])
+
+
 def continuous_poles(values: dict) -> np.ndarray:
     """给定权重参数，返回连续等效的闭环极点（实部）。"""
     from scipy.linalg import solve_discrete_are

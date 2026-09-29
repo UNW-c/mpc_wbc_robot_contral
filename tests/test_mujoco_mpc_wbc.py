@@ -282,16 +282,16 @@ def test_cli_defaults_match_config_defaults():
 
 
 def test_cli_preset_new_builds_hip_input():
-    from APP.mujoco_mpc_wbc import _build_from_args, _NEW_PRESET
+    from APP.mujoco_mpc_wbc import _build_from_args, _PRESETS
 
     config, settings, _ = _build_from_args(["--preset", "new"])
     assert config.model_variant == "hip_input"
     assert config.forward_mode == "mpc"
     assert config.preview_lead == 0.0
-    assert config.hip_guard == _NEW_PRESET["hip_guard"]
+    assert config.hip_guard == _PRESETS["new"]["hip_guard"]
     assert settings is not None
-    assert settings.weights.hip_angle == _NEW_PRESET["hip_weight"]
-    assert settings.hip_angle_limit == _NEW_PRESET["hip_angle_limit"]
+    assert settings.weights.hip_angle == 50.0
+    assert settings.hip_angle_limit == 0.55
     assert settings.compensate_hip_torque is False
     # 不跑仿真也能构建仿真对象
     from APP.mujoco_mpc_wbc import MuJoCoMpcWbcSimulation

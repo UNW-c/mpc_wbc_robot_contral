@@ -186,6 +186,7 @@ def _metrics(sim, summary, event_time: float, command_fn=None):
     hip_qacc = float(np.max(np.abs(qacc[window][:, sim.hip_v[0]:sim.hip_v[0] + 1])))
     hip_qacc = max(hip_qacc, float(np.max(np.abs(qacc[window][:, sim.hip_v[1]:sim.hip_v[1] + 1]))))
     return dict(peak_position=peak_position, settle=settle, peak_pitch=peak_pitch,
+                final_position_abs=float(abs(state[window][-1, 0])) if np.any(window) else float("nan"),
                 pitch_cross=pitch_cross, fv_ratio=ratio, hip_occ=hip_occ, wheel_occ=wheel_occ,
                 hip_angle_peak=float(np.max(np.abs(hip_angle[window]))),
                 hip_speed_peak=float(np.max(np.abs(hip_speed[window]))),

@@ -9,7 +9,7 @@ WBC 应采样 OptimizedTrajectory，而非直接跟踪优化前的参考。
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -44,7 +44,7 @@ class MPCSettings:
     # 用于放开 MPC 可用俯仰幅度（换制动能力）。注意这是硬约束，不是权重：
     # 只调 QPWeights.pitch/pitch_rate 无法突破它。原值 0.30 rad 是旧的工作点。
     pitch_limit: float = 0.785
-    speed_limit: float = 4.80  # MPC 速度状态带；随 max_speed=4.0 提高（2026-09-28）
+    speed_limit: float = 3.00  # MPC 速度状态带；随 max_speed=2.5 调整（2026-09-29）
     enable_state_bounds: bool = True
     max_consecutive_failures: int = 3
     # 状态预推时长：估计延迟 + 求解耗时（方案 §3.4）。0 表示不补偿。
@@ -58,6 +58,11 @@ class MPCSettings:
     # B3：8 状态模型的髋力矩输入上下界 [N*m]（XML actuator ctrlrange）。
     hip_torque_limit: float = 10.0
     osqp_settings: dict[str, object] = field(default_factory=dict)
+    # A1（第 15 次排查）：用模型 metadata 的稳态能力表把规划限值对齐 hip_angle_limit。
+    # 关闭时保持 MotionLimits 里的手填值（1.2 / 1.4 / 1.4）。
+    auto_accel_limits: bool = True
+    accel_fraction_up: float = 0.85     # 起步限值系数（agent2 设计值）
+    accel_fraction_down: float = 0.95   # 刹车与零指令恢复限值系数（agent2 设计值）
 
 
 @dataclass(frozen=True)
@@ -144,7 +149,7 @@ class WheelMPC:
 
     def __init__(self, model: ReducedModel, settings: MPCSettings | None = None) -> None:
         self.model = model
-        self.settings = settings or MPCSettings()
+        self.settings = self._apply_auto_accel_limits(settings or MPCSettings(), model)
         self.discrete = model.discretize(self.settings.dt)
         self.qp = CondensedMPCQP(
             self.settings.horizon,
@@ -165,6 +170,37 @@ class WheelMPC:
         self._lead_model = self._build_lead_model()
         self._disturbance_map = model.drift_step_map(self.settings.dt)
         self._disturbance_lead_map = model.drift_step_map(self.settings.prediction_lead)
+
+    @staticmethod
+    def _apply_auto_accel_limits(settings: MPCSettings, model: ReducedModel) -> MPCSettings:
+        """A1（第 15 次排查）：按 hip_angle_limit 从稳态能力表反查规划限值。
+
+        - hip_input 模型：metadata["accel_capacity"] 给出 (a, q_c) 表，
+          a_cap = interp(hip_angle_limit)，起步 = accel_fraction_up * a_cap，
+          刹车与恢复 = accel_fraction_down * a_cap；
+        - held_hip 模型没有这张表，保持手填值并打一行 INFO 说明；
+        - auto_accel_limits=False 时原样返回（测试要求逐位一致）。
+        """
+        if not settings.auto_accel_limits:
+            return settings
+        capacity = model.metadata.get("accel_capacity")
+        if not isinstance(capacity, dict):
+            _LOGGER.info("A1：模型 %s 没有稳态能力表，规划限值保持手填值"
+                         "（起步 %.2f / 刹车 %.2f / 恢复 %.2f m/s^2）",
+                         model.source, settings.limits.commanded_acceleration,
+                         settings.limits.max_braking, settings.limits.max_acceleration)
+            return settings
+        q_table = np.asarray(capacity["q_c"], dtype=float)
+        a_table = np.asarray(capacity["a"], dtype=float)
+        hip_limit = float(settings.hip_angle_limit)
+        a_cap = float(np.interp(hip_limit, q_table, a_table))
+        up = float(settings.accel_fraction_up) * a_cap
+        down = float(settings.accel_fraction_down) * a_cap
+        limits = replace(settings.limits, commanded_acceleration=up,
+                         max_acceleration=down, max_braking=down)
+        _LOGGER.info("A1：髋限 %.2f rad -> 持续能力 %.2f m/s^2；规划限值 起步 %.2f / "
+                     "刹车 %.2f / 恢复 %.2f m/s^2", hip_limit, a_cap, up, down, down)
+        return replace(settings, limits=limits)
 
     def _build_lead_model(self) -> DiscreteModel | None:
         """状态预推用的离散模型（方案 §3.4）。

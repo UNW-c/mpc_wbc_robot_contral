@@ -13,3 +13,4 @@ ruckig>=0.9
 
 # Tests (pytest.ini + tests/).
 pytest>=8.0
+

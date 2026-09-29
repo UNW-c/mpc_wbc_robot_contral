@@ -77,7 +77,7 @@ class ReducedModel:
     yaw_inertia: float
     pitch_inertia: float = DEFAULT_PITCH_INERTIA
     source: str = "unspecified"
-    metadata: dict[str, float] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.A.ndim != 2 or self.A.shape[0] != self.A.shape[1]:

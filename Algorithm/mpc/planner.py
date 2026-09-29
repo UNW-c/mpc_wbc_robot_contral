@@ -30,7 +30,7 @@ class MotionLimits:
     当前斜坡不承诺 jerk 连续；姿态软目标采用 equilibrium_pitch。
     """
 
-    max_speed: float = 4.00  # 2026-09-28 用户定稿：键鼠可控最大速度 4.0 m/s
+    max_speed: float = 2.50  # 2026-09-29 用户定稿：键鼠可控最大速度 2.5 m/s
     # 2026-09-28 用户确认（C10）：按 hip_angle_limit = 0.55 时约 1.4 m/s^2 的持续能力对齐。
     # 依据：K1 实测刹车段 ramp_accel 比值 0.69（规划 2.00 只做到 1.39）、髋角触碰限值 34.8%。
     max_acceleration: float = 1.40

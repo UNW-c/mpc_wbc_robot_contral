@@ -6,6 +6,8 @@ to flat-ground parking, and is not a model schedule for leg motion.
 """
 from __future__ import annotations
 
+import logging
+
 import math
 
 import numpy as np
@@ -15,6 +17,8 @@ from scipy.optimize import brentq, fsolve, least_squares
 
 from Algorithm.mpc import ReducedModel
 from Algorithm.mpc.model import wheel_half_track, yaw_inertia_from_model
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class HeldHipModelBuilder:
@@ -259,6 +263,47 @@ class HipInputModelBuilder:
             data.qpos[:], data.qvel[:], data.ctrl[:] = qpos, qvel, ctrl
             self.robot.forward()
 
+    # A1（第 15 次排查）：稳态加速度能力表的取值范围与步长。
+    # 依据：B1/M3 的稳态族（a 从 0 到 2.4），超过 2.4 时 q_c 已接近机构极限。
+    ACCEL_CAPACITY_STEP = 0.1
+    ACCEL_CAPACITY_MAX = 2.4
+
+    def accel_capacity_table(self, step: float = ACCEL_CAPACITY_STEP,
+                             maximum: float = ACCEL_CAPACITY_MAX) -> dict[str, list[float]]:
+        """A1：q_c -> a 的稳态能力表（每 0.1 m/s^2 一个点）。
+
+        由 :meth:`steady_state` 沿稳态族求解（theta 加权最小二乘，倾向 theta=0），
+        q_c 随 a 单调递增（B1/M3 已验证），供 WheelMPC 用 hip_angle_limit 反查
+        持续加速度能力。返回值是纯 list，能直接进 metadata 并随 summary 序列化。
+        """
+        # steady_state 经 derivative 会改写 robot.data，必须恢复（同 build 的做法），
+        # 否则后续仿真从被污染的状态起跑。
+        data = self.robot.data
+        qpos, qvel, ctrl = data.qpos.copy(), data.qvel.copy(), data.ctrl.copy()
+        try:
+            accelerations = np.arange(0.0, float(maximum) + 0.5 * float(step), float(step))
+            a_values: list[float] = []
+            q_values: list[float] = []
+            for acceleration in accelerations:
+                solution = self.steady_state(float(acceleration))
+                if not solution["success"]:
+                    raise RuntimeError(
+                        f"稳态能力表在 a={acceleration:.2f} 处求解失败："
+                        f"cost={solution['cost']:.3e} optimality={solution['optimality']:.3e}")
+                q_c = float(solution["q_c"])
+                # 实测：a >= 2.2 时解退化，q_c 饱和（约 1.35 rad）不再增加。
+                # 插值要求 q_c 严格递增，所以截断到最后一个有效点。
+                if q_values and q_c <= q_values[-1]:
+                    _LOGGER.info("A1：能力表在 a=%.2f 处饱和（q_c=%.4f 不再增加），"
+                                 "截断到 a=%.2f", acceleration, q_c, a_values[-1])
+                    break
+                a_values.append(float(acceleration))
+                q_values.append(q_c)
+            return {"a": a_values, "q_c": q_values}
+        finally:
+            data.qpos[:], data.qvel[:], data.ctrl[:] = qpos, qvel, ctrl
+            self.robot.forward()
+
     def build_reduced(self, hip_angle: float = 0.0) -> ReducedModel:
         """B3：把 8 状态线性化包装成 ReducedModel（供 WheelMPC 使用）。
 
@@ -270,6 +315,8 @@ class HipInputModelBuilder:
         inertia = yaw_inertia_from_model(self.model, self.robot.data, self.radius, track)
         metadata = dict(linear.metadata)
         metadata["equilibrium_pitch"] = float(linear.metadata["theta_trim"])
+        # A1：稳态能力表（q_c -> a），供 WheelMPC 自动换算规划限值。
+        metadata["accel_capacity"] = self.accel_capacity_table()
         return ReducedModel(
             linear.A, linear.B, self.radius, track, inertia,
             source="mujoco-hip-input",

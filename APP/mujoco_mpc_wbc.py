@@ -63,7 +63,10 @@ class SimulationConfig:
     wbc_dt: float = 0.004
     residual_tolerance: float = 1e-7
     force_tolerance: float = 1e-6
-    speed_guard: float = 4.80  # 随 max_speed=4.0 提高（2026-09-28）
+    speed_guard: float = 3.00  # 随 max_speed=2.5 调整（2026-09-29）
+    # 姿态/速度/髋角越限即停止仿真（2026-09-29 用户确认恢复该行为）。
+    # True = 越限停机；False = 只记录不停（NaN 与求解失败仍会终止）。
+    guard_enabled: bool = True
     # 实验性 |roll|/|pitch| 停机线，取自用户的 45° 上限。
     # 它是测试保护，不是控制器参数；超过即停机并记为失败。
     attitude_guard: float = 0.785
@@ -575,16 +578,17 @@ class MuJoCoMpcWbcSimulation:
             if step % self.config.record_stride == 0:
                 self.records.append(self._sample_record())
             attitude = self.dynamics.attitude(data)
-            if max(abs(attitude[:2])) > self.config.attitude_guard:
-                self.stop_reason = "attitude_guard"
-                break
-            if np.linalg.norm(data.qvel[:2]) > self.config.speed_guard:
-                self.stop_reason = "speed_guard"
-                break
-            if self.config.hip_guard > 0.0:
-                if abs(self._hip_common(data.qpos[self.hip_q])) > self.config.hip_guard:
-                    self.stop_reason = "hip_guard"
+            if self.config.guard_enabled:
+                if max(abs(attitude[:2])) > self.config.attitude_guard:
+                    self.stop_reason = "attitude_guard"
                     break
+                if np.linalg.norm(data.qvel[:2]) > self.config.speed_guard:
+                    self.stop_reason = "speed_guard"
+                    break
+                if self.config.hip_guard > 0.0:
+                    if abs(self._hip_common(data.qpos[self.hip_q])) > self.config.hip_guard:
+                        self.stop_reason = "hip_guard"
+                        break
             if viewer is not None:
                 # Passive viewer pump plus real-time pacing; closing the window stops the run.
                 viewer.sync()
@@ -660,20 +664,14 @@ class MuJoCoMpcWbcSimulation:
         return record
 
 
-_NEW_PRESET = {
-    # 新方案（2026-09-28 部署为默认，C7）：与 SimulationConfig / MPCSettings 的默认值一致。
-    "model_variant": "hip_input",
-    "forward_mode": "mpc",
-    "preview_lead": 0.0,
-    "hip_weight": 50.0,
-    "hip_angle_limit": 0.55,
-    "hip_guard": 0.9,
-}
-_OLD_PRESET = {
-    # 旧结构对照（6 状态握髋模型 + legacy 纵向，preview_lead 0.0 为 R1 基线）。
-    "model_variant": "held_hip",
-    "forward_mode": "legacy",
-    "preview_lead": 0.0,
+_PRESETS = {
+    "tuned-best": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.75, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 100.0, "hip_angle": 50.0, "hip_rate": 2.4, "terminal_mode": "scale", "terminal_scale": 5.0}},
+    "tuned-fast": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.8, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 300.0, "hip_angle": 50.0, "hip_rate": 3.0, "terminal_mode": "scale", "terminal_scale": 5.0}},
+    "tuned-gentle": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.7, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 300.0, "hip_angle": 50.0, "hip_rate": 4.5, "terminal_mode": "scale", "terminal_scale": 5.0}},
+    # 默认（K2/E5 口径）与旧结构
+    "new": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0,
+            "hip_guard": 1.70, "hip_angle_limit": 0.55},
+    "old": {"model_variant": "held_hip", "forward_mode": "legacy", "preview_lead": 0.0},
 }
 
 
@@ -705,8 +703,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="MPC common-mode hip angle limit [rad] for the hip_input model.")
     parser.add_argument("--hip-guard", type=float, default=None,
                         help="Common-mode hip stop line [rad] (guard).")
-    parser.add_argument("--preset", choices=("new", "old"), default=None,
-                        help="One-shot preset: new (default scheme) or old (legacy comparison).")
+    parser.add_argument("--preset", choices=tuple(_PRESETS), default=None,
+                        help="One-shot preset: new / old / tuned-best / tuned-fast / tuned-gentle.")
     return parser
 
 
@@ -716,12 +714,7 @@ def _build_from_args(argv=None):
     单独给出的参数优先于 ``--preset``；不传任何新参数时与旧默认完全一致（E5）。
     """
     args = _build_arg_parser().parse_args(argv)
-    if args.preset == "new":
-        preset = dict(_NEW_PRESET)
-    elif args.preset == "old":
-        preset = dict(_OLD_PRESET)
-    else:
-        preset = {}
+    preset = dict(_PRESETS.get(args.preset, {})) if args.preset else {}
 
     def pick(explicit, key, fallback):
         if explicit is not None:
@@ -741,14 +734,24 @@ def _build_from_args(argv=None):
         preview_lead=pick(args.preview_lead, "preview_lead", base.preview_lead),
         hip_guard=pick(args.hip_guard, "hip_guard", base.hip_guard),
     )
-    hip_weight = pick(args.hip_weight, "hip_weight", None)
-    hip_limit = pick(args.hip_angle_limit, "hip_angle_limit", None)
+    # tuned preset 的 WBC 跟踪带宽（kv = 2ω、kp = ω²）
+    omega = preset.get("tracking_bandwidth")
+    if omega is not None and args.model_variant is None:
+        config = replace(config, tracking_velocity_gain=2.0 * float(omega),
+                         tracking_position_gain=float(omega) ** 2)
+    # 权重：preset 的 weights 字典 + 单独参数覆盖
+    weight_overrides = dict(preset.get("weights", {}))
+    if args.hip_weight is not None:
+        weight_overrides["hip_angle"] = float(args.hip_weight)
+    elif "hip_weight" in preset:
+        weight_overrides["hip_angle"] = float(preset["hip_weight"])
+    hip_limit = (args.hip_angle_limit if args.hip_angle_limit is not None
+                 else preset.get("hip_angle_limit"))
     settings = None
-    if hip_weight is not None or hip_limit is not None or config.model_variant == "hip_input":
+    if weight_overrides or hip_limit is not None or config.model_variant == "hip_input":
         mpc_base = MPCSettings(compensate_hip_torque=False)
-        weights = mpc_base.weights
-        if hip_weight is not None:
-            weights = replace(weights, hip_angle=float(hip_weight))
+        weights = (replace(mpc_base.weights, **weight_overrides) if weight_overrides
+                   else mpc_base.weights)
         settings = replace(
             mpc_base,
             weights=weights,
@@ -760,6 +763,10 @@ def _build_from_args(argv=None):
 
 def main():
     config, settings, args = _build_from_args()
+    # tuned preset 的 WBC 髋跟踪权重（任务权重表是模块级常量）
+    preset = dict(_PRESETS.get(args.preset, {})) if args.preset else {}
+    if "hip_tracking" in preset:
+        _TASK_QP_WEIGHTS["hip_tracking"] = float(preset["hip_tracking"])
     output = args.output.resolve()
     if not output.is_relative_to(ROOT.resolve()):
         raise SystemExit("Output must stay inside the workspace")
