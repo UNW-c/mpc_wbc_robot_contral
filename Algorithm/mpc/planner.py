@@ -60,6 +60,9 @@ class MotionLimits:
     saturation_dwell: float = 0.10
     capability_recovery: float = 0.50
     equilibrium_pitch: float = 0.0
+    # A2（第 15 次排查）：S 曲线开关。False = 旧行为（只限加速度，加速度阶跃）。
+    # 开启时加速度变化率不超过 max_jerk；max_jerk 由 WheelMPC 按起步限值 / jerk_ramp_time 写回。
+    use_jerk_limit: bool = False
 
     def __post_init__(self) -> None:
         for name in ("max_speed", "max_acceleration", "commanded_acceleration", "max_braking",
@@ -190,6 +193,50 @@ class _RampState:
             braking if abs(endpoint) < abs(velocity) else acceleration, delta)
         return _RampState(float(position), float(velocity), float(rate))
 
+    def advance_jerk(self, target: float, dt: float, acceleration: float, braking: float,
+                     jerk: float, substeps: int = 20) -> _RampState:
+        """A2（第 15 次排查）：加速度以 ``jerk`` 为速率变化的 S 曲线斜坡。
+
+        每个子步内 jerk 为常数，取值由“下一子步结束后还能否按 ``jerk`` 把加速度减到 0
+        而不越过目标”精确决定（解一元二次方程，不靠启发式判据）：
+
+        - 期望加速度 ``a_des``：朝最终目标 ``target`` 的方向取限值（速度幅值减小时用
+          ``braking``，否则用 ``acceleration``）；反向时加速度不在 0 速处回落，连续穿越。
+        - 收尾：设子步末加速度为 a1，其后按 jerk 减到 0 还会多出 ``a1²/(2·jerk)`` 的速度增量。
+          取满足 ``子步内速度增量 + a1²/(2·jerk) ≤ |剩余速度差|`` 的最大 a1，再与 a_des、
+          jerk 限幅取交集，保证不过冲。
+        - 吸附：速度差 < 1e-5 m/s 且加速度在一个 jerk 子步以内时直接落到目标。
+        """
+        position, velocity, accel = self.position, self.velocity, self.acceleration
+        h = float(dt) / int(substeps)
+        jerk = float(jerk)
+        for _ in range(int(substeps)):
+            remaining = target - velocity
+            # 收尾段按二次方程逼近时残差呈几何衰减，1e-5 m/s 以内直接吸附（物理上可忽略）
+            if abs(remaining) < 1e-5 and abs(accel) < jerk * h + 1e-12:
+                # 到达：加速度最后一步降到 0，速度吸附到目标
+                position += velocity * h + 0.5 * accel * h * h
+                velocity, accel = float(target), 0.0
+                continue
+            sign = 1.0 if remaining > 0.0 else -1.0
+            speed_down = velocity * target < 0.0 or abs(target) < abs(velocity)
+            a_des = sign * (braking if speed_down else acceleration)
+            # 在 sign 方向上工作：u = sign*a，r = |remaining|
+            u0, r = sign * accel, abs(remaining)
+            # 子步内常 jerk：u1 = u0 + j*h，速度增量 (u0+u1)/2*h；收尾需要 u1²/(2J)
+            # 约束：(u0+u1)/2*h + max(u1,0)²/(2J) ≤ r  →  u1²/(2J) + u1*h/2 + (u0*h/2 - r) ≤ 0
+            c = u0 * h / 2.0 - r
+            disc = (h / 2.0) ** 2 - 4.0 * (1.0 / (2.0 * jerk)) * c
+            u1_brake = (-(h / 2.0) + np.sqrt(max(disc, 0.0))) / (2.0 * (1.0 / (2.0 * jerk)))
+            u1 = min(sign * a_des, u1_brake, u0 + jerk * h)
+            u1 = max(u1, u0 - jerk * h)
+            accel_next = sign * u1
+            j = (accel_next - accel) / h
+            position += velocity * h + 0.5 * accel * h * h + j * h ** 3 / 6.0
+            velocity += accel * h + 0.5 * j * h * h
+            accel = accel_next
+        return _RampState(float(position), float(velocity), float(accel))
+
 
 class VelocityPlanner:
     """One plan call commits dt, while the horizon only advances copied state.
@@ -306,7 +353,9 @@ class VelocityPlanner:
             self._hold_time = 0.0
             # The travel target follows the measurement while driving, so the
             # unavoidable acceleration/braking lag is not read as an error.
-            self._forward = _RampState(position, self._forward.velocity)
+            # A2: keep the ramp acceleration so the jerk-limited S-curve survives re-anchoring
+            # (acceleration is recomputed by advance() anyway when use_jerk_limit is False).
+            self._forward = _RampState(position, self._forward.velocity, self._forward.acceleration)
         elif self.mode != ReferenceMode.HOLD:
             self.mode = ReferenceMode.BRAKE
             stopped = (abs(self.speed) < 1e-12 and abs(self.yaw_rate) < 1e-12
@@ -324,15 +373,24 @@ class VelocityPlanner:
         # A commanded drive uses the gentler ramp so the starting lean stays small;
         # the zero-command hold and recovery keep the original acceleration limit.
         acceleration = limits.commanded_acceleration if driving else limits.max_acceleration
+        if limits.use_jerk_limit:
+            def step_forward(state: _RampState, duration: float) -> _RampState:
+                if duration <= 0.0:
+                    return state
+                return state.advance_jerk(target_v, duration, acceleration, limits.max_braking,
+                                          limits.max_jerk)
+        else:
+            def step_forward(state: _RampState, duration: float) -> _RampState:
+                return state.advance(target_v, duration, acceleration, limits.max_braking)
         forward, turning = self._forward, self._yaw
-        self._forward = forward.advance(target_v, dt, acceleration, limits.max_braking)
+        self._forward = step_forward(forward, dt)
         self._yaw = turning.advance(target_w, dt, limits.max_yaw_acceleration, limits.max_yaw_braking)
-        forward = forward.advance(target_v, lead, acceleration, limits.max_braking)
+        forward = step_forward(forward, lead)
         turning = turning.advance(target_w, lead, limits.max_yaw_acceleration, limits.max_yaw_braking)
         rows = []
         for _ in range(int(horizon) + 1):
             rows.append((forward.position, forward.velocity, forward.acceleration, turning.position, turning.velocity))
-            forward = forward.advance(target_v, dt, acceleration, limits.max_braking)
+            forward = step_forward(forward, dt)
             turning = turning.advance(target_w, dt, limits.max_yaw_acceleration, limits.max_yaw_braking)
         values = np.asarray(rows)
         return ReferenceTrajectory(values[:, 0], values[:, 1], values[:, 2],

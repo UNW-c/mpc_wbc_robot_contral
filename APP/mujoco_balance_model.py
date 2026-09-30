@@ -304,6 +304,38 @@ class HipInputModelBuilder:
             data.qpos[:], data.qvel[:], data.ctrl[:] = qpos, qvel, ctrl
             self.robot.forward()
 
+    def tilted_capacity_table(self, theta: float,
+                              hip_angles=(0.0, 0.2, 0.4, 0.55, 0.65, 0.75, 0.8, 0.9, 1.0)) -> dict:
+        """A3（第 16 次排查）：机身固定前倾 ``theta`` 时的持续加速度能力表（q_c -> a）。
+
+        与第 11 次排查第 0 节同一方法：固定 (theta, q_c)，用非线性 derivative() 解两轮力 f
+        与共模髋力矩 tau_c，使 theta_ddot = q_c_ddot = 0，读出 v_dot。不收敛的点直接报错。
+        """
+        data = self.robot.data
+        qpos, qvel, ctrl = data.qpos.copy(), data.qvel.copy(), data.ctrl.copy()
+        try:
+            q_values, a_values = [], []
+            for q_c in hip_angles:
+                def residual(x, q_c=float(q_c)):
+                    f, tau = x
+                    state = np.zeros(8)
+                    state[2], state[6] = float(theta), q_c
+                    d = self.derivative(state, np.array([f, f, tau]))
+                    return [d[3], d[7]]
+                guess = [2.0 + 13.0 * q_c, 0.3 * q_c]
+                solution, _, converged, message = fsolve(residual, guess, full_output=True)
+                if converged != 1:
+                    raise RuntimeError(f"倾角能力表在 q_c={q_c:.2f} 处不收敛：{message}")
+                state = np.zeros(8)
+                state[2], state[6] = float(theta), float(q_c)
+                f, tau = solution
+                q_values.append(float(q_c))
+                a_values.append(float(self.derivative(state, np.array([f, f, tau]))[1]))
+            return {"theta": float(theta), "q_c": q_values, "a": a_values}
+        finally:
+            data.qpos[:], data.qvel[:], data.ctrl[:] = qpos, qvel, ctrl
+            self.robot.forward()
+
     def build_reduced(self, hip_angle: float = 0.0) -> ReducedModel:
         """B3：把 8 状态线性化包装成 ReducedModel（供 WheelMPC 使用）。
 
@@ -317,6 +349,8 @@ class HipInputModelBuilder:
         metadata["equilibrium_pitch"] = float(linear.metadata["theta_trim"])
         # A1：稳态能力表（q_c -> a），供 WheelMPC 自动换算规划限值。
         metadata["accel_capacity"] = self.accel_capacity_table()
+        # A3：前倾 15° 时的能力表（C14 的最大倾角），供起步 / 刹车限值使用
+        metadata["accel_capacity_tilted"] = self.tilted_capacity_table(math.radians(15.0))
         return ReducedModel(
             linear.A, linear.B, self.radius, track, inertia,
             source="mujoco-hip-input",

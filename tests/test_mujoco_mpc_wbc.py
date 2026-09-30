@@ -278,7 +278,11 @@ def test_cli_defaults_match_config_defaults():
     assert settings is not None
     assert settings.compensate_hip_torque is False
     assert settings.weights.hip_angle == 50.0
-    assert settings.hip_angle_limit == 0.55
+    # 2026-09-29 第 18 次排查（C29，用户确认）：APP 默认切换为 tuned-fast-accel + 跳跃开启
+    assert settings.hip_angle_limit == 0.8
+    assert settings.limits.use_jerk_limit is True
+    assert settings.tilt_assisted_limits is True and settings.pitch_feedforward is True
+    assert config.jump_enabled is True
 
 
 def test_cli_preset_new_builds_hip_input():

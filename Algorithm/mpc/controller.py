@@ -63,6 +63,21 @@ class MPCSettings:
     auto_accel_limits: bool = True
     accel_fraction_up: float = 0.85     # 起步限值系数（agent2 设计值）
     accel_fraction_down: float = 0.95   # 刹车与零指令恢复限值系数（agent2 设计值）
+    # A2（第 15 次排查）：use_jerk_limit=True 时 max_jerk = 起步限值 / jerk_ramp_time
+    # （加速度在这段时间内从 0 升满），由 WheelMPC 初始化时写回 limits。
+    jerk_ramp_time: float = 0.25
+    # A2：髋角参考前馈。True 时参考第 6/7 列 = q_ss(a_ref) 及其差分（限幅到髋限 90%）；
+    # False = 旧行为（髋角参考为 0）。只对带稳态能力表的 hip_input 模型生效。
+    hip_reference_feedforward: bool = False
+    # A3（第 16 次排查）：起步 / 刹车限值改按“髋限 + 前倾 15°”的持续能力计算
+    # （metadata["accel_capacity_tilted"]），不分高低速；零指令恢复斜坡仍按只用髋的能力。
+    tilt_assisted_limits: bool = False
+    # A3b：倾角参考。超出“只用髋”能力的那部分参考加速度，按髋限处的倾角灵敏度
+    # da/dθ = (a_tilt − a_hip)/θ_tilt 换算成前倾参考，限幅 pitch_feedforward_max、变化率 pitch_ff_rate_limit。
+    # 只给倾角参考，不给髋角参考（A2 的教训）。
+    pitch_feedforward: bool = False
+    pitch_feedforward_max: float = 0.2618   # 15°（C14）
+    pitch_ff_rate_limit: float = 1.0        # [rad/s]
 
 
 @dataclass(frozen=True)
@@ -158,6 +173,13 @@ class WheelMPC:
             input_dim=model.input_dim,
         )
         self.qp.set_model(self.discrete, model.half_track)
+        self._previous_theta_ff = 0.0
+        self.last_theta_ff = 0.0
+        # 外部俯仰参考偏置（第 17 次排查：跳跃 PREPARE 阶段的预倾），叠加在参考第 2 列上，
+        # 沿视界按 pitch_ff_rate_limit 斜坡逼近，避免阶跃
+        self.pitch_bias_target = 0.0
+        self._pitch_bias = 0.0
+        self.pitch_bias_rate = 0.5          # [rad/s] 偏置斜坡速率（第 19 次排查：跳跃蓄力由 APP 设定）
         self.planner = VelocityPlanner(self.settings.limits)
         self.fallback_gain = self._design_fallback_gain()
         self.geometry = ContactGeometry()
@@ -196,11 +218,90 @@ class WheelMPC:
         a_cap = float(np.interp(hip_limit, q_table, a_table))
         up = float(settings.accel_fraction_up) * a_cap
         down = float(settings.accel_fraction_down) * a_cap
+        recover = down
+        tilted = model.metadata.get("accel_capacity_tilted")
+        if settings.tilt_assisted_limits and isinstance(tilted, dict):
+            a_tilt = float(np.interp(hip_limit, np.asarray(tilted["q_c"], dtype=float),
+                                     np.asarray(tilted["a"], dtype=float)))
+            up = float(settings.accel_fraction_up) * a_tilt
+            down = float(settings.accel_fraction_down) * a_tilt
+            _LOGGER.info("A3：前倾 %.1f° 辅助 -> 持续能力 %.2f m/s^2（只用髋 %.2f）",
+                         np.degrees(float(tilted["theta"])), a_tilt, a_cap)
         limits = replace(settings.limits, commanded_acceleration=up,
-                         max_acceleration=down, max_braking=down)
+                         max_acceleration=recover, max_braking=down)
+        if limits.use_jerk_limit:
+            limits = replace(limits, max_jerk=up / max(float(settings.jerk_ramp_time), 1e-3))
         _LOGGER.info("A1：髋限 %.2f rad -> 持续能力 %.2f m/s^2；规划限值 起步 %.2f / "
-                     "刹车 %.2f / 恢复 %.2f m/s^2", hip_limit, a_cap, up, down, down)
+                     "刹车 %.2f / 恢复 %.2f m/s^2；S 曲线 %s（jerk %.2f m/s^3）", hip_limit, a_cap, up, down,
+                     recover, "开" if limits.use_jerk_limit else "关", limits.max_jerk)
         return replace(settings, limits=limits)
+
+    def _apply_pitch_feedforward(self, reference_states: np.ndarray, acceleration: np.ndarray) -> None:
+        """A3b（第 16 次排查）：参考加速度超出髋能力的部分换算成前倾参考。
+
+        θ_ff = sign(a)·clip((|a| − a_hip)/k_θ, 0, θ_max)，其中 a_hip、a_tilt 分别是髋限处只用髋 /
+        前倾 θ_tilt 的持续能力，k_θ = (a_tilt − a_hip)/θ_tilt。沿视界按 pitch_ff_rate_limit 限变化率
+        （起点是上一拍的首节点值），第 3 列取差分。开关关闭或缺表时不动。
+        """
+        if not self.settings.pitch_feedforward:
+            return
+        hip_table = self.model.metadata.get("accel_capacity")
+        tilt_table = self.model.metadata.get("accel_capacity_tilted")
+        if not isinstance(hip_table, dict) or not isinstance(tilt_table, dict):
+            return
+        q_lim = float(self.settings.hip_angle_limit)
+        a_hip = float(np.interp(q_lim, hip_table["q_c"], hip_table["a"]))
+        a_tilt = float(np.interp(q_lim, tilt_table["q_c"], tilt_table["a"]))
+        theta_tilt = float(tilt_table["theta"])
+        k_theta = max((a_tilt - a_hip) / max(theta_tilt, 1e-6), 1e-6)
+        a = np.asarray(acceleration, dtype=float)
+        excess = np.maximum(np.abs(a) - float(self.settings.accel_fraction_up) * a_hip, 0.0)
+        theta_ff = np.sign(a) * np.minimum(excess / k_theta, float(self.settings.pitch_feedforward_max))
+        step = float(self.settings.pitch_ff_rate_limit) * float(self.settings.dt)
+        previous = self._previous_theta_ff
+        for index in range(len(theta_ff)):
+            theta_ff[index] = float(np.clip(theta_ff[index], previous - step, previous + step))
+            previous = theta_ff[index]
+        self._previous_theta_ff = float(theta_ff[1]) if len(theta_ff) > 1 else float(theta_ff[0])
+        reference_states[:, 2] = reference_states[:, 2] + theta_ff
+        reference_states[:, 3] = np.gradient(theta_ff, float(self.settings.dt)) if len(theta_ff) > 1 else 0.0
+        self.last_theta_ff = float(theta_ff[0])
+
+    def _apply_pitch_bias(self, reference_states: np.ndarray) -> None:
+        """外部俯仰偏置：从当前值按 pitch_bias_rate 斜坡逼近 pitch_bias_target，沿视界写入参考。"""
+        target = float(self.pitch_bias_target)
+        if target == 0.0 and self._pitch_bias == 0.0:
+            return
+        step = float(self.pitch_bias_rate) * float(self.settings.dt)
+        values = np.empty(len(reference_states))
+        current = self._pitch_bias
+        for index in range(len(values)):
+            current = float(np.clip(target, current - step, current + step))
+            values[index] = current
+        self._pitch_bias = float(values[1]) if len(values) > 1 else float(values[0])
+        reference_states[:, 2] = reference_states[:, 2] + values
+        reference_states[:, 3] = reference_states[:, 3] + np.gradient(values, float(self.settings.dt))
+
+    def _apply_hip_feedforward(self, reference_states: np.ndarray, acceleration: np.ndarray) -> None:
+        """A2（第 15 次排查）：参考髋角 = 维持参考加速度所需的稳态共模髋角。
+
+        用 metadata["accel_capacity"]（a -> q_c，θ = 0 的稳态族）按 |a| 插值、按 a 的符号取号，
+        限幅到 hip_angle_limit 的 90%；第 7 列取相邻节点差分。开关关闭、模型没有髋状态
+        或没有能力表时原样返回（髋角参考保持 0）。
+        """
+        if not self.settings.hip_reference_feedforward or self.model.state_dim < 8:
+            return
+        capacity = self.model.metadata.get("accel_capacity")
+        if not isinstance(capacity, dict):
+            return
+        a_table = np.asarray(capacity["a"], dtype=float)
+        q_table = np.asarray(capacity["q_c"], dtype=float)
+        a = np.asarray(acceleration, dtype=float)
+        q_ff = np.sign(a) * np.interp(np.abs(a), a_table, q_table)
+        cap = 0.9 * float(self.settings.hip_angle_limit)
+        q_ff = np.clip(q_ff, -cap, cap)
+        reference_states[:, 6] = q_ff
+        reference_states[:, 7] = np.gradient(q_ff, float(self.settings.dt)) if len(q_ff) > 1 else 0.0
 
     def _build_lead_model(self) -> DiscreteModel | None:
         """状态预推用的离散模型（方案 §3.4）。
@@ -239,6 +340,9 @@ class WheelMPC:
         )
         self._previous_force[:] = 0.0
         self._previous_trajectory[:] = 0.0
+        self._previous_theta_ff = 0.0
+        self._pitch_bias = 0.0
+        self.pitch_bias_target = 0.0
         self.consecutive_failures = 0
         self.degraded = False
         self.conditioning_warned = False
@@ -419,6 +523,9 @@ class WheelMPC:
         )
         vector[4] = reference.yaw[0] + wrap_angle(vector[4] - reference.yaw[0])
         reference_states = reference.states(self.model.state_dim)
+        self._apply_hip_feedforward(reference_states, reference.acceleration)
+        self._apply_pitch_feedforward(reference_states, reference.acceleration)
+        self._apply_pitch_bias(reference_states)
         bounds = self.stage_bounds(state)
         warm_start = np.vstack(
             (self._previous_trajectory[1:], self._previous_trajectory[-1:])

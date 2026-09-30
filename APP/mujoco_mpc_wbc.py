@@ -22,6 +22,8 @@ from Algorithm.mpc import ChassisState, MotionCommand, WheelMPC, MPCSettings
 from Algorithm.supervision import (ContactBlock, ControlSupervisor, SupervisedControl,
                                    WbcFeedbackAccumulator)
 from Algorithm.timing import ControlTiming
+from Algorithm.contact_state import ContactEvent, GroundContactEstimator, JumpPhaseHint
+from Algorithm.jump import JumpController, JumpObservation, JumpParams, JumpPhase
 from Algorithm.wbc import (ActuatorLimits, ContactElimination, TaskLevel,
                            height_task_activation, height_task_activation_from_factor,
                            roll_gain_scale, roll_gain_scale_from_factor)
@@ -47,7 +49,7 @@ _TASK_QP_WEIGHTS = {
     "forward_velocity": 50.0,
     "regularization": 1.0,
     # B3（A4-6）：8 状态模型下 regularization 拆成两项——共模跟踪 MPC（100）、差模保持名义（1）。
-    "hip_tracking": 100.0,
+    "hip_tracking": 200.0,  # 2026-09-29 默认 = tuned-fast（第 18 次排查）
     "hip_differential": 1.0,
 }
 
@@ -82,7 +84,11 @@ class SimulationConfig:
     # "held_hip" = 6 状态握髋模型（旧结构，保留作对照，见 --preset old）。
     model_variant: str = "hip_input"
     # B3：共模髋角 guard [rad]。机构极限暂定 0.9（C3 待用户给真实值），只作为停机保护。
-    hip_guard: float = 0.9
+    hip_guard: float = 1.70  # 2026-09-29 默认切换（第 18 次排查，= tuned-fast）
+    # 跳跃（第 17 次排查）：False = 旧行为。True 时 run() 接受 jump_times（脚本起跳）或键盘空格起跳；
+    # THRUST / FLIGHT / LANDING 期间 MPC / WBC 脱离，由 JumpController 直接给执行器力矩；
+    # 落地（LANDING 结束）后 MPC 重新锚定到当前位置并接管。离地检测用 GroundContactEstimator。
+    jump_enabled: bool = True  # 2026-09-29 默认开启（第 18 次排查）；--no-jump 关闭
     # 记录间隔（物理步）：1 = 1 kHz 全物理步（调试/调参），4 = 250 Hz（与 WBC 同步）。
     record_stride: int = 4
     # 无限（viewer）运行的记录裁剪：False（默认）保留全量供事后分析；
@@ -98,8 +104,8 @@ class SimulationConfig:
     # "legacy" = 旧的绝对回零 PD（vg·指令速度 − v − pg·位置误差），仅作对照。
     forward_mode: str = "mpc"  # 2026-09-28 部署为默认（C7）；旧结构用 --preset old
     # 跟踪 MPC 轨迹的误差增益，初值按 ω=10 rad/s 临界阻尼给出（kv = 2ω，kp = ω²），T5 再定。
-    tracking_velocity_gain: float = 20.0   # [1/s]
-    tracking_position_gain: float = 100.0  # [1/s^2]
+    tracking_velocity_gain: float = 14.0   # [1/s]  2026-09-29 默认 = tuned-fast（ω = 7，kv = 2ω）
+    tracking_position_gain: float = 49.0   # [1/s^2] 2026-09-29 默认 = tuned-fast（kp = ω²）
     # WBC 高度任务激活下限：死点排程因子为 0 时用此下限替代。
     # 实测（2026-09-25）：前向 0.2 m/s 扰动下 0/0.5/1.0 无差异（J 9.03，无副作用），
     # 为后续侧向/偏心工况保留高度反馈，默认激活。
@@ -262,7 +268,7 @@ class MuJoCoMpcWbcSimulation:
         self.dynamics = MuJoCoDynamics(self.robot)
         # Hip reactions already belong to the held-hip reduced dynamics. The
         # old isolated-body tau/I correction would count them a second time.
-        resolved_settings = mpc_settings or MPCSettings(compensate_hip_torque=False)
+        resolved_settings = mpc_settings or default_app_mpc_settings()
         if self.config.model_variant == "hip_input":
             if resolved_settings.compensate_hip_torque:
                 # 髋力矩已经是模型输入，再补一次会重复计入（A4-6 的断言）。
@@ -299,6 +305,13 @@ class MuJoCoMpcWbcSimulation:
         self.wbc_calls = 0
         self.mpc_fallbacks = 0
         self.wbc_fallbacks = 0
+        # 跳跃（第 17 次排查）
+        self.jump = JumpController(JumpParams()) if self.config.jump_enabled else None
+        self.contact_estimator = GroundContactEstimator() if self.config.jump_enabled else None
+        self.jump_log: list[dict] = []
+        self._jump_pending: list[float] = []
+        self._last_vz = 0.0
+        self._wheel_dofs = [int(self.robot.model.joint(n).dofadr[0]) for n in ("joint2", "joint4")]
         # R2 诊断用：非 None 时逐拍记录 MPC 求解摘要（默认不记录，无开销）。
         self.solution_log: list | None = None
 
@@ -429,7 +442,8 @@ class MuJoCoMpcWbcSimulation:
         # Pitch remains first; hip posture also stays active during recovery.
         return (balance[0], motion[-1], balance[1]), motion[:-1]
 
-    def run(self, command, duration: float, viewer=None, disturbances=None, allow_driving=False):
+    def run(self, command, duration: float, viewer=None, disturbances=None, allow_driving=False,
+            jump_times=None, jump_key=None):
         """Integrate the scenario; a supplied passive viewer is synced at real-time pace."""
         if np.isnan(duration) or duration <= 0:
             raise ValueError("duration must be positive")
@@ -440,6 +454,7 @@ class MuJoCoMpcWbcSimulation:
             raise ValueError("Create a new simulation for each scenario")
         data = self.robot.data
         pending = sorted(disturbances or (), key=lambda item: item.time)
+        self._jump_pending = sorted(float(v) for v in (jump_times or ()))
         force_until = 0.0
         wrench = np.zeros(6)
         total_steps = None if infinite else int(np.ceil(duration / self.robot.timestep))
@@ -468,6 +483,9 @@ class MuJoCoMpcWbcSimulation:
                 # mj_step advances qpos after computing dynamics; refresh all sensors/matrices.
                 self.robot.forward()
                 contact, forces, counts, other = self.dynamics.sensed_contact()
+                jump_cmd = None
+                if self.jump is not None:
+                    contact, jump_cmd = self._jump_step(contact, forces, jump_key)
                 state = self.state(contact, forces)
                 decision = self.supervisor.update(timestamp=self.robot.time, dt=self.timing.wbc_dt,
                     contact=contact, enabled=True, command_fresh=True,
@@ -521,6 +539,11 @@ class MuJoCoMpcWbcSimulation:
                     predicted_force = ContactElimination.from_matrices(jc, self.dynamics.selection, mass).recover_contact_force(
                         result.qacc, h, torque)
                     predicted_qacc = result.qacc
+                if jump_cmd is not None and jump_cmd.override_balance:
+                    torque = self._jump_torque(jump_cmd, torque)
+                elif jump_cmd is not None and jump_cmd.hip_torque is not None:
+                    # PREPARE 以外的非脱离阶段（RECOVER）：只接管髋，轮子由 WBC 平衡
+                    torque = self._jump_torque(jump_cmd, torque, hip_only=True)
                 data.ctrl[:] = torque
                 self.robot.forward()
                 _, applied_forces, _, _ = self.dynamics.sensed_contact()
@@ -554,7 +577,10 @@ class MuJoCoMpcWbcSimulation:
                     mpc_fallback=False if self.solution is None else self.solution.fallback,
                     wbc_fallback=False if result is None else result.fallback_used)
                 reason = None
-                if other:
+                jumping = jump_cmd is not None and jump_cmd.override_balance
+                if jumping:
+                    reason = None  # 跳跃脱离期间 WBC 不参与控制，其判据不适用
+                elif other:
                     reason = "unexpected_body_contact"
                 elif result is not None and not result.feasible:
                     reason = "wbc_equality_or_torque_failure"
@@ -585,7 +611,10 @@ class MuJoCoMpcWbcSimulation:
                 if np.linalg.norm(data.qvel[:2]) > self.config.speed_guard:
                     self.stop_reason = "speed_guard"
                     break
-                if self.config.hip_guard > 0.0:
+                # 跳跃推力 / 飞行 / 着地期间髋按设计会转过 π 附近，髋角 guard 不适用
+                in_jump = self.jump is not None and self.jump.phase in (JumpPhase.THRUST, JumpPhase.FLIGHT,
+                                                                        JumpPhase.LANDING)
+                if self.config.hip_guard > 0.0 and not in_jump:
                     if abs(self._hip_common(data.qpos[self.hip_q])) > self.config.hip_guard:
                         self.stop_reason = "hip_guard"
                         break
@@ -622,6 +651,67 @@ class MuJoCoMpcWbcSimulation:
         data.ctrl[:] = 0.
         _LOGGER.info("MuJoCo logic test: %s", summary)
         return summary
+
+    # ---- 跳跃（第 17 次排查）------------------------------------------------
+    def request_jump(self) -> bool:
+        return self.jump.request() if self.jump is not None else False
+
+    def _jump_step(self, contact_raw, forces, jump_key):
+        """离地检测 + 跳跃状态机，返回 (滤波后接触, JumpCommand)。"""
+        data = self.robot.data
+        dt = self.timing.wbc_dt
+        now = self.robot.time
+        while self._jump_pending and now >= self._jump_pending[0]:
+            self._jump_pending.pop(0)
+            self.request_jump()
+        if jump_key is not None and jump_key():
+            self.request_jump()
+        rows, _ = self.dynamics.kinematics(data)
+        rates = rows @ data.qvel
+        vz = float(data.qvel[2])
+        specific = (vz - self._last_vz) / dt + 9.81
+        self._last_vz = vz
+        hint = {JumpPhase.THRUST: JumpPhaseHint.THRUST, JumpPhase.FLIGHT: JumpPhaseHint.FLIGHT,
+                JumpPhase.LANDING: JumpPhaseHint.LANDING}.get(self.jump.phase, JumpPhaseHint.NONE)
+        hip = self._hip_common(data.qpos[self.hip_q])
+        out = self.contact_estimator.update(tuple(forces[:, 2]), dt, phase=hint, hip_angle=hip,
+                                            specific_force_z=specific)
+        # 两轮同向（绕 +y）的世界系角速度：joint2 轴 +y、joint4 轴 −y，关节速度是相对机身的，再加机身俯仰角速度
+        wheel = 0.5 * (data.qvel[self._wheel_dofs[0]] - data.qvel[self._wheel_dofs[1]]) + float(rates[2])
+        pitch = float(self.dynamics.attitude(data)[1])
+        obs = JumpObservation(time=now, hip_angle=hip, hip_rate=self._hip_common(data.qvel[self.hip_v]),
+                              wheel_speed=float(wheel), body_forward_speed=float(rates[0]),
+                              body_vertical_speed=vz, pitch=pitch, pitch_rate=float(rates[2]),
+                              contact=out.contact, events=tuple(out.events),
+                              wheel_radius=self.mpc.model.wheel_radius)
+        before = self.jump.phase
+        command = self.jump.step(obs, dt)
+        # PREPARE：把预倾参考交给 MPC（上层平衡负责把机身带到 θ0）；其余阶段偏置归零
+        self.mpc.pitch_bias_target = (float(command.pitch_reference)
+                                      if command.pitch_reference is not None else 0.0)
+        self.mpc.pitch_bias_rate = float(self.jump.p.preload_rate)
+        if self.jump.phase == JumpPhase.FLIGHT and before != JumpPhase.FLIGHT:
+            self.contact_estimator.set_predicted_flight(self.jump.predicted_flight)
+        if self.jump.phase != before:
+            self.jump_log.append(dict(time=now, phase=self.jump.phase.value, pitch=pitch, hip=hip,
+                                      vz=vz, vx=float(rates[0]), z=float(data.qpos[2]),
+                                      contact=list(out.contact)))
+            _LOGGER.info("跳跃阶段 %s -> %s（t=%.3f θ=%.3f q=%.2f vz=%.2f 接触=%s）", before.value,
+                         self.jump.phase.value, now, pitch, hip, vz, out.contact)
+        # 飞行 / 推力 / 着地期间，监督层看到的接触以滤波结果为准（离地时 MPC/WBC 脱离）
+        return out.contact, command
+
+    def _jump_torque(self, command, wbc_torque, hip_only: bool = False):
+        """把共模髋力矩 / 同向轮力矩换算到 ctrl 通道 [j1, j3, j2, j4]。"""
+        torque = np.array(wbc_torque, dtype=float).copy()
+        sign = float(self._hip_axis_sign)
+        if command.hip_torque is not None:
+            torque[0] = command.hip_torque
+            torque[1] = sign * command.hip_torque
+        if not hip_only and command.wheel_torque is not None:
+            torque[2] = command.wheel_torque
+            torque[3] = -command.wheel_torque
+        return np.clip(torque, self.dynamics.limits.lower, self.dynamics.limits.upper)
 
     def _trim_records(self) -> None:
         """Keep a bounded recent window so an unbounded run does not grow memory."""
@@ -668,11 +758,32 @@ _PRESETS = {
     "tuned-best": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.75, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 100.0, "hip_angle": 50.0, "hip_rate": 2.4, "terminal_mode": "scale", "terminal_scale": 5.0}},
     "tuned-fast": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.8, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 300.0, "hip_angle": 50.0, "hip_rate": 3.0, "terminal_mode": "scale", "terminal_scale": 5.0}},
     "tuned-gentle": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0, "hip_guard": 1.7, "tracking_bandwidth": 7.0, "hip_tracking": 200.0, "hip_angle_limit": 0.7, "weights": {"position": 20000.0, "velocity": 1333.3333333333333, "pitch": 150000.0, "pitch_rate": 300.0, "hip_angle": 50.0, "hip_rate": 4.5, "terminal_mode": "scale", "terminal_scale": 5.0}},
+}
+# 第 15/16 次排查：tuned-fast + 起步/刹车优化。每完成一步追加开关（A1 自动限值已默认开启；
+# A2 只启用 S 曲线，髋角前馈实测无收益、未启用；A3b 倾角辅助限值 + 倾角参考）。
+_PRESETS["tuned-fast-accel"] = {**_PRESETS["tuned-fast"], "use_jerk_limit": True,
+                                 # A3b：起步/刹车按"髋限 + 15° 倾角"能力 + 倾角参考（不分高低速）
+                                 "tilt_assisted_limits": True, "pitch_feedforward": True}
+_PRESETS.update({
     # 默认（K2/E5 口径）与旧结构
     "new": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0,
             "hip_guard": 1.70, "hip_angle_limit": 0.55},
     "old": {"model_variant": "held_hip", "forward_mode": "legacy", "preview_lead": 0.0},
-}
+})
+
+
+def default_app_mpc_settings() -> MPCSettings:
+    """APP 默认 MPC 设置（第 18 次排查，2026-09-29 用户指示全部设为默认）= tuned-fast-accel。
+
+    tuned-fast 权重 + hip_angle_limit 0.8；S 曲线 + 倾角辅助限值 + 倾角参考（A2 / A3b）。
+    算法层 ``MPCSettings()`` 的默认值不变，纯算法单元测试不受影响。
+    """
+    preset = _PRESETS["tuned-fast-accel"]
+    base = MPCSettings(compensate_hip_torque=False)
+    return replace(base, weights=replace(base.weights, **preset["weights"]),
+                   hip_angle_limit=float(preset["hip_angle_limit"]),
+                   limits=replace(base.limits, use_jerk_limit=True),
+                   tilt_assisted_limits=True, pitch_feedforward=True)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -705,6 +816,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="Common-mode hip stop line [rad] (guard).")
     parser.add_argument("--preset", choices=tuple(_PRESETS), default=None,
                         help="One-shot preset: new / old / tuned-best / tuned-fast / tuned-gentle.")
+    parser.add_argument("--jump", action="store_true",
+                        help="启用跳跃（默认已开启，保留作兼容）：viewer 中按空格起跳。")
+    parser.add_argument("--no-jump", action="store_true",
+                        help="关闭跳跃（第 18 次排查后默认开启）。")
     return parser
 
 
@@ -733,6 +848,7 @@ def _build_from_args(argv=None):
         forward_mode=pick(args.forward_mode, "forward_mode", base.forward_mode),
         preview_lead=pick(args.preview_lead, "preview_lead", base.preview_lead),
         hip_guard=pick(args.hip_guard, "hip_guard", base.hip_guard),
+        jump_enabled=(base.jump_enabled and not args.no_jump) or bool(args.jump),
     )
     # tuned preset 的 WBC 跟踪带宽（kv = 2ω、kp = ω²）
     omega = preset.get("tracking_bandwidth")
@@ -748,6 +864,15 @@ def _build_from_args(argv=None):
     hip_limit = (args.hip_angle_limit if args.hip_angle_limit is not None
                  else preset.get("hip_angle_limit"))
     settings = None
+    if not args.preset:
+        # 无 preset：APP 默认（tuned-fast-accel，第 18 次排查），只叠加显式给出的参数
+        if config.model_variant == "hip_input":
+            settings = default_app_mpc_settings()
+            if weight_overrides:
+                settings = replace(settings, weights=replace(settings.weights, **weight_overrides))
+            if args.hip_angle_limit is not None:
+                settings = replace(settings, hip_angle_limit=float(args.hip_angle_limit))
+        return config, settings, args
     if weight_overrides or hip_limit is not None or config.model_variant == "hip_input":
         mpc_base = MPCSettings(compensate_hip_torque=False)
         weights = (replace(mpc_base.weights, **weight_overrides) if weight_overrides
@@ -758,6 +883,12 @@ def _build_from_args(argv=None):
             hip_angle_limit=(float(hip_limit) if hip_limit is not None
                              else mpc_base.hip_angle_limit),
         )
+        if preset.get("use_jerk_limit"):
+            settings = replace(settings, limits=replace(settings.limits, use_jerk_limit=True))
+        if preset.get("tilt_assisted_limits") or preset.get("pitch_feedforward"):
+            settings = replace(settings,
+                               tilt_assisted_limits=bool(preset.get("tilt_assisted_limits")),
+                               pitch_feedforward=bool(preset.get("pitch_feedforward")))
     return config, settings, args
 
 
@@ -801,7 +932,17 @@ def main():
             # 2026-09-28 用户要求：相机跟随机身（而不是固定视角）。
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
             viewer.cam.trackbodyid = int(simulation.robot.model.body("base_link").id)
-            summary = simulation.run(driving, duration, viewer, allow_driving=True)
+            # 空格起跳：只在按下沿触发一次
+            space_state = {"down": False}
+
+            def jump_key():
+                pressed = keyboard._pressed("space")
+                edge = pressed and not space_state["down"]
+                space_state["down"] = pressed
+                return edge
+
+            summary = simulation.run(driving, duration, viewer, allow_driving=True,
+                                     jump_key=jump_key if config.jump_enabled else None)
     else:
         summary = simulation.run(command, duration)
     if summary["requested_seconds"] is not None and not np.isfinite(summary["requested_seconds"]):

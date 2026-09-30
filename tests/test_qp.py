@@ -480,8 +480,12 @@ def test_forward_command_pushes_backward_first(measured_model):
 # ---- F3：输入缩放相关的一致性测试（E2 的三个修复的守护）-------------------
 
 def _scaling_setup():
-    from APP.mujoco_mpc_wbc import MuJoCoMpcWbcSimulation, SimulationConfig
-    sim = MuJoCoMpcWbcSimulation(config=SimulationConfig(model_variant="hip_input"))
+    from dataclasses import replace
+    from APP.mujoco_mpc_wbc import MuJoCoMpcWbcSimulation, SimulationConfig, default_app_mpc_settings
+    # C29（2026-09-29）：显式固定 hip_angle_limit = 0.55，与这些用例的原始设定一致，
+    # 不依赖 APP 默认值（第 18 次排查后 APP 默认为 0.8）
+    settings = replace(default_app_mpc_settings(), hip_angle_limit=0.55)
+    sim = MuJoCoMpcWbcSimulation(config=SimulationConfig(model_variant="hip_input"), mpc_settings=settings)
     contact = (True, True)
     _, forces, _, _ = sim.dynamics.sensed_contact()
     bounds = sim.mpc.stage_bounds(sim.state(contact, forces))
