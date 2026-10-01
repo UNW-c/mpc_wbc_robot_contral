@@ -66,6 +66,9 @@ class MPCSettings:
     # A2（第 15 次排查）：use_jerk_limit=True 时 max_jerk = 起步限值 / jerk_ramp_time
     # （加速度在这段时间内从 0 升满），由 WheelMPC 初始化时写回 limits。
     jerk_ramp_time: float = 0.25
+    # B2（第 24 次排查）：刹车段 jerk 爬升时间；None = 与起步共用 max_jerk（旧行为）。
+    # 给定时 max_braking_jerk = 刹车限值 / brake_jerk_ramp_time。
+    brake_jerk_ramp_time: float | None = None
     # A2：髋角参考前馈。True 时参考第 6/7 列 = q_ss(a_ref) 及其差分（限幅到髋限 90%）；
     # False = 旧行为（髋角参考为 0）。只对带稳态能力表的 hip_input 模型生效。
     hip_reference_feedforward: bool = False
@@ -78,6 +81,11 @@ class MPCSettings:
     pitch_feedforward: bool = False
     pitch_feedforward_max: float = 0.2618   # 15°（C14）
     pitch_ff_rate_limit: float = 1.0        # [rad/s]
+    # B1（第 24 次排查）：刹车（参考加速度与参考速度反号）时允许的后仰倾角 [rad]。
+    # None = 与 pitch_feedforward_max 相同（旧行为）。给定时：刹车限值按该倾角的能力表
+    # （metadata["accel_capacity_tilted_brake"]，由 APP 按此角度生成）计算，倾角参考的刹车段
+    # 也用这张表的灵敏度和这个上限。
+    brake_pitch_max: float | None = None
 
 
 @dataclass(frozen=True)
@@ -227,16 +235,28 @@ class WheelMPC:
             down = float(settings.accel_fraction_down) * a_tilt
             _LOGGER.info("A3：前倾 %.1f° 辅助 -> 持续能力 %.2f m/s^2（只用髋 %.2f）",
                          np.degrees(float(tilted["theta"])), a_tilt, a_cap)
+            brake_table = model.metadata.get("accel_capacity_tilted_brake")
+            if settings.brake_pitch_max is not None and isinstance(brake_table, dict):
+                a_brake = float(np.interp(hip_limit, np.asarray(brake_table["q_c"], dtype=float),
+                                          np.asarray(brake_table["a"], dtype=float)))
+                down = float(settings.accel_fraction_down) * a_brake
+                _LOGGER.info("B1：刹车后仰 %.1f° -> 持续能力 %.2f m/s^2", np.degrees(float(brake_table["theta"])),
+                             a_brake)
         limits = replace(settings.limits, commanded_acceleration=up,
                          max_acceleration=recover, max_braking=down)
         if limits.use_jerk_limit:
             limits = replace(limits, max_jerk=up / max(float(settings.jerk_ramp_time), 1e-3))
+            if settings.brake_jerk_ramp_time is not None:
+                limits = replace(limits, max_braking_jerk=down / max(float(settings.brake_jerk_ramp_time), 1e-3))
+                _LOGGER.info("B2：刹车 jerk %.2f m/s^3（爬升 %.2f s）", limits.max_braking_jerk,
+                             float(settings.brake_jerk_ramp_time))
         _LOGGER.info("A1：髋限 %.2f rad -> 持续能力 %.2f m/s^2；规划限值 起步 %.2f / "
                      "刹车 %.2f / 恢复 %.2f m/s^2；S 曲线 %s（jerk %.2f m/s^3）", hip_limit, a_cap, up, down,
                      recover, "开" if limits.use_jerk_limit else "关", limits.max_jerk)
         return replace(settings, limits=limits)
 
-    def _apply_pitch_feedforward(self, reference_states: np.ndarray, acceleration: np.ndarray) -> None:
+    def _apply_pitch_feedforward(self, reference_states: np.ndarray, acceleration: np.ndarray,
+                                 velocity: np.ndarray | None = None) -> None:
         """A3b（第 16 次排查）：参考加速度超出髋能力的部分换算成前倾参考。
 
         θ_ff = sign(a)·clip((|a| − a_hip)/k_θ, 0, θ_max)，其中 a_hip、a_tilt 分别是髋限处只用髋 /
@@ -257,6 +277,16 @@ class WheelMPC:
         a = np.asarray(acceleration, dtype=float)
         excess = np.maximum(np.abs(a) - float(self.settings.accel_fraction_up) * a_hip, 0.0)
         theta_ff = np.sign(a) * np.minimum(excess / k_theta, float(self.settings.pitch_feedforward_max))
+        brake_table = self.model.metadata.get("accel_capacity_tilted_brake")
+        if (self.settings.brake_pitch_max is not None and isinstance(brake_table, dict)
+                and velocity is not None):
+            # B1：刹车段（a 与 v 反号）按刹车倾角表的灵敏度与上限换算
+            a_brake = float(np.interp(q_lim, brake_table["q_c"], brake_table["a"]))
+            theta_brake = float(brake_table["theta"])
+            k_brake = max((a_brake - a_hip) / max(theta_brake, 1e-6), 1e-6)
+            braking = np.asarray(velocity, dtype=float) * a < 0.0
+            theta_b = np.sign(a) * np.minimum(excess / k_brake, float(self.settings.brake_pitch_max))
+            theta_ff = np.where(braking, theta_b, theta_ff)
         step = float(self.settings.pitch_ff_rate_limit) * float(self.settings.dt)
         previous = self._previous_theta_ff
         for index in range(len(theta_ff)):
@@ -524,7 +554,7 @@ class WheelMPC:
         vector[4] = reference.yaw[0] + wrap_angle(vector[4] - reference.yaw[0])
         reference_states = reference.states(self.model.state_dim)
         self._apply_hip_feedforward(reference_states, reference.acceleration)
-        self._apply_pitch_feedforward(reference_states, reference.acceleration)
+        self._apply_pitch_feedforward(reference_states, reference.acceleration, reference.velocity)
         self._apply_pitch_bias(reference_states)
         bounds = self.stage_bounds(state)
         warm_start = np.vstack(

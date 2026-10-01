@@ -63,6 +63,8 @@ class MotionLimits:
     # A2（第 15 次排查）：S 曲线开关。False = 旧行为（只限加速度，加速度阶跃）。
     # 开启时加速度变化率不超过 max_jerk；max_jerk 由 WheelMPC 按起步限值 / jerk_ramp_time 写回。
     use_jerk_limit: bool = False
+    # B2（第 24 次排查）：刹车段（速度幅值减小）单独的 jerk 上限；None = 与 max_jerk 相同（旧行为）。
+    max_braking_jerk: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("max_speed", "max_acceleration", "commanded_acceleration", "max_braking",
@@ -77,6 +79,9 @@ class MotionLimits:
                      "hold_yaw_rate", "hold_pitch", "hold_pitch_rate"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
+        if self.max_braking_jerk is not None and (not np.isfinite(self.max_braking_jerk)
+                                                   or self.max_braking_jerk <= 0):
+            raise ValueError("max_braking_jerk must be finite and positive")
         if not np.isfinite(self.equilibrium_pitch):
             raise ValueError("equilibrium_pitch must be finite")
 
@@ -194,7 +199,7 @@ class _RampState:
         return _RampState(float(position), float(velocity), float(rate))
 
     def advance_jerk(self, target: float, dt: float, acceleration: float, braking: float,
-                     jerk: float, substeps: int = 20) -> _RampState:
+                     jerk: float, substeps: int = 20, braking_jerk: float | None = None) -> _RampState:
         """A2（第 15 次排查）：加速度以 ``jerk`` 为速率变化的 S 曲线斜坡。
 
         每个子步内 jerk 为常数，取值由“下一子步结束后还能否按 ``jerk`` 把加速度减到 0
@@ -206,12 +211,15 @@ class _RampState:
           取满足 ``子步内速度增量 + a1²/(2·jerk) ≤ |剩余速度差|`` 的最大 a1，再与 a_des、
           jerk 限幅取交集，保证不过冲。
         - 吸附：速度差 < 1e-5 m/s 且加速度在一个 jerk 子步以内时直接落到目标。
+        - B2：``braking_jerk`` 给出时，速度幅值减小的子步改用它（None = 与 ``jerk`` 相同）。
         """
         position, velocity, accel = self.position, self.velocity, self.acceleration
         h = float(dt) / int(substeps)
-        jerk = float(jerk)
+        drive_jerk = float(jerk)
+        brake_jerk = drive_jerk if braking_jerk is None else float(braking_jerk)
         for _ in range(int(substeps)):
             remaining = target - velocity
+            jerk = brake_jerk if (velocity * target < 0.0 or abs(target) < abs(velocity)) else drive_jerk
             # 收尾段按二次方程逼近时残差呈几何衰减，1e-5 m/s 以内直接吸附（物理上可忽略）
             if abs(remaining) < 1e-5 and abs(accel) < jerk * h + 1e-12:
                 # 到达：加速度最后一步降到 0，速度吸附到目标
@@ -378,7 +386,7 @@ class VelocityPlanner:
                 if duration <= 0.0:
                     return state
                 return state.advance_jerk(target_v, duration, acceleration, limits.max_braking,
-                                          limits.max_jerk)
+                                          limits.max_jerk, braking_jerk=limits.max_braking_jerk)
         else:
             def step_forward(state: _RampState, duration: float) -> _RampState:
                 return state.advance(target_v, duration, acceleration, limits.max_braking)

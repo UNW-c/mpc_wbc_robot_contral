@@ -273,7 +273,12 @@ class MuJoCoMpcWbcSimulation:
             if resolved_settings.compensate_hip_torque:
                 # 髋力矩已经是模型输入，再补一次会重复计入（A4-6 的断言）。
                 raise ValueError("hip_input 模型下 compensate_hip_torque 必须为 False")
-            reduced = HipInputModelBuilder(self.dynamics).build_reduced(0.0)
+            builder = HipInputModelBuilder(self.dynamics)
+            reduced = builder.build_reduced(0.0)
+            if resolved_settings.brake_pitch_max is not None:
+                # B1（第 24 次排查）：按刹车后仰角另算一张能力表
+                reduced.metadata["accel_capacity_tilted_brake"] = builder.tilted_capacity_table(
+                    float(resolved_settings.brake_pitch_max))
         else:
             reduced = HeldHipModelBuilder(self.dynamics).build()
         self.mpc = WheelMPC(reduced, resolved_settings)
@@ -764,6 +769,11 @@ _PRESETS = {
 _PRESETS["tuned-fast-accel"] = {**_PRESETS["tuned-fast"], "use_jerk_limit": True,
                                  # A3b：起步/刹车按"髋限 + 15° 倾角"能力 + 倾角参考（不分高低速）
                                  "tilt_assisted_limits": True, "pitch_feedforward": True}
+# 第 24 次排查（M1 + B1 + B2，待用户 viewer 确认）：倾角参考变化率 3 rad/s、起步 jerk 爬升 0.15 s、
+# 刹车后仰上限 20°（刹车限值按 20° 能力表）、刹车 jerk 爬升 0.12 s
+_PRESETS["tuned-agile"] = {**_PRESETS["tuned-fast-accel"], "mpc_overrides": {
+    "pitch_ff_rate_limit": 3.0, "jerk_ramp_time": 0.15,
+    "brake_pitch_max": 0.3491, "brake_jerk_ramp_time": 0.12}}
 _PRESETS.update({
     # 默认（K2/E5 口径）与旧结构
     "new": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0,
@@ -815,7 +825,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hip-guard", type=float, default=None,
                         help="Common-mode hip stop line [rad] (guard).")
     parser.add_argument("--preset", choices=tuple(_PRESETS), default=None,
-                        help="One-shot preset: new / old / tuned-best / tuned-fast / tuned-gentle.")
+                        help="One-shot preset: new / old / tuned-best / tuned-fast / tuned-gentle / tuned-fast-accel / tuned-agile.")
     parser.add_argument("--jump", action="store_true",
                         help="启用跳跃（默认已开启，保留作兼容）：viewer 中按空格起跳。")
     parser.add_argument("--no-jump", action="store_true",
@@ -889,6 +899,8 @@ def _build_from_args(argv=None):
             settings = replace(settings,
                                tilt_assisted_limits=bool(preset.get("tilt_assisted_limits")),
                                pitch_feedforward=bool(preset.get("pitch_feedforward")))
+        if preset.get("mpc_overrides"):
+            settings = replace(settings, **preset["mpc_overrides"])
     return config, settings, args
 
 
