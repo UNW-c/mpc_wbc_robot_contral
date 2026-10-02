@@ -800,8 +800,13 @@ _PRESETS["tuned-agile"] = {**_PRESETS["tuned-fast-accel"], "mpc_overrides": {
     "brake_pitch_max": 0.3491, "brake_jerk_ramp_time": 0.08,
     "pitch_feedforward_max": 0.3491, "drive_hip_angle_limit": 1.2,
     # R2' / R1'（第 28 次排查，修加速中途松键的震荡）：中途反转先卸加速度 + 短时脱离软复位。
-    # R4（离地运动学旁证）已实现但默认关闭：在本工况下实测无可测量收益，留给"被推离地"（L0～L3）。
-    "unwind_before_brake": True, "preserve_ramp_on_recontact": True}}
+    # 第 31 次排查（用户要求先部署、viewer 确认中）：
+    #   ZMP 参考 split 0.3：俯仰峰 20.1° → 12.0°，并消掉"受扰后满指令起步"的发散；
+    #   P1 刹车段位置跟随：回弹 0.157 → 0.021 m（代价 t_stop 1.05 → 1.14 s）；
+    # 已知退化：加速中途松键工况（0.3 s 档俯仰约 44.6°、触发 attitude_guard）。
+    # 默认配置（tuned-fast-accel）未启用这两项；viewer 确认后再决定是否切默认。
+    "unwind_before_brake": True, "preserve_ramp_on_recontact": True,
+    "zmp_reference": True, "zmp_split": 0.3, "reanchor_position_while_braking": True}}
     # 注：`contact_idle_off_duration`（V3 离地去抖）实测会扩大失效范围（第 29 次排查），
     # 因此不在 preset 里启用；开关保留在 SimulationConfig，等"卸空期间保持控制"做完后再评估。
 _PRESETS.update({

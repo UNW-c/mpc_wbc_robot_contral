@@ -273,3 +273,45 @@ def test_soft_reanchor_keeps_velocity_acceleration_and_command_flag():
     assert planner._forward.velocity == pytest.approx(1.0)
     assert planner._forward.acceleration == pytest.approx(0.0)
     assert planner.commanded_motion is False
+
+
+# ---- 第 31 次排查 P1：指令刹车期间位置参考跟随实测（减速位移不计入误差） ----
+
+def _brake_planner(reanchor: bool):
+    from Algorithm.mpc.planner import MotionLimits, VelocityPlanner, _RampState, ReferenceMode
+    planner = VelocityPlanner(MotionLimits(reanchor_position_while_braking=reanchor))
+    planner._forward = _RampState(1.0, 2.0, 0.0)
+    planner._yaw = _RampState(0.0, 0.0)
+    planner._initialized = True
+    planner._commanded = True
+    planner.mode = ReferenceMode.DRIVE
+    return planner
+
+
+def test_p1_reanchors_position_while_braking():
+    from Algorithm.mpc.planner import ReferenceFeedback
+    from Algorithm.mpc.planner import MotionCommand
+    planner = _brake_planner(True)
+    # 指令松开 → 进入 BRAKE；实测位置已经比参考落后 0.2 m，开启 P1 后参考应立即跟到实测
+    planner.plan(1.2, 0.0, MotionCommand(velocity=0.0, yaw_rate=0.0), 0.02, 5,
+                 measured_speed=2.0, feedback=ReferenceFeedback(contact=(True, True)))
+    # 重锚到实测 1.2 后，本拍再按斜坡速度前推一小步（2.0 m/s × 0.02 s）
+    assert 1.2 <= planner._forward.position <= 1.26
+
+
+def test_p1_off_keeps_planned_stop_point():
+    from Algorithm.mpc.planner import MotionCommand, ReferenceFeedback
+    planner = _brake_planner(False)
+    planner.plan(1.2, 0.0, MotionCommand(velocity=0.0, yaw_rate=0.0), 0.02, 5,
+                 measured_speed=2.0, feedback=ReferenceFeedback(contact=(True, True)))
+    assert planner._forward.position < 1.06   # 仍从规划停点 1.0 起积分，不跟随实测
+
+
+def test_p1_does_not_apply_without_command():
+    """没有速度指令驱动时（零指令站立 / 受扰恢复）不得重锚，零输入行为保持不变。"""
+    from Algorithm.mpc.planner import MotionCommand, ReferenceFeedback
+    planner = _brake_planner(True)
+    planner._commanded = False
+    planner.plan(1.2, 0.0, MotionCommand(velocity=0.0, yaw_rate=0.0), 0.02, 5,
+                 measured_speed=0.0, feedback=ReferenceFeedback(contact=(True, True)))
+    assert planner._forward.position < 1.06

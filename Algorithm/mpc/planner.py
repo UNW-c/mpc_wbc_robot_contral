@@ -73,6 +73,9 @@ class MotionLimits:
     # R2'（第 28 次排查）：加速度与目标方向相反（例如加速中途松键）时，先用 max_jerk 把加速度
     # 卸到 0，再进入刹车 jerk，避免参考加速度在一拍内大幅翻转。False = 旧行为。
     unwind_before_brake: bool = False
+    # P1（第 31 次排查）：指令刹车期间位置参考跟随实测位置，使"减速段多滑出去的位移"不计入
+    # 位置误差，避免停住后被位置环拉回（回弹）。False = 旧行为（位置参考冻在规划停点）。
+    reanchor_position_while_braking: bool = False
 
     def __post_init__(self) -> None:
         for name in ("max_speed", "max_acceleration", "commanded_acceleration", "max_braking",
@@ -398,6 +401,10 @@ class VelocityPlanner:
             self._forward = _RampState(position, self._forward.velocity, self._forward.acceleration)
         elif self.mode != ReferenceMode.HOLD:
             self.mode = ReferenceMode.BRAKE
+            if limits.reanchor_position_while_braking and self.commanded_motion:
+                # P1：只重锚位置，保留斜坡速度与加速度（减速仍按规划进行）
+                self._forward = _RampState(position, self._forward.velocity,
+                                           self._forward.acceleration)
             stopped = (abs(self.speed) < 1e-12 and abs(self.yaw_rate) < 1e-12
                        and abs(speed) <= limits.hold_speed and abs(yaw_rate) <= limits.hold_yaw_rate
                        and abs(fb.pitch - limits.equilibrium_pitch) <= limits.hold_pitch

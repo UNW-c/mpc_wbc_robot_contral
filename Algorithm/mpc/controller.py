@@ -81,6 +81,16 @@ class MPCSettings:
     pitch_feedforward: bool = False
     pitch_feedforward_max: float = 0.2618   # 15°（C14）
     pitch_ff_rate_limit: float = 1.0        # [rad/s]
+    # Z1（第 31 次排查）：用 ZMP / 质心偏移表述生成参考，替换俯仰前馈的拟合式。
+    # 倒立摆关系 Δ = z_com·a/g（Δ = 质心相对接地点的前后偏移），再按 zmp_split 分配到
+    # 俯仰（Δ_tilt = z_com·sinθ）与曲柄（Δ_crank = r_crank·sin q_c）。zmp_lead 让偏移参考
+    # 提前收回，使 v→0 时 Δ→0（消除停住后收姿态造成的回弹）。
+    zmp_reference: bool = False
+    zmp_split: float = 0.5           # 偏移中由曲柄承担的比例（0 = 全俯仰，1 = 全曲柄）
+    zmp_lead: float = 0.0            # [s] 偏移参考的提前量
+    zmp_com_height: float = 0.180    # [m] 质心相对接地点高度（zmp_probe 实测 0.177~0.182）
+    zmp_crank_radius: float = 0.06   # [m] 曲柄偏心半径（构型给定）
+    zmp_crank_rate_limit: float = 3.0  # [rad/s] 曲柄参考变化率上限
     # B1（第 24 次排查）：刹车（参考加速度与参考速度反号）时允许的后仰倾角 [rad]。
     # None = 与 pitch_feedforward_max 相同（旧行为）。给定时：刹车限值按该倾角的能力表
     # （metadata["accel_capacity_tilted_brake"]，由 APP 按此角度生成）计算，倾角参考的刹车段
@@ -96,6 +106,8 @@ class MPCSettings:
     hip_limit_margin: float = 0.05
     # R2'（第 28 次排查）：中途反转先卸加速度（写入 limits.unwind_before_brake）。
     unwind_before_brake: bool = False
+    # P1（第 31 次排查）：指令刹车期间位置参考跟随实测（减速位移不计入误差，消除回弹）。
+    reanchor_position_while_braking: bool = False
     # R1'（第 28 次排查）：监督层短时离地 / 恢复往返时保留规划器斜坡与 commanded 标记。
     preserve_ramp_on_recontact: bool = False
 
@@ -195,6 +207,8 @@ class WheelMPC:
         self.qp.set_model(self.discrete, model.half_track)
         self._previous_theta_ff = 0.0
         self.last_theta_ff = 0.0
+        self._previous_crank_ff = 0.0
+        self.last_crank_ff = 0.0
         # 外部俯仰参考偏置（第 17 次排查：跳跃 PREPARE 阶段的预倾），叠加在参考第 2 列上，
         # 沿视界按 pitch_ff_rate_limit 斜坡逼近，避免阶跃
         self.pitch_bias_target = 0.0
@@ -272,7 +286,9 @@ class WheelMPC:
             up, down = hold_up, hold_down
         limits = replace(settings.limits, commanded_acceleration=up,
                          max_acceleration=recover, max_braking=down,
-                         unwind_before_brake=bool(settings.unwind_before_brake))
+                         unwind_before_brake=bool(settings.unwind_before_brake),
+                         reanchor_position_while_braking=bool(
+                             settings.reanchor_position_while_braking))
         if limits.use_jerk_limit:
             jerk, bjerk = jerks(up, down)
             limits = replace(limits, max_jerk=jerk, max_braking_jerk=bjerk)
@@ -353,6 +369,49 @@ class WheelMPC:
         floor = min(abs(float(state.hip_angle)) + float(self.settings.hip_limit_margin), float(drive))
         # 只降不升：floor 只用来减缓回落，不能让零指令下的约束跟着髋角往上抬（H3 实测会棘轮到驾驶限值）
         self.active_hip_limit = min(self.active_hip_limit, max(hold, floor, self.active_hip_limit - step))
+
+    def _apply_zmp_reference(self, reference_states: np.ndarray, acceleration: np.ndarray) -> None:
+        """Z1（第 31 次排查）：按 ZMP / 质心偏移表述写俯仰与曲柄参考。
+
+        Δ*(t) = z_com·a(t+lead)/g，其中 a 为参考加速度；Δ_tilt = (1−split)·Δ*、Δ_crank = split·Δ*，
+        再换算 θ = asin(Δ_tilt/z_com)（限幅 pitch_feedforward_max）、q = asin(Δ_crank/r)（限幅髋限 90%）。
+        两者都按各自速率上限沿视界斜坡，起点接上一拍的首节点值，避免阶跃。
+        """
+        settings = self.settings
+        step = float(settings.dt)
+        a = np.asarray(acceleration, dtype=float)
+        lead = max(int(round(float(settings.zmp_lead) / max(step, 1e-9))), 0)
+        if lead:
+            a = np.concatenate([a[lead:], np.full(min(lead, len(a)), a[-1])])
+        delta = float(settings.zmp_com_height) * a / 9.81
+        split = float(np.clip(settings.zmp_split, 0.0, 1.0))
+        z = max(float(settings.zmp_com_height), 1e-6)
+        r = max(float(settings.zmp_crank_radius), 1e-6)
+        theta_max = float(settings.pitch_feedforward_max)
+        crank_max = 0.9 * float(settings.hip_angle_limit)
+        tilt = np.clip(np.arcsin(np.clip((1.0 - split) * np.abs(delta) / z, 0.0, np.sin(theta_max))),
+                       0.0, theta_max) * np.sign(a)
+        crank = np.clip(np.arcsin(np.clip(split * np.abs(delta) / r, 0.0, np.sin(crank_max))),
+                        0.0, crank_max) * np.sign(a)
+        theta_step = float(settings.pitch_ff_rate_limit) * step
+        crank_step = float(settings.zmp_crank_rate_limit) * step
+        previous_theta, previous_crank = self._previous_theta_ff, self._previous_crank_ff
+        for index in range(len(tilt)):
+            previous_theta = float(np.clip(tilt[index], previous_theta - theta_step, previous_theta + theta_step))
+            previous_crank = float(np.clip(crank[index], previous_crank - crank_step, previous_crank + crank_step))
+            tilt[index], crank[index] = previous_theta, previous_crank
+        if len(tilt) > 1:
+            self._previous_theta_ff = float(tilt[1])
+            self._previous_crank_ff = float(crank[1])
+        else:
+            self._previous_theta_ff = float(tilt[0])
+            self._previous_crank_ff = float(crank[0])
+        self.last_theta_ff = float(tilt[0])
+        self.last_crank_ff = float(crank[0])
+        reference_states[:, 2] = reference_states[:, 2] + tilt
+        reference_states[:, 3] = np.gradient(tilt, step) if len(tilt) > 1 else 0.0
+        reference_states[:, 6] = crank
+        reference_states[:, 7] = np.gradient(crank, step) if len(crank) > 1 else 0.0
 
     def _apply_pitch_bias(self, reference_states: np.ndarray) -> None:
         """外部俯仰偏置：从当前值按 pitch_bias_rate 斜坡逼近 pitch_bias_target，沿视界写入参考。"""
@@ -437,6 +496,7 @@ class WheelMPC:
         self._previous_force[:] = 0.0
         self._previous_trajectory[:] = 0.0
         self._previous_theta_ff = 0.0
+        self._previous_crank_ff = 0.0
         self._pitch_bias = 0.0
         self.pitch_bias_target = 0.0
         self.consecutive_failures = 0
@@ -619,8 +679,11 @@ class WheelMPC:
         )
         vector[4] = reference.yaw[0] + wrap_angle(vector[4] - reference.yaw[0])
         reference_states = reference.states(self.model.state_dim)
-        self._apply_hip_feedforward(reference_states, reference.acceleration)
-        self._apply_pitch_feedforward(reference_states, reference.acceleration, reference.velocity)
+        if self.settings.zmp_reference:
+            self._apply_zmp_reference(reference_states, reference.acceleration)
+        else:
+            self._apply_hip_feedforward(reference_states, reference.acceleration)
+            self._apply_pitch_feedforward(reference_states, reference.acceleration, reference.velocity)
         self._apply_pitch_bias(reference_states)
         self._update_hip_limit(state)
         bounds = self.stage_bounds(state)
