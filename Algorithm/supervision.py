@@ -95,6 +95,12 @@ class ControlDecision:
         return self.mode in (ControlMode.GROUND, ControlMode.RECOVERY, ControlMode.SINGLE_SUPPORT)
 
 
+# R1'（第 28 次排查）：短时脱离（急反转造成的瞬时卸空、落地抖动等）走软复位的时间窗口 [s]。
+# 取 touchdown_dwell（0.10 s）的 2.5 倍：覆盖一次卸空-恢复往返，又明显短于真实飞行时间
+# （跳跃约 0.5 s，必须走硬复位）。
+_SOFT_RESET_WINDOW = 0.25
+
+
 class ControlSupervisor:
     def __init__(self, recovery_dwell: float):
         self.recovery_dwell = positive(recovery_dwell, "recovery_dwell")
@@ -211,19 +217,31 @@ class SupervisedControl:
         self.compensation = compensation
         self._wbc_resolver_factory = wbc_resolver_factory
         self._active_mpc_context = None
+        # R1'（第 28 次排查）：上一次脱离地面（motion 禁止）开始的时间；短时往返走软复位
+        self._detached_since = None
 
     def solve_mpc(self, state: ChassisState, command: MotionCommand, decision: ControlDecision,
                   feedback: ReferenceFeedback, estimate: DisturbanceEstimate | None = None):
         state = replace(state, contact=decision.contact)
         if not decision.motion_enabled or not feedback.enabled or not feedback.command_fresh:
-            self.mpc.reset(state)
+            short = (self._detached_since is not None
+                     and decision.timestamp - self._detached_since <= _SOFT_RESET_WINDOW)
+            if self._detached_since is None:
+                self._detached_since = decision.timestamp
+                short = True
+            # R1'：短时脱离（急反转时的瞬时卸载等）只软复位，保留斜坡；超时或禁用才硬复位
+            soft = short and feedback.enabled and feedback.command_fresh
+            self.mpc.reset(state, soft=soft)
             self._active_mpc_context = None
             if self.compensation and self.compensation.space == DisturbanceSpace.REDUCED_ACCELERATION:
                 self.compensation.reset()
             return None
         if self._active_mpc_context != decision.context:
-            self.mpc.reset(state)
+            soft = (self._detached_since is not None
+                    and decision.timestamp - self._detached_since <= _SOFT_RESET_WINDOW)
+            self.mpc.reset(state, soft=soft)
             self._active_mpc_context = decision.context
+        self._detached_since = None
         feedback = replace(feedback, contact=state.contact, pitch=state.pitch, pitch_rate=state.pitch_rate)
         acceleration = None
         if self.compensation and self.compensation.space == DisturbanceSpace.REDUCED_ACCELERATION:

@@ -34,6 +34,58 @@ CONFIGS = {
     "M1+B1-25+B2": dict(pitch_ff_rate_limit=3.0, jerk_ramp_time=0.15,
                         brake_pitch_max=np.radians(25.0), brake_jerk_ramp_time=0.12),
 }
+# 第 26 次排查 S1：在 tuned-agile 基础上继续压
+from APP.mujoco_mpc_wbc import _PRESETS  # noqa: E402
+_AGILE = dict(_PRESETS["tuned-agile"]["mpc_overrides"])
+CONFIGS.update({
+    "agile": _AGILE,
+    "S1a-bj08": {**_AGILE, "brake_jerk_ramp_time": 0.08},
+    "S1a-bj06": {**_AGILE, "brake_jerk_ramp_time": 0.06},
+    "S1b-up20": {**_AGILE, "pitch_feedforward_max": np.radians(20.0)},
+    "S1ab": {**_AGILE, "brake_jerk_ramp_time": 0.08, "pitch_feedforward_max": np.radians(20.0)},
+    "S1-b22": {**_AGILE, "brake_pitch_max": np.radians(22.0)},
+})
+_S1 = {**_AGILE, "brake_jerk_ramp_time": 0.08, "pitch_feedforward_max": np.radians(20.0)}
+CONFIGS.update({
+    # S2 探底：单点线性化（q=0）下直接放宽髋角限值，看模型能否撑住
+    "S2-q0.9": {**_S1, "hip_angle_limit": 0.9},
+    "S2-q1.0": {**_S1, "hip_angle_limit": 1.0},
+    "S2-q1.1": {**_S1, "hip_angle_limit": 1.1},
+    "S2-q1.2": {**_S1, "hip_angle_limit": 1.2},
+    # 第 27 次排查 方案 B：分模式髋限（驾驶 1.0 / 1.2，零指令 0.8）
+    "B-d1.0": {**_S1, "drive_hip_angle_limit": 1.0},
+    "B-d1.2": {**_S1, "drive_hip_angle_limit": 1.2},
+})
+CONFIGS["agile-v2"] = dict(_PRESETS["tuned-agile"]["mpc_overrides"])  # 更新后的 preset 本身
+# 第 28 次排查：显式定义（不依赖 preset 当前内容），避免对比被 preset 更新污染
+_V1 = dict(pitch_ff_rate_limit=3.0, jerk_ramp_time=0.15, brake_pitch_max=np.radians(20.0), brake_jerk_ramp_time=0.12)
+CONFIGS.update({
+    "v1-agile": _V1,                                                            # 第 24 次 tuned-agile
+    "v1-S1ab": {**_V1, "brake_jerk_ramp_time": 0.08, "pitch_feedforward_max": np.radians(20.0)},
+    "v1-M1": dict(pitch_ff_rate_limit=3.0, jerk_ramp_time=0.15),
+    "v1-B1": dict(brake_pitch_max=np.radians(20.0)),
+    "v1-B2": dict(brake_jerk_ramp_time=0.12),
+})
+# 第 28 次排查诊断：在新 tuned-agile 上只改刹车 jerk / 倾角速率
+_AG2 = dict(_PRESETS["tuned-agile"]["mpc_overrides"])
+CONFIGS.update({
+    "d-bj12": {**_AG2, "brake_jerk_ramp_time": 0.12},
+    "d-bj25": {**_AG2, "brake_jerk_ramp_time": 0.25},
+    "d-bjNone": {**_AG2, "brake_jerk_ramp_time": None},
+    "d-ff1": {**_AG2, "pitch_ff_rate_limit": 1.0},
+})
+# 第 28 次排查修复：R2'（unwind / 髋力矩变化率）、R1'（软复位）；R4 在 APP 默认开启（检测器配置）
+CONFIGS.update({
+    "r-unwind": {**_AG2, "unwind_before_brake": True},
+    "r-soft": {**_AG2, "preserve_ramp_on_recontact": True},
+    "r-all": {**_AG2, "unwind_before_brake": True, "preserve_ramp_on_recontact": True},
+})
+
+
+CONFIGS.update({
+    # 单跑 R4 的对照（第 28 次排查：判据修正后仍无收益，默认关闭）
+    "r-r4": _AG2,
+})
 
 
 def settings_for(name: str):
@@ -84,6 +136,7 @@ def run_v4(name: str, max_speed: float = 2.5) -> dict:
         pitch_up=np.degrees(peak_up), pitch_dn=np.degrees(peak_dn),
         pitch_peak=float(np.degrees(np.max(np.abs(th)))), hip_peak=float(np.max(np.abs(hip))),
         v_after=float(np.max(np.abs(v[after]))) if after.any() else float("nan"),
+        tau_hip=float(np.max(np.abs([r["torque"][0] for r in sim.records]))),
         stop_reason=summary["stop_reason"],
         fb="%d/%d" % (summary["mpc_fallbacks"], summary["wbc_fallbacks"]),
     )
@@ -92,14 +145,14 @@ def run_v4(name: str, max_speed: float = 2.5) -> dict:
 def main() -> int:
     names = [a for a in sys.argv[1:] if not a.startswith("--")] or list(CONFIGS)
     print("| cfg | up/down | jerk/bjerk | t_rise | t_stop | dist | t_tilt80 | t_btilt80 | th-hip lag | "
-          "pitch +/- | |pitch|max | hip max | v_after | stop | fb |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+          "pitch +/- | |pitch|max | hip max | tau_hip | v_after | stop | fb |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for n in names:
         r = run_v4(n)
-        print("| %s | %.2f/%.2f | %.1f/%.1f | %.2f | %.2f | %.3f | %.3f | %.3f | %+.3f | %+.1f/%+.1f | %.1f | %.3f | %.3f | %s | %s |" % (
+        print("| %s | %.2f/%.2f | %.1f/%.1f | %.2f | %.2f | %.3f | %.3f | %.3f | %+.3f | %+.1f/%+.1f | %.1f | %.3f | %.2f | %.3f | %s | %s |" % (
             n, r["up"], r["down"], r["jerk"], r["bjerk"], r["t_rise"], r["t_stop"], r["dist"],
             r["t_tilt80"], r["t_btilt80"], r["lag_th_hip"], r["pitch_up"], r["pitch_dn"], r["pitch_peak"],
-            r["hip_peak"], r["v_after"], r["stop_reason"], r["fb"]), flush=True)
+            r["hip_peak"], r["tau_hip"], r["v_after"], r["stop_reason"], r["fb"]), flush=True)
     if "--zero" in sys.argv:
         print()
         print("| zero | " + " | ".join(names) + " |")

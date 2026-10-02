@@ -152,3 +152,124 @@ def test_pitch_feedforward_off_unchanged():
     reference = np.zeros((5, 8))
     mpc._apply_pitch_feedforward(reference, np.full(5, 2.5))
     assert np.all(reference == 0.0)
+
+
+# ---- 第 24 / 27 次排查：刹车 jerk（B2）与分模式髋限（方案 B） ----
+
+def test_braking_jerk_used_only_when_speed_magnitude_decreases():
+    from Algorithm.mpc.planner import _RampState
+    slow, fast = 5.0, 40.0
+    # 起步：速度幅值增大，用 drive jerk
+    up = _RampState(0.0, 0.0, 0.0).advance_jerk(2.0, 0.02, 2.0, 2.0, slow, braking_jerk=fast)
+    assert up.acceleration == pytest.approx(slow * 0.02, rel=1e-6)
+    # 刹车：速度幅值减小，用 braking jerk
+    down = _RampState(0.0, 2.0, 0.0).advance_jerk(0.0, 0.02, 2.0, 2.0, slow, braking_jerk=fast)
+    assert down.acceleration == pytest.approx(-fast * 0.02, rel=1e-6)
+    # braking_jerk=None 与旧行为逐位一致
+    a = _RampState(0.0, 2.0, 0.0).advance_jerk(0.0, 0.02, 2.0, 2.0, slow)
+    b = _RampState(0.0, 2.0, 0.0).advance_jerk(0.0, 0.02, 2.0, 2.0, slow, braking_jerk=None)
+    assert (a.position, a.velocity, a.acceleration) == (b.position, b.velocity, b.acceleration)
+
+
+def _drive_limit_mpc(drive=1.2):
+    from types import SimpleNamespace
+    from Algorithm.mpc.controller import MPCSettings, WheelMPC
+    mpc = WheelMPC.__new__(WheelMPC)
+    mpc.settings = MPCSettings(hip_angle_limit=0.8, drive_hip_angle_limit=drive)
+    mpc.active_hip_limit = 0.8
+    mpc.planner = SimpleNamespace(commanded_motion=False)
+    return mpc
+
+
+def test_drive_hip_limit_opens_only_under_command():
+    from Algorithm.mpc.controller import ChassisState
+    mpc = _drive_limit_mpc()
+    mpc._update_hip_limit(ChassisState(hip_angle=0.0))
+    assert mpc.active_hip_limit == pytest.approx(0.8)
+    mpc.planner.commanded_motion = True
+    mpc._update_hip_limit(ChassisState(hip_angle=0.0))
+    assert mpc.active_hip_limit == pytest.approx(1.2)
+
+
+def test_hold_limit_ramps_down_and_never_ratchets_up():
+    from Algorithm.mpc.controller import ChassisState
+    mpc = _drive_limit_mpc()
+    mpc.active_hip_limit = 1.2
+    step = mpc.settings.hip_limit_relax_rate * mpc.settings.dt
+    # 髋角仍大时回落受 |q| + margin 托底（这里托底 1.15 低于斜坡值 1.2 - step，斜坡起作用）
+    mpc._update_hip_limit(ChassisState(hip_angle=1.1))
+    assert mpc.active_hip_limit == pytest.approx(1.2 - step)
+    # 托底高于斜坡值时，停在 |q| + margin
+    mpc._update_hip_limit(ChassisState(hip_angle=1.18))
+    assert mpc.active_hip_limit == pytest.approx(1.2 - step)
+    mpc.active_hip_limit = 1.2
+    mpc._update_hip_limit(ChassisState(hip_angle=1.18))
+    assert mpc.active_hip_limit == pytest.approx(1.2)
+    # 髋角回到 0 后按斜坡回落，最终停在 hip_angle_limit
+    mpc._update_hip_limit(ChassisState(hip_angle=0.0))
+    assert mpc.active_hip_limit == pytest.approx(1.2 - step)
+    for _ in range(200):
+        mpc._update_hip_limit(ChassisState(hip_angle=0.0))
+    assert mpc.active_hip_limit == pytest.approx(0.8)
+    # 零指令下受扰把髋推到 0.8 以上，约束不跟着抬升
+    mpc._update_hip_limit(ChassisState(hip_angle=1.0))
+    assert mpc.active_hip_limit == pytest.approx(0.8)
+
+
+def test_drive_hip_limit_none_keeps_old_behaviour():
+    from Algorithm.mpc.controller import ChassisState
+    mpc = _drive_limit_mpc(drive=None)
+    mpc.planner.commanded_motion = True
+    mpc._update_hip_limit(ChassisState(hip_angle=1.0))
+    assert mpc.active_hip_limit == pytest.approx(0.8)
+
+
+# ---- 第 28 次排查：R2'（中途反转先卸加速度） / R1'（软复位保留斜坡） ----
+
+def test_unwind_uses_drive_jerk_while_acceleration_opposes_target():
+    from Algorithm.mpc.planner import _RampState
+    drive_jerk, brake_jerk = 5.0, 40.0
+    common = dict(target=0.0, dt=0.02, acceleration=2.0, braking=2.0, jerk=drive_jerk,
+                  substeps=20, braking_jerk=brake_jerk)
+    unwound = _RampState(0.0, 1.0, 2.0).advance_jerk(**common, unwind=True)
+    direct = _RampState(0.0, 1.0, 2.0).advance_jerk(**common, unwind=False)
+    # 反转瞬间：unwind 先用起步 jerk 卸加速度，减速幅度明显小于直接用刹车 jerk。
+    # 两者都还受收尾二次型限制（速度 1.0 m/s、目标 0，一拍最多减 jerk*dt），所以都不为负。
+    assert unwound.acceleration > direct.acceleration
+    assert unwound.acceleration >= 2.0 - drive_jerk * 0.02 - 1e-9
+    assert direct.acceleration >= 2.0 - brake_jerk * 0.02 - 1e-9
+    assert direct.acceleration < 2.0 - drive_jerk * 0.02
+    # 两者最终都能停住
+    for state in (unwound, direct):
+        while state.velocity > 0.0:
+            state = state.advance_jerk(**common, unwind=True)
+        assert state.velocity == pytest.approx(0.0, abs=1e-9)
+
+
+def test_unwind_flag_off_is_unchanged():
+    from Algorithm.mpc.planner import _RampState
+    a = _RampState(0.0, 1.0, 2.0).advance_jerk(0.0, 0.02, 2.0, 2.0, 5.0, braking_jerk=40.0)
+    b = _RampState(0.0, 1.0, 2.0).advance_jerk(0.0, 0.02, 2.0, 2.0, 5.0, braking_jerk=40.0, unwind=False)
+    assert (a.position, a.velocity, a.acceleration) == (b.position, b.velocity, b.acceleration)
+
+
+def test_soft_reanchor_keeps_velocity_acceleration_and_command_flag():
+    from Algorithm.mpc.planner import VelocityPlanner, _RampState
+    planner = VelocityPlanner()
+    planner._forward = _RampState(1.0, 2.0, 1.5)
+    planner._yaw = _RampState(0.3, 0.1)
+    planner._commanded = True
+    planner._initialized = True
+    planner.soft_reanchor(5.0, 0.5)
+    assert planner._forward.position == pytest.approx(5.0)
+    assert planner._forward.velocity == pytest.approx(2.0)
+    assert planner._forward.acceleration == pytest.approx(1.5)
+    assert planner._yaw.position == pytest.approx(0.5)
+    assert planner._yaw.velocity == pytest.approx(0.1)
+    assert planner.commanded_motion is True
+    assert planner.valid is True
+    # 硬复位仍然是旧行为：斜坡清零、commanded 清零
+    planner.reset(speed=1.0, yaw_rate=0.0, position=0.0, yaw=0.0)
+    assert planner._forward.velocity == pytest.approx(1.0)
+    assert planner._forward.acceleration == pytest.approx(0.0)
+    assert planner.commanded_motion is False

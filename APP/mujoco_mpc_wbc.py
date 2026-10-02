@@ -7,6 +7,7 @@ rolling model, not a claim of equivalence to MuJoCo's compliant contact solver.
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass, asdict, replace
 import gzip
 import json
@@ -22,7 +23,8 @@ from Algorithm.mpc import ChassisState, MotionCommand, WheelMPC, MPCSettings
 from Algorithm.supervision import (ContactBlock, ControlSupervisor, SupervisedControl,
                                    WbcFeedbackAccumulator)
 from Algorithm.timing import ControlTiming
-from Algorithm.contact_state import ContactEvent, GroundContactEstimator, JumpPhaseHint
+from Algorithm.contact_state import (ContactEvent, GroundContactConfig, GroundContactEstimator,
+                                   JumpPhaseHint)
 from Algorithm.jump import JumpController, JumpObservation, JumpParams, JumpPhase
 from Algorithm.wbc import (ActuatorLimits, ContactElimination, TaskLevel,
                            height_task_activation, height_task_activation_from_factor,
@@ -89,6 +91,12 @@ class SimulationConfig:
     # THRUST / FLIGHT / LANDING 期间 MPC / WBC 脱离，由 JumpController 直接给执行器力矩；
     # 落地（LANDING 结束）后 MPC 重新锚定到当前位置并接管。离地检测用 GroundContactEstimator。
     jump_enabled: bool = True  # 2026-09-29 默认开启（第 18 次排查）；--no-jump 关闭
+    # R4（第 28 次排查）：非跳跃相位的离地旁证阈值 [m]（机身上升量）。None = 关闭旁证（默认）。
+    # 只凭瞬时法向力会把"急反转导致轮子瞬时卸空"误判为离地（第 28 次排查）。
+    contact_lift_height: float | None = None
+    # V3（第 29 次排查）：非跳跃相位的离地确认时间 [s]。None = 沿用检测器默认（0.008 s，2 个周期）。
+    # 调大（如 0.024 s）可避免把髋力矩反作用造成的瞬时卸空判成离地。
+    contact_idle_off_duration: float | None = None
     # 记录间隔（物理步）：1 = 1 kHz 全物理步（调试/调参），4 = 250 Hz（与 WBC 同步）。
     record_stride: int = 4
     # 无限（viewer）运行的记录裁剪：False（默认）保留全量供事后分析；
@@ -275,6 +283,11 @@ class MuJoCoMpcWbcSimulation:
                 raise ValueError("hip_input 模型下 compensate_hip_torque 必须为 False")
             builder = HipInputModelBuilder(self.dynamics)
             reduced = builder.build_reduced(0.0)
+            if abs(float(resolved_settings.pitch_feedforward_max) - math.radians(15.0)) > 1e-6:
+                # S1（第 26 次排查）：起步倾角上限不是 15° 时，起步能力表按该倾角重算
+                # （限值与倾角参考灵敏度保持同一口径；默认 15° 不触发，行为不变）
+                reduced.metadata["accel_capacity_tilted"] = builder.tilted_capacity_table(
+                    float(resolved_settings.pitch_feedforward_max))
             if resolved_settings.brake_pitch_max is not None:
                 # B1（第 24 次排查）：按刹车后仰角另算一张能力表
                 reduced.metadata["accel_capacity_tilted_brake"] = builder.tilted_capacity_table(
@@ -312,7 +325,15 @@ class MuJoCoMpcWbcSimulation:
         self.wbc_fallbacks = 0
         # 跳跃（第 17 次排查）
         self.jump = JumpController(JumpParams()) if self.config.jump_enabled else None
-        self.contact_estimator = GroundContactEstimator() if self.config.jump_enabled else None
+        estimator_overrides = {}
+        if self.config.contact_lift_height is not None:
+            estimator_overrides["lift_height"] = float(self.config.contact_lift_height)
+        if self.config.contact_idle_off_duration is not None:
+            estimator_overrides["off_duration_idle"] = float(self.config.contact_idle_off_duration)
+        self.contact_estimator = (
+            GroundContactEstimator(GroundContactConfig(**estimator_overrides)
+                                   if estimator_overrides else None)
+            if self.config.jump_enabled else None)
         self.jump_log: list[dict] = []
         self._jump_pending: list[float] = []
         self._last_vz = 0.0
@@ -680,7 +701,8 @@ class MuJoCoMpcWbcSimulation:
                 JumpPhase.LANDING: JumpPhaseHint.LANDING}.get(self.jump.phase, JumpPhaseHint.NONE)
         hip = self._hip_common(data.qpos[self.hip_q])
         out = self.contact_estimator.update(tuple(forces[:, 2]), dt, phase=hint, hip_angle=hip,
-                                            specific_force_z=specific)
+                                            specific_force_z=specific,
+                                            base_rise=float(data.qpos[2]) - self.height)
         # 两轮同向（绕 +y）的世界系角速度：joint2 轴 +y、joint4 轴 −y，关节速度是相对机身的，再加机身俯仰角速度
         wheel = 0.5 * (data.qvel[self._wheel_dofs[0]] - data.qvel[self._wheel_dofs[1]]) + float(rates[2])
         pitch = float(self.dynamics.attitude(data)[1])
@@ -769,11 +791,19 @@ _PRESETS = {
 _PRESETS["tuned-fast-accel"] = {**_PRESETS["tuned-fast"], "use_jerk_limit": True,
                                  # A3b：起步/刹车按"髋限 + 15° 倾角"能力 + 倾角参考（不分高低速）
                                  "tilt_assisted_limits": True, "pitch_feedforward": True}
-# 第 24 次排查（M1 + B1 + B2，待用户 viewer 确认）：倾角参考变化率 3 rad/s、起步 jerk 爬升 0.15 s、
-# 刹车后仰上限 20°（刹车限值按 20° 能力表）、刹车 jerk 爬升 0.12 s
+# 第 24 次排查（M1 + B1 + B2）：倾角参考变化率 3 rad/s、起步 jerk 爬升 0.15 s、
+# 刹车后仰上限 20°（刹车限值按 20° 能力表）、刹车 jerk 爬升 0.12 s。
+# 第 26 / 27 次排查（S1 + 方案 B）：刹车 jerk 爬升 0.08 s、起步前倾 20°；速度指令驱动时髋限 1.2，
+# 零指令站立 / 受扰恢复仍为 0.8（hip_angle_limit），抗扰与 tuned-fast-accel 逐项一致。
 _PRESETS["tuned-agile"] = {**_PRESETS["tuned-fast-accel"], "mpc_overrides": {
     "pitch_ff_rate_limit": 3.0, "jerk_ramp_time": 0.15,
-    "brake_pitch_max": 0.3491, "brake_jerk_ramp_time": 0.12}}
+    "brake_pitch_max": 0.3491, "brake_jerk_ramp_time": 0.08,
+    "pitch_feedforward_max": 0.3491, "drive_hip_angle_limit": 1.2,
+    # R2' / R1'（第 28 次排查，修加速中途松键的震荡）：中途反转先卸加速度 + 短时脱离软复位。
+    # R4（离地运动学旁证）已实现但默认关闭：在本工况下实测无可测量收益，留给"被推离地"（L0～L3）。
+    "unwind_before_brake": True, "preserve_ramp_on_recontact": True}}
+    # 注：`contact_idle_off_duration`（V3 离地去抖）实测会扩大失效范围（第 29 次排查），
+    # 因此不在 preset 里启用；开关保留在 SimulationConfig，等"卸空期间保持控制"做完后再评估。
 _PRESETS.update({
     # 默认（K2/E5 口径）与旧结构
     "new": {"model_variant": "hip_input", "forward_mode": "mpc", "preview_lead": 0.0,
@@ -858,6 +888,9 @@ def _build_from_args(argv=None):
         forward_mode=pick(args.forward_mode, "forward_mode", base.forward_mode),
         preview_lead=pick(args.preview_lead, "preview_lead", base.preview_lead),
         hip_guard=pick(args.hip_guard, "hip_guard", base.hip_guard),
+        contact_lift_height=pick(None, "contact_lift_height", base.contact_lift_height),
+        contact_idle_off_duration=pick(None, "contact_idle_off_duration",
+                                       base.contact_idle_off_duration),
         jump_enabled=(base.jump_enabled and not args.no_jump) or bool(args.jump),
     )
     # tuned preset 的 WBC 跟踪带宽（kv = 2ω、kp = ω²）

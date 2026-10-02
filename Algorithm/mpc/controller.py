@@ -17,7 +17,7 @@ from Algorithm.geometry import wrap_angle
 
 from .contact import ContactAxis, ContactGeometry
 from .model import INPUT_DIM, STATE_DIM, DiscreteModel, ReducedModel
-from .planner import MotionCommand, MotionLimits, ReferenceTrajectory, VelocityPlanner, ReferenceFeedback
+from .planner import MotionCommand, MotionLimits, ReferenceFeedback, ReferenceTrajectory, VelocityPlanner
 from .qp import CondensedMPCQP, QPResult, QPWeights, StageBounds
 from .trajectory import OptimizedTrajectory
 
@@ -86,6 +86,18 @@ class MPCSettings:
     # （metadata["accel_capacity_tilted_brake"]，由 APP 按此角度生成）计算，倾角参考的刹车段
     # 也用这张表的灵敏度和这个上限。
     brake_pitch_max: float | None = None
+    # 方案 B（第 27 次排查）：分模式髋角限值。给定时，规划器 DRIVE / BRAKE（有速度指令及其刹车）
+    # 用这个较大的限值（MPC 髋状态约束 + 起步 / 刹车规划限值）；HOLD / RESET（零指令站立、受扰
+    # 恢复）仍用 hip_angle_limit，零指令恢复限值也按 hip_angle_limit。None = 旧行为。
+    drive_hip_angle_limit: float | None = None
+    # 约束从驾驶限值回落到 hip_angle_limit 的速率 [rad/s]，且不低于 |q_c| + hip_limit_margin，
+    # 避免刹车结束转 HOLD 时约束突降导致 QP 不可行或冲击。
+    hip_limit_relax_rate: float = 0.5
+    hip_limit_margin: float = 0.05
+    # R2'（第 28 次排查）：中途反转先卸加速度（写入 limits.unwind_before_brake）。
+    unwind_before_brake: bool = False
+    # R1'（第 28 次排查）：监督层短时离地 / 恢复往返时保留规划器斜坡与 commanded 标记。
+    preserve_ramp_on_recontact: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,6 +200,8 @@ class WheelMPC:
         self.pitch_bias_target = 0.0
         self._pitch_bias = 0.0
         self.pitch_bias_rate = 0.5          # [rad/s] 偏置斜坡速率（第 19 次排查：跳跃蓄力由 APP 设定）
+        # 方案 B：当前生效的 MPC 髋角约束（分模式，带回落斜坡）
+        self.active_hip_limit = float(self.settings.hip_angle_limit)
         self.planner = VelocityPlanner(self.settings.limits)
         self.fallback_gain = self._design_fallback_gain()
         self.geometry = ContactGeometry()
@@ -222,37 +236,58 @@ class WheelMPC:
             return settings
         q_table = np.asarray(capacity["q_c"], dtype=float)
         a_table = np.asarray(capacity["a"], dtype=float)
-        hip_limit = float(settings.hip_angle_limit)
-        a_cap = float(np.interp(hip_limit, q_table, a_table))
-        up = float(settings.accel_fraction_up) * a_cap
-        down = float(settings.accel_fraction_down) * a_cap
-        recover = down
         tilted = model.metadata.get("accel_capacity_tilted")
-        if settings.tilt_assisted_limits and isinstance(tilted, dict):
-            a_tilt = float(np.interp(hip_limit, np.asarray(tilted["q_c"], dtype=float),
-                                     np.asarray(tilted["a"], dtype=float)))
-            up = float(settings.accel_fraction_up) * a_tilt
-            down = float(settings.accel_fraction_down) * a_tilt
-            _LOGGER.info("A3：前倾 %.1f° 辅助 -> 持续能力 %.2f m/s^2（只用髋 %.2f）",
-                         np.degrees(float(tilted["theta"])), a_tilt, a_cap)
-            brake_table = model.metadata.get("accel_capacity_tilted_brake")
-            if settings.brake_pitch_max is not None and isinstance(brake_table, dict):
-                a_brake = float(np.interp(hip_limit, np.asarray(brake_table["q_c"], dtype=float),
-                                          np.asarray(brake_table["a"], dtype=float)))
-                down = float(settings.accel_fraction_down) * a_brake
-                _LOGGER.info("B1：刹车后仰 %.1f° -> 持续能力 %.2f m/s^2", np.degrees(float(brake_table["theta"])),
-                             a_brake)
+        brake_table = model.metadata.get("accel_capacity_tilted_brake")
+
+        def planning_limits(hip_limit: float) -> tuple[float, float, float]:
+            """按给定髋限计算 (起步, 刹车, 零指令恢复)。"""
+            a_cap = float(np.interp(hip_limit, q_table, a_table))
+            up = float(settings.accel_fraction_up) * a_cap
+            down = float(settings.accel_fraction_down) * a_cap
+            recover = down
+            if settings.tilt_assisted_limits and isinstance(tilted, dict):
+                a_tilt = float(np.interp(hip_limit, np.asarray(tilted["q_c"], dtype=float),
+                                         np.asarray(tilted["a"], dtype=float)))
+                up = float(settings.accel_fraction_up) * a_tilt
+                down = float(settings.accel_fraction_down) * a_tilt
+                if settings.brake_pitch_max is not None and isinstance(brake_table, dict):
+                    a_brake = float(np.interp(hip_limit, np.asarray(brake_table["q_c"], dtype=float),
+                                              np.asarray(brake_table["a"], dtype=float)))
+                    down = float(settings.accel_fraction_down) * a_brake
+            return up, down, recover
+
+        def jerks(up: float, down: float) -> tuple[float, float | None]:
+            jerk = up / max(float(settings.jerk_ramp_time), 1e-3)
+            bjerk = (None if settings.brake_jerk_ramp_time is None
+                     else down / max(float(settings.brake_jerk_ramp_time), 1e-3))
+            return jerk, bjerk
+
+        hold_limit = float(settings.hip_angle_limit)
+        hold_up, hold_down, recover = planning_limits(hold_limit)
+        drive_limit = (float(settings.drive_hip_angle_limit) if settings.drive_hip_angle_limit is not None
+                       else hold_limit)
+        if drive_limit != hold_limit:
+            up, down, _ = planning_limits(drive_limit)
+        else:
+            up, down = hold_up, hold_down
         limits = replace(settings.limits, commanded_acceleration=up,
-                         max_acceleration=recover, max_braking=down)
+                         max_acceleration=recover, max_braking=down,
+                         unwind_before_brake=bool(settings.unwind_before_brake))
         if limits.use_jerk_limit:
-            limits = replace(limits, max_jerk=up / max(float(settings.jerk_ramp_time), 1e-3))
-            if settings.brake_jerk_ramp_time is not None:
-                limits = replace(limits, max_braking_jerk=down / max(float(settings.brake_jerk_ramp_time), 1e-3))
-                _LOGGER.info("B2：刹车 jerk %.2f m/s^3（爬升 %.2f s）", limits.max_braking_jerk,
-                             float(settings.brake_jerk_ramp_time))
-        _LOGGER.info("A1：髋限 %.2f rad -> 持续能力 %.2f m/s^2；规划限值 起步 %.2f / "
-                     "刹车 %.2f / 恢复 %.2f m/s^2；S 曲线 %s（jerk %.2f m/s^3）", hip_limit, a_cap, up, down,
-                     recover, "开" if limits.use_jerk_limit else "关", limits.max_jerk)
+            jerk, bjerk = jerks(up, down)
+            limits = replace(limits, max_jerk=jerk, max_braking_jerk=bjerk)
+        if drive_limit != hold_limit:
+            # 方案 B：零指令（未经速度指令驱动）的刹车 / jerk 按 hip_angle_limit
+            hold_jerk, hold_bjerk = jerks(hold_up, hold_down)
+            limits = replace(limits, hold_braking=hold_down,
+                             hold_jerk=hold_jerk if limits.use_jerk_limit else None,
+                             hold_braking_jerk=hold_bjerk if limits.use_jerk_limit else None)
+            _LOGGER.info("方案 B：驾驶髋限 %.2f rad（起步 %.2f / 刹车 %.2f），零指令髋限 %.2f rad"
+                         "（刹车 %.2f / 恢复 %.2f）", drive_limit, up, down, hold_limit, hold_down, recover)
+        _LOGGER.info("A1：髋限 %.2f rad；规划限值 起步 %.2f / 刹车 %.2f / 恢复 %.2f m/s^2；"
+                     "S 曲线 %s（jerk %.2f / 刹车 jerk %s m/s^3）", hold_limit, up, down, recover,
+                     "开" if limits.use_jerk_limit else "关", limits.max_jerk,
+                     "-" if limits.max_braking_jerk is None else "%.2f" % limits.max_braking_jerk)
         return replace(settings, limits=limits)
 
     def _apply_pitch_feedforward(self, reference_states: np.ndarray, acceleration: np.ndarray,
@@ -269,7 +304,9 @@ class WheelMPC:
         tilt_table = self.model.metadata.get("accel_capacity_tilted")
         if not isinstance(hip_table, dict) or not isinstance(tilt_table, dict):
             return
-        q_lim = float(self.settings.hip_angle_limit)
+        q_lim = float(self.settings.drive_hip_angle_limit
+                      if self.settings.drive_hip_angle_limit is not None and self.planner.commanded_motion
+                      else self.settings.hip_angle_limit)
         a_hip = float(np.interp(q_lim, hip_table["q_c"], hip_table["a"]))
         a_tilt = float(np.interp(q_lim, tilt_table["q_c"], tilt_table["a"]))
         theta_tilt = float(tilt_table["theta"])
@@ -296,6 +333,26 @@ class WheelMPC:
         reference_states[:, 2] = reference_states[:, 2] + theta_ff
         reference_states[:, 3] = np.gradient(theta_ff, float(self.settings.dt)) if len(theta_ff) > 1 else 0.0
         self.last_theta_ff = float(theta_ff[0])
+
+    def _update_hip_limit(self, state: ChassisState) -> None:
+        """方案 B（第 27 次排查）：按规划器模式切换 MPC 髋角约束。
+
+        速度指令驱动中（DRIVE 及其后的 BRAKE）-> drive_hip_angle_limit（立即放开）；
+        其余（零指令站立、HOLD、复位、受扰恢复）-> hip_angle_limit，
+        但以 hip_limit_relax_rate 回落，且不低于 |q_c| + hip_limit_margin（避免约束突降）。
+        """
+        hold = float(self.settings.hip_angle_limit)
+        drive = self.settings.drive_hip_angle_limit
+        if drive is None:
+            self.active_hip_limit = hold
+            return
+        if self.planner.commanded_motion:
+            self.active_hip_limit = float(drive)
+            return
+        step = float(self.settings.hip_limit_relax_rate) * float(self.settings.dt)
+        floor = min(abs(float(state.hip_angle)) + float(self.settings.hip_limit_margin), float(drive))
+        # 只降不升：floor 只用来减缓回落，不能让零指令下的约束跟着髋角往上抬（H3 实测会棘轮到驾驶限值）
+        self.active_hip_limit = min(self.active_hip_limit, max(hold, floor, self.active_hip_limit - step))
 
     def _apply_pitch_bias(self, reference_states: np.ndarray) -> None:
         """外部俯仰偏置：从当前值按 pitch_bias_rate 斜坡逼近 pitch_bias_target，沿视界写入参考。"""
@@ -360,8 +417,17 @@ class WheelMPC:
         R = np.diag(np.maximum(weights.input_diagonal(self.model.input_dim), 1.0e-6))
         return np.asarray(lqr_gain_from_linearization(self.model.A, self.model.B, Q, R), dtype=float)
 
-    def reset(self, state: ChassisState | None = None) -> None:
-        """重新锚定内部状态（仿真复位、状态机切换后必须调用）。"""
+    def reset(self, state: ChassisState | None = None, *, soft: bool = False) -> None:
+        """重新锚定内部状态（仿真复位、状态机切换后必须调用）。
+
+        R1'（第 28 次排查）：``soft=True`` 且 ``preserve_ramp_on_recontact`` 开启时，只重锚位置 /
+        偏航到实测值，保留规划器的速度、加速度斜坡与 commanded 标记（短时离地 / 恢复往返用）。
+        """
+        if soft and self.settings.preserve_ramp_on_recontact and state is not None:
+            self.planner.soft_reanchor(state.position, state.yaw)
+            self.consecutive_failures = 0
+            self.degraded = False
+            return
         self.planner.reset(
             speed=0.0 if state is None else state.velocity,
             yaw_rate=0.0 if state is None else state.yaw_rate,
@@ -432,7 +498,7 @@ class WheelMPC:
             speed_limit=self.settings.speed_limit if enable else None,
             extra_lower=extra_lower,
             extra_upper=extra_upper,
-            hip_angle_limit=(self.settings.hip_angle_limit
+            hip_angle_limit=(self.active_hip_limit
                              if enable and self.model.input_dim > INPUT_DIM else None),
         )
 
@@ -556,6 +622,7 @@ class WheelMPC:
         self._apply_hip_feedforward(reference_states, reference.acceleration)
         self._apply_pitch_feedforward(reference_states, reference.acceleration, reference.velocity)
         self._apply_pitch_bias(reference_states)
+        self._update_hip_limit(state)
         bounds = self.stage_bounds(state)
         warm_start = np.vstack(
             (self._previous_trajectory[1:], self._previous_trajectory[-1:])

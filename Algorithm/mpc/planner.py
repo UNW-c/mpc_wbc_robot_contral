@@ -65,6 +65,14 @@ class MotionLimits:
     use_jerk_limit: bool = False
     # B2（第 24 次排查）：刹车段（速度幅值减小）单独的 jerk 上限；None = 与 max_jerk 相同（旧行为）。
     max_braking_jerk: float | None = None
+    # 方案 B（第 27 次排查）：零指令（未经速度指令驱动）时的刹车 / jerk 限值；None = 与上面相同。
+    # 由 WheelMPC 按 hip_angle_limit 写回，使零指令站立与受扰恢复的规划与分模式之前一致。
+    hold_braking: float | None = None
+    hold_jerk: float | None = None
+    hold_braking_jerk: float | None = None
+    # R2'（第 28 次排查）：加速度与目标方向相反（例如加速中途松键）时，先用 max_jerk 把加速度
+    # 卸到 0，再进入刹车 jerk，避免参考加速度在一拍内大幅翻转。False = 旧行为。
+    unwind_before_brake: bool = False
 
     def __post_init__(self) -> None:
         for name in ("max_speed", "max_acceleration", "commanded_acceleration", "max_braking",
@@ -199,7 +207,8 @@ class _RampState:
         return _RampState(float(position), float(velocity), float(rate))
 
     def advance_jerk(self, target: float, dt: float, acceleration: float, braking: float,
-                     jerk: float, substeps: int = 20, braking_jerk: float | None = None) -> _RampState:
+                     jerk: float, substeps: int = 20, braking_jerk: float | None = None,
+                     unwind: bool = False) -> _RampState:
         """A2（第 15 次排查）：加速度以 ``jerk`` 为速率变化的 S 曲线斜坡。
 
         每个子步内 jerk 为常数，取值由“下一子步结束后还能否按 ``jerk`` 把加速度减到 0
@@ -212,6 +221,8 @@ class _RampState:
           jerk 限幅取交集，保证不过冲。
         - 吸附：速度差 < 1e-5 m/s 且加速度在一个 jerk 子步以内时直接落到目标。
         - B2：``braking_jerk`` 给出时，速度幅值减小的子步改用它（None = 与 ``jerk`` 相同）。
+        - R2'：``unwind=True`` 时，若当前加速度与朝目标的方向相反，该子步用 ``jerk``
+          （而不是 ``braking_jerk``）把加速度往 0 卸，过零后再按速度幅值选 jerk。
         """
         position, velocity, accel = self.position, self.velocity, self.acceleration
         h = float(dt) / int(substeps)
@@ -220,6 +231,8 @@ class _RampState:
         for _ in range(int(substeps)):
             remaining = target - velocity
             jerk = brake_jerk if (velocity * target < 0.0 or abs(target) < abs(velocity)) else drive_jerk
+            if unwind and accel * remaining < 0.0:
+                jerk = drive_jerk
             # 收尾段按二次方程逼近时残差呈几何衰减，1e-5 m/s 以内直接吸附（物理上可忽略）
             if abs(remaining) < 1e-5 and abs(accel) < jerk * h + 1e-12:
                 # 到达：加速度最后一步降到 0，速度吸附到目标
@@ -270,6 +283,11 @@ class VelocityPlanner:
         return self._yaw.velocity
 
     @property
+    def commanded_motion(self) -> bool:
+        """方案 B：True = 正在执行速度指令，或执行指令后的刹车（尚未进入 HOLD / 复位）。"""
+        return bool(getattr(self, "_commanded", False))
+
+    @property
     def yaw_acceleration(self) -> float:
         return self._yaw.acceleration
 
@@ -287,6 +305,18 @@ class VelocityPlanner:
         self.capability = 1.0
         self._hold_time = self._touchdown_time = self._saturation_time = 0.0
         self._suspended = False
+        self._commanded = False
+
+    def soft_reanchor(self, position: float, yaw: float) -> None:
+        """R1'：只把位置 / 偏航重锚到实测值，保留斜坡速度、加速度和 commanded 标记。"""
+        if not np.all(np.isfinite([position, yaw])):
+            raise ValueError("Reference reanchor must be finite")
+        self._forward = _RampState(float(position), self._forward.velocity, self._forward.acceleration)
+        self._yaw = _RampState(float(yaw), self._yaw.velocity, self._yaw.acceleration)
+        self._initialized = True
+        self._suspended = False
+        self.valid = True
+        self.last_reset_reason = "soft_reanchor"
 
     def _align(self, position: float, yaw: float, speed: float, yaw_rate: float, reason: str,
                reset_position: bool = True) -> None:
@@ -296,6 +326,7 @@ class VelocityPlanner:
         self._yaw = _RampState(yaw, yaw_rate)
         self._initialized = True
         self._hold_time = 0.0
+        self._commanded = False
         self.mode = ReferenceMode.RESET
         self.last_reset_reason = reason
         self.reset_count += 1
@@ -359,6 +390,7 @@ class VelocityPlanner:
         if driving:
             self.mode = ReferenceMode.DRIVE
             self._hold_time = 0.0
+            self._commanded = True
             # The travel target follows the measurement while driving, so the
             # unavoidable acceleration/braking lag is not read as an error.
             # A2: keep the ramp acceleration so the jerk-limited S-curve survives re-anchoring
@@ -381,15 +413,23 @@ class VelocityPlanner:
         # A commanded drive uses the gentler ramp so the starting lean stays small;
         # the zero-command hold and recovery keep the original acceleration limit.
         acceleration = limits.commanded_acceleration if driving else limits.max_acceleration
+        braking, jerk, braking_jerk = limits.max_braking, limits.max_jerk, limits.max_braking_jerk
+        if not self.commanded_motion:
+            # 方案 B：零指令站立 / 受扰恢复沿用 hip_angle_limit 口径的限值
+            if limits.hold_braking is not None:
+                braking = limits.hold_braking
+            if limits.hold_jerk is not None:
+                jerk, braking_jerk = limits.hold_jerk, limits.hold_braking_jerk
         if limits.use_jerk_limit:
             def step_forward(state: _RampState, duration: float) -> _RampState:
                 if duration <= 0.0:
                     return state
-                return state.advance_jerk(target_v, duration, acceleration, limits.max_braking,
-                                          limits.max_jerk, braking_jerk=limits.max_braking_jerk)
+                return state.advance_jerk(target_v, duration, acceleration, braking,
+                                          jerk, braking_jerk=braking_jerk,
+                                          unwind=limits.unwind_before_brake)
         else:
             def step_forward(state: _RampState, duration: float) -> _RampState:
-                return state.advance(target_v, duration, acceleration, limits.max_braking)
+                return state.advance(target_v, duration, acceleration, braking)
         forward, turning = self._forward, self._yaw
         self._forward = step_forward(forward, dt)
         self._yaw = turning.advance(target_w, dt, limits.max_yaw_acceleration, limits.max_yaw_braking)

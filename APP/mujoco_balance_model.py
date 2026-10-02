@@ -305,8 +305,11 @@ class HipInputModelBuilder:
             self.robot.forward()
 
     def tilted_capacity_table(self, theta: float,
-                              hip_angles=(0.0, 0.2, 0.4, 0.55, 0.65, 0.75, 0.8, 0.9, 1.0)) -> dict:
+                              hip_angles=(0.0, 0.2, 0.4, 0.55, 0.65, 0.75, 0.8, 0.9, 1.0,
+                                          1.1, 1.2, 1.3)) -> dict:
         """A3（第 16 次排查）：机身固定前倾 ``theta`` 时的持续加速度能力表（q_c -> a）。
+
+        第 26 次排查 S2：表延伸到 1.3 rad（原止于 1.0，髋限 > 1.0 时插值饱和；q ≤ 1.0 的点不变）。
 
         与第 11 次排查第 0 节同一方法：固定 (theta, q_c)，用非线性 derivative() 解两轮力 f
         与共模髋力矩 tau_c，使 theta_ddot = q_c_ddot = 0，读出 v_dot。不收敛的点直接报错。

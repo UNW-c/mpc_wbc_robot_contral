@@ -81,3 +81,75 @@ def test_imu_conflict_recorded_outside_jump():
     out = _feed(estimator, [(40.0, 40.0)] * 3, specific_force_z=0.5)
     assert out[-1].contact == (True, True)
     assert out[-1].imu_conflict is True
+
+
+# ---- 第 28 次排查 R4：非跳跃相位的离地需要运动学旁证 ----
+
+def test_lift_gate_blocks_false_liftoff_without_evidence():
+    """法向力卸空但机身没有上升、也没失重：不判离地（急反转的瞬时卸载）。"""
+    config = GroundContactConfig(lift_height=0.01)
+    est = GroundContactEstimator(config)
+    out = None
+    for _ in range(5):
+        out = est.update((2.0, 2.0), 0.004, base_rise=0.0, specific_force_z=9.0)
+    assert out.contact == (True, True)
+
+
+def test_lift_gate_allows_liftoff_when_body_rises():
+    config = GroundContactConfig(lift_height=0.01)
+    est = GroundContactEstimator(config)
+    out = None
+    for _ in range(5):
+        out = est.update((2.0, 2.0), 0.004, base_rise=0.05, specific_force_z=9.0)
+    assert out.contact == (False, False)
+
+
+def test_lift_gate_allows_liftoff_on_free_fall():
+    config = GroundContactConfig(lift_height=0.01)
+    est = GroundContactEstimator(config)
+    out = None
+    for _ in range(5):
+        out = est.update((2.0, 2.0), 0.004, base_rise=0.0, specific_force_z=1.0)
+    assert out.contact == (False, False)
+
+
+def test_lift_gate_off_by_default():
+    est = GroundContactEstimator()
+    out = None
+    for _ in range(5):
+        out = est.update((2.0, 2.0), 0.004, base_rise=0.0, specific_force_z=9.0)
+    assert out.contact == (False, False)
+
+
+# ---- 第 29 次排查 V3：非跳跃相位的离地确认时间（去抖） ----
+
+def test_idle_debounce_suppresses_transient_unload():
+    """非跳跃相位：卸空 5 帧（20 ms）不判离地，第 6 帧（24 ms）才判。"""
+    config = GroundContactConfig(off_duration_idle=0.024)
+    est = GroundContactEstimator(config)
+    out = None
+    for _ in range(5):
+        out = est.update((2.0, 2.0), _DT)
+    assert out.contact == (True, True)
+    out = est.update((2.0, 2.0), _DT)
+    assert out.contact == (False, False)
+    assert ContactEvent.LIFTOFF in out.events
+
+
+def test_idle_debounce_does_not_delay_jump_phases():
+    """推力 / 飞行相位仍用 off_duration（2 帧），起跳判定不受去抖影响。"""
+    config = GroundContactConfig(off_duration_idle=0.024)
+    est = GroundContactEstimator(config)
+    out = None
+    for _ in range(2):
+        out = est.update((0.0, 0.0), _DT, phase=JumpPhaseHint.THRUST, hip_angle=2.5)
+    assert out.contact == (False, False)
+
+
+def test_idle_debounce_default_is_old_behaviour():
+    est = GroundContactEstimator()
+    assert est.idle_off_duration == pytest.approx(est.config.off_duration)
+    out = None
+    for _ in range(2):
+        out = est.update((0.0, 0.0), _DT)
+    assert out.contact == (False, False)   # 默认仍是 2 帧
