@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATHS = {
     "plane": ROOT / "URDF_Model" / "mjcf" / "URDF_Model_plane.xml",
     "rough": ROOT / "URDF_Model" / "mjcf" / "URDF_Model_rough.xml",
+    # RMUC 2026 场地地面（替代无限平面）。与 plane/rough 并存，走 main.py --terrain field
+    "field": ROOT / "URDF_Model" / "mjcf" / "URDF_Model_field.xml",
 }
 
 
@@ -65,7 +67,7 @@ class YawConfig:
     kp: float = 1.0
     kd: float = 0.65
     torque_limit: float = 0.8
-    command_rate: float = 1.2
+    command_rate: float = 9.6
 
 
 @dataclass(frozen=True)

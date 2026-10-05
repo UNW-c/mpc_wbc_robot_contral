@@ -30,8 +30,8 @@ from Algorithm.wbc import (ActuatorLimits, ContactElimination, TaskLevel,
                            height_task_activation, height_task_activation_from_factor,
                            roll_gain_scale, roll_gain_scale_from_factor)
 from Algorithm.wbc.task_qp import task_qp_resolver_factory
-from APP.mujoco_robot import MuJoCoRobot
-from APP.config import ROOT
+from APP.mujoco_robot import MuJoCoRobot, ground_geom_ids
+from APP.config import MODEL_PATHS, ROOT
 from APP.mujoco_balance_model import HeldHipModelBuilder, HipInputModelBuilder
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,6 +74,9 @@ class SimulationConfig:
     # 实验性 |roll|/|pitch| 停机线，取自用户的 45° 上限。
     # 它是测试保护，不是控制器参数；超过即停机并记为失败。
     attitude_guard: float = 0.785
+    # 保护触发后的动作："stop" = 结束仿真（旧行为，默认）；"reset" = 就地复位机器人并继续仿真，
+    # 供交互测试使用（否则姿态一发散 viewer 就关掉）。nonfinite_state 始终结束。
+    guard_action: str = "stop"
     # WBC 采样 MPC 轨迹的前瞻时长 [s]。0（T4 默认）= 按实际时刻采样：MPC 刷新的
     # 那一拍轨迹第 0 节点就是实测状态，此时 PD 误差为 0 是正确的；两次刷新之间
     # 误差自然增长，由 WBC 的 PD 纠正（真正的反馈）；前馈只来自 sample.acceleration。
@@ -91,6 +94,9 @@ class SimulationConfig:
     # THRUST / FLIGHT / LANDING 期间 MPC / WBC 脱离，由 JumpController 直接给执行器力矩；
     # 落地（LANDING 结束）后 MPC 重新锚定到当前位置并接管。离地检测用 GroundContactEstimator。
     jump_enabled: bool = True  # 2026-09-29 默认开启（第 18 次排查）；--no-jump 关闭
+    # 地形（场地部署）：MODEL_PATHS 的键。默认 "plane" 与旧行为完全一致；
+    # "field" = RMUC 2026 场地（URDF_Model/mjcf/URDF_Model_field.xml）。
+    terrain: str = "plane"
     # R4（第 28 次排查）：非跳跃相位的离地旁证阈值 [m]（机身上升量）。None = 关闭旁证（默认）。
     # 只凭瞬时法向力会把"急反转导致轮子瞬时卸空"误判为离地（第 28 次排查）。
     contact_lift_height: float | None = None
@@ -160,7 +166,8 @@ class MuJoCoDynamics:
         self.model = robot.model
         self.wheels = tuple(int(self.model.geom(n).id) for n in
                             ("right_wheel_collision", "left_wheel_collision"))
-        self.floor = int(self.model.geom("floor").id)
+        # 地形可能由多个 geom 组成（field 地形是 45 个 field_*），判定见 ground_geom_ids()
+        self.ground_geoms = frozenset(ground_geom_ids(self.model))
         self.selection = np.zeros((self.model.nu, self.model.nv))
         for actuator in range(self.model.nu):
             joint = self.model.actuator_trnid[actuator, 0]
@@ -186,10 +193,13 @@ class MuJoCoDynamics:
         for index in range(data.ncon):
             contact = data.contact[index]
             pair = (int(contact.geom1), int(contact.geom2))
-            if self.floor not in pair:
+            if pair[0] in self.ground_geoms:
+                geom = pair[1]
+            elif pair[1] in self.ground_geoms:
+                geom = pair[0]
+            else:
                 other += 1
                 continue
-            geom = pair[1] if pair[0] == self.floor else pair[0]
             if geom not in self.wheels:
                 other += 1
                 continue
@@ -272,7 +282,7 @@ class MuJoCoMpcWbcSimulation:
     def __init__(self, config: SimulationConfig | None = None, initial_pitch: float = 0.0,
                  mpc_settings: MPCSettings | None = None):
         self.config = config or SimulationConfig()
-        self.robot = MuJoCoRobot.load("plane")
+        self.robot = MuJoCoRobot.load(self.config.terrain)
         self.dynamics = MuJoCoDynamics(self.robot)
         # Hip reactions already belong to the held-hip reduced dynamics. The
         # old isolated-body tau/I correction would count them a second time.
@@ -469,7 +479,7 @@ class MuJoCoMpcWbcSimulation:
         return (balance[0], motion[-1], balance[1]), motion[:-1]
 
     def run(self, command, duration: float, viewer=None, disturbances=None, allow_driving=False,
-            jump_times=None, jump_key=None):
+            jump_times=None, jump_key=None, reset_key=None):
         """Integrate the scenario; a supplied passive viewer is synced at real-time pace."""
         if np.isnan(duration) or duration <= 0:
             raise ValueError("duration must be positive")
@@ -479,6 +489,20 @@ class MuJoCoMpcWbcSimulation:
         if self.records:
             raise ValueError("Create a new simulation for each scenario")
         data = self.robot.data
+        # 场地交互只观察有限状态的保护事件，让控制器自行尝试恢复。
+        # NaN/Inf 仍必须结束；R 键手动复位留待后续，不在此处接入。
+        observe_field_guards = viewer is not None and self.config.terrain == "field"
+        observed_guards = {"control": None, "state": None}
+        if observe_field_guards:
+            _LOGGER.info("场地 viewer：保护越限仅记录，不自动复位或关闭；按 R 手动复位")
+
+        def observe_guard(channel: str, reason: str | None) -> None:
+            if observed_guards[channel] != reason:
+                if reason is not None:
+                    _LOGGER.warning("场地保护 %s：仅记录，t=%.3f；保持当前状态继续控制",
+                                    reason, self.robot.time)
+                observed_guards[channel] = reason
+
         pending = sorted(disturbances or (), key=lambda item: item.time)
         self._jump_pending = sorted(float(v) for v in (jump_times or ()))
         force_until = 0.0
@@ -487,6 +511,13 @@ class MuJoCoMpcWbcSimulation:
         step = 0
         while total_steps is None or step < total_steps:
             step_wall_start = time.perf_counter()
+            if viewer is not None and reset_key is not None and reset_key():
+                _LOGGER.info("用户按 R 手动复位：t=%.3f", self.robot.time)
+                self._recover_from_guard(viewer)
+                force_until = 0.0
+                wrench[:] = 0.0
+                observed_guards = {"control": None, "state": None}
+                viewer.sync()
             while pending and self.robot.time >= pending[0].time:
                 push = pending.pop(0)
                 data.qvel[0:3] += np.asarray(push.delta_velocity, dtype=float)
@@ -616,9 +647,15 @@ class MuJoCoMpcWbcSimulation:
                     reason = "negative_predicted_normal_force"
                 elif not self.dynamics.limits.contains(torque):
                     reason = "torque_limit"
-                if reason:
-                    self.stop_reason = reason
-                    break
+                if observe_field_guards:
+                    observe_guard("control", reason)
+                elif reason:
+                    if not self._guard_action(reason, viewer):
+                        break
+                    if viewer is not None:
+                        viewer.sync()
+                    step += 1
+                    continue
             previous = data.qpos[:3].copy()
             yaw = quaternion_yaw(data.qpos[3:7])
             self.robot.step()
@@ -631,19 +668,26 @@ class MuJoCoMpcWbcSimulation:
                 self.records.append(self._sample_record())
             attitude = self.dynamics.attitude(data)
             if self.config.guard_enabled:
-                if max(abs(attitude[:2])) > self.config.attitude_guard:
-                    self.stop_reason = "attitude_guard"
-                    break
-                if np.linalg.norm(data.qvel[:2]) > self.config.speed_guard:
-                    self.stop_reason = "speed_guard"
-                    break
                 # 跳跃推力 / 飞行 / 着地期间髋按设计会转过 π 附近，髋角 guard 不适用
                 in_jump = self.jump is not None and self.jump.phase in (JumpPhase.THRUST, JumpPhase.FLIGHT,
                                                                         JumpPhase.LANDING)
-                if self.config.hip_guard > 0.0 and not in_jump:
-                    if abs(self._hip_common(data.qpos[self.hip_q])) > self.config.hip_guard:
-                        self.stop_reason = "hip_guard"
+                guard_reason = None
+                if max(abs(attitude[:2])) > self.config.attitude_guard:
+                    guard_reason = "attitude_guard"
+                elif np.linalg.norm(data.qvel[:2]) > self.config.speed_guard:
+                    guard_reason = "speed_guard"
+                elif self.config.hip_guard > 0.0 and not in_jump and abs(
+                        self._hip_common(data.qpos[self.hip_q])) > self.config.hip_guard:
+                    guard_reason = "hip_guard"
+                if observe_field_guards:
+                    observe_guard("state", guard_reason)
+                elif guard_reason is not None:
+                    if not self._guard_action(guard_reason, viewer):
                         break
+                    if viewer is not None:
+                        viewer.sync()
+                    step += 1
+                    continue
             if viewer is not None:
                 # Passive viewer pump plus real-time pacing; closing the window stops the run.
                 viewer.sync()
@@ -679,6 +723,50 @@ class MuJoCoMpcWbcSimulation:
         return summary
 
     # ---- 跳跃（第 17 次排查）------------------------------------------------
+
+    def _guard_action(self, reason: str, viewer) -> bool:
+        """保护触发时的处理。True = 已就地复位、继续仿真；False = 结束仿真。
+
+        ``nonfinite_state`` 不能继续（状态已污染），无论哪种模式都结束。
+        """
+        if self.config.guard_action != "reset" or reason == "nonfinite_state":
+            self.stop_reason = reason
+            return False
+        _LOGGER.warning("保护触发 %s：就地复位并继续仿真（--guard-action reset）", reason)
+        self._recover_from_guard(viewer)
+        return True
+
+    def _recover_from_guard(self, viewer=None) -> None:
+        """把机器人放回出生位形并重新锚定控制栈。供主动复位和 ``--guard-action reset`` 使用。
+
+        实体复位：``qpos = model.qpos0``（initialize_pose 已把它设为场上着地位形）、
+        qvel / 广义外力 / ctrl 清零。
+        控制栈复位：监督器、接触估计器、WBC 反馈累积器、跳跃状态机各自 reset，
+        并按 ``WheelMPC.reset`` 的文档要求做全量重新锚定（position=None，下次 plan 从实测值锚定）。
+        """
+        data, model = self.robot.data, self.robot.model
+        data.qpos[:] = model.qpos0
+        data.qvel[:] = 0.0
+        data.qfrc_applied[:] = 0.0
+        data.xfrc_applied[:] = 0.0
+        data.ctrl[:] = 0.0
+        if viewer is not None:
+            # 清掉鼠标拖拽残留在 viewer 里的扰动，否则复位后会被立刻再推翻
+            viewer.perturb.active = 0
+            viewer.perturb.select = 0
+        self.robot.forward()
+        self.supervisor.reset()
+        if self.contact_estimator is not None:
+            self.contact_estimator.reset()
+        self.feedback.reset()
+        if self.jump is not None:
+            self.jump.reset()
+        self.mpc.reset(None)
+        self.height = float(data.qpos[2])
+        self.solution = None
+        self._last_vz = 0.0
+        self.distance = 0.0
+
     def request_jump(self) -> bool:
         return self.jump.request() if self.jump is not None else False
 
@@ -834,6 +922,11 @@ def default_app_mpc_settings() -> MPCSettings:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", choices=("stand", "pitch", "pitch_negative"), default="stand")
+    parser.add_argument("--terrain", choices=tuple(MODEL_PATHS), default=None,
+                        help="Ground model from MODEL_PATHS; default plane (infinite flat plane).")
+    parser.add_argument("--guard-action", choices=("stop", "reset"), default=None,
+                        help="What to do when a guard trips: stop the run (default) or "
+                             "reset the robot in place and keep simulating.")
     parser.add_argument("--duration", type=float,
                         help="Simulated seconds; omit for an unbounded viewer run "
                              "or the headless default of 60 s.")
@@ -886,6 +979,8 @@ def _build_from_args(argv=None):
     base = SimulationConfig()
     config = replace(
         base,
+        terrain=pick(args.terrain, None, base.terrain),
+        guard_action=pick(args.guard_action, None, base.guard_action),
         attitude_guard=pick(args.attitude_guard, None, base.attitude_guard),
         speed_guard=pick(args.speed_guard, None, base.speed_guard),
         wbc_backend=pick(args.wbc_backend, None, base.wbc_backend),
@@ -973,7 +1068,8 @@ def main():
 
         keyboard = KeyboardCommandSource()
         _LOGGER.info("Viewer mode: real-time pacing; close the window to stop. "
-                     "Keyboard up/down = speed, left/right = yaw; available=%s", keyboard.available)
+                     "Keyboard up/down = speed, left/right = yaw, R = manual reset; available=%s",
+                     keyboard.available)
 
         def driving(_time):
             return MotionCommand(velocity=keyboard.read(), yaw_rate=keyboard.read_yaw_rate())
@@ -982,17 +1078,24 @@ def main():
             # 2026-09-28 用户要求：相机跟随机身（而不是固定视角）。
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
             viewer.cam.trackbodyid = int(simulation.robot.model.body("base_link").id)
-            # 空格起跳：只在按下沿触发一次
-            space_state = {"down": False}
+            # 空格起跳和 R 复位均只响应按下沿，按住不反复触发。
+            key_state = {"space": False, "r": False}
 
-            def jump_key():
-                pressed = keyboard._pressed("space")
-                edge = pressed and not space_state["down"]
-                space_state["down"] = pressed
+            def key_edge(name):
+                pressed = keyboard._pressed(name)
+                edge = pressed and not key_state[name]
+                key_state[name] = pressed
                 return edge
 
+            def jump_key():
+                return key_edge("space")
+
+            def reset_key():
+                return key_edge("r")
+
             summary = simulation.run(driving, duration, viewer, allow_driving=True,
-                                     jump_key=jump_key if config.jump_enabled else None)
+                                     jump_key=jump_key if config.jump_enabled else None,
+                                     reset_key=reset_key)
     else:
         summary = simulation.run(command, duration)
     if summary["requested_seconds"] is not None and not np.isfinite(summary["requested_seconds"]):

@@ -1,0 +1,178 @@
+[
+  {
+    "backend": "nullspace",
+    "completed": true,
+    "stop_reason": null,
+    "simulated": 2.9999999999997806,
+    "requested": 3.0,
+    "L0": 0.28,
+    "phi0": -0.12631416225531705,
+    "wbc_calls": 750,
+    "fallback": 0,
+    "clip": 0,
+    "infeasible": 0,
+    "solver_error": 0,
+    "max_abs_pitch": 3.8318319361412764e-05,
+    "max_abs_roll": 2.495563757844847e-06,
+    "max_abs_yaw": 8.485340471718904e-05,
+    "max_abs_x": 0.04205826128277401,
+    "final_x": -0.04205826128277401,
+    "max_abs_v": 0.029571386854737623,
+    "max_leg_length_error": 0.00045762780242469825,
+    "max_leg_angle_error": 0.0027775667368771795,
+    "tail_pitch_span": 1.0724755973510517e-06,
+    "tail_x_span": 0.03852077839161705,
+    "tail_max_abs_v": 0.029571386854737623,
+    "max_torque": [
+      7.5290288296414545,
+      7.5561408720995855,
+      7.511385575144785,
+      7.55413305417115,
+      0.01515878250263793,
+      0.011752834611186529
+    ],
+    "min_predicted_normal": 71.11821699678856,
+    "max_dynamics_residual": 7.006084721132665e-13,
+    "exhausted_counts": {
+      "pitch": 0,
+      "roll": 0,
+      "yaw": 0,
+      "height": 0,
+      "forward_velocity": 726,
+      "leg_tracking": 0,
+      "leg_differential": 0
+    },
+    "scaled_counts": {
+      "pitch": 0,
+      "roll": 0,
+      "yaw": 0,
+      "height": 0,
+      "forward_velocity": 0,
+      "leg_tracking": 0,
+      "leg_differential": 0
+    },
+    "tail_task_residual_max": {
+      "pitch": 6.808789643208968e-17,
+      "roll": 1.4013313079375145e-17,
+      "yaw": 3.122502256758253e-17,
+      "height": 3.469446951953614e-18,
+      "forward_velocity": 0.011061488813184774,
+      "leg_tracking": 5.551115123125783e-17,
+      "leg_differential": 4.85722573273506e-17
+    },
+    "joint_limits_hit": [],
+    "solve_ms": null,
+    "first_conditioning": {
+      "pitch": 1.0,
+      "leg_differential": 1.0,
+      "roll": 1.0
+    },
+    "last": {
+      "t": 2.996,
+      "pitch": 1.73133851423761e-05,
+      "roll": 2.1362235533762103e-06,
+      "x": -5.942058261282774,
+      "leg": [
+        0.27995592039675704,
+        -0.12431575018180098,
+        0.2799901138917022,
+        -0.125258920018755
+      ],
+      "torque": [
+        -7.5213035210290204,
+        7.549181214023231,
+        7.5044003430757815,
+        -7.546009969010995,
+        -0.010854432722712283,
+        -0.008288036077753712
+      ],
+      "error": null
+    }
+  },
+  {
+    "backend": "wls",
+    "completed": true,
+    "stop_reason": null,
+    "simulated": 2.9999999999997806,
+    "requested": 3.0,
+    "L0": 0.28,
+    "phi0": -0.12631416225531705,
+    "wbc_calls": 750,
+    "fallback": 0,
+    "clip": 0,
+    "infeasible": 0,
+    "solver_error": 0,
+    "max_abs_pitch": 3.8317811243002434e-05,
+    "max_abs_roll": 2.5055029004198623e-06,
+    "max_abs_yaw": 0.0001469687798315719,
+    "max_abs_x": 0.042223186664325674,
+    "final_x": -0.042223186664325674,
+    "max_abs_v": 0.029677397740815497,
+    "max_leg_length_error": 0.00045766793600332534,
+    "max_leg_angle_error": 0.002779045241322442,
+    "tail_pitch_span": 1.7496499077916692e-06,
+    "tail_x_span": 0.03866639635651925,
+    "tail_max_abs_v": 0.029677397740815497,
+    "max_torque": [
+      7.529045737542198,
+      7.556222648439514,
+      7.511543778605114,
+      7.5541503590859715,
+      0.015102905830445754,
+      0.011879985904475077
+    ],
+    "min_predicted_normal": 71.1181828329512,
+    "max_dynamics_residual": 6.914894599155011e-13,
+    "exhausted_counts": {
+      "pitch": 0,
+      "roll": 0,
+      "yaw": 0,
+      "height": 0,
+      "forward_velocity": 0,
+      "leg_tracking": 0,
+      "leg_differential": 0
+    },
+    "scaled_counts": {
+      "pitch": 0,
+      "roll": 0,
+      "yaw": 0,
+      "height": 0,
+      "forward_velocity": 0,
+      "leg_tracking": 0,
+      "leg_differential": 0
+    },
+    "tail_task_residual_max": {
+      "pitch": 0.0,
+      "roll": 0.0,
+      "yaw": 0.0,
+      "height": 0.0,
+      "forward_velocity": 0.0,
+      "leg_tracking": 0.0,
+      "leg_differential": 0.0
+    },
+    "joint_limits_hit": [],
+    "solve_ms": null,
+    "first_conditioning": {},
+    "last": {
+      "t": 2.996,
+      "pitch": 9.66658389971329e-06,
+      "roll": 2.1529456928333583e-06,
+      "x": -5.942223186664326,
+      "leg": [
+        0.2799585622243065,
+        -0.12431649734357905,
+        0.27999277853926685,
+        -0.12526009387091072
+      ],
+      "torque": [
+        -7.521309410210671,
+        7.549175343856614,
+        7.5044012611397255,
+        -7.546006598708185,
+        -0.010871810207962898,
+        -0.008306113475726245
+      ],
+      "error": null
+    }
+  }
+]

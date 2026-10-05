@@ -21,8 +21,11 @@ class ControlTiming:
             if count < 1 or not math.isclose(ratio, count, rel_tol=0.0, abs_tol=1e-9):
                 raise ValueError("控制周期必须是物理步长的整数倍")
             object.__setattr__(self, f"{name}_steps", count)
-        if self.mpc_steps % self.wbc_steps:
-            raise ValueError("MPC 周期必须是 WBC 周期的整数倍")
+        # 2026-10-05（用户批准）：**允许 MPC 与 WBC 异步**。
+        # 原来还要求“MPC 周期必须是 WBC 周期的整数倍”，那是同步单循环的实现产物；
+        # 实际上 WBC 取用的是**带时间戳的轨迹采样**（``sample_at(t)``），两者不必整数对齐，
+        # 各自按自己的 ``mpc_due`` / ``wbc_due`` 节拍走即可。
+        # 只保留“控制周期必须是物理步长整数倍”这一条硬要求（否则采样对不齐）。
 
     def wbc_due(self, physics_step: int) -> bool:
         return physics_step % self.wbc_steps == 0

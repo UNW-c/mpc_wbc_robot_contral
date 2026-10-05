@@ -91,6 +91,12 @@ class MPCSettings:
     zmp_com_height: float = 0.180    # [m] 质心相对接地点高度（zmp_probe 实测 0.177~0.182）
     zmp_crank_radius: float = 0.06   # [m] 曲柄偏心半径（构型给定）
     zmp_crank_rate_limit: float = 3.0  # [rad/s] 曲柄参考变化率上限
+    # 曲柄参考的绝对上限 [rad]。`None` = 沿用 `0.9 * hip_angle_limit`（circleg 原行为，逐位不变）。
+    # 为何需要单独一个字段：`hip_angle_limit` 是**保持段**预算，驱动段实际生效的是
+    # `drive_hip_angle_limit`。当后者远大于前者时（本项目 0.50 vs 0.125），
+    # 曲柄参考会被静态预算截断成 0.1125 rad，使“质心偏移全部由摆腿承担”的策略
+    # 在约 0.9 m/s^2 以上就欠额前馈。
+    zmp_crank_limit: float | None = None
     # B1（第 24 次排查）：刹车（参考加速度与参考速度反号）时允许的后仰倾角 [rad]。
     # None = 与 pitch_feedforward_max 相同（旧行为）。给定时：刹车限值按该倾角的能力表
     # （metadata["accel_capacity_tilted_brake"]，由 APP 按此角度生成）计算，倾角参考的刹车段
@@ -388,7 +394,8 @@ class WheelMPC:
         z = max(float(settings.zmp_com_height), 1e-6)
         r = max(float(settings.zmp_crank_radius), 1e-6)
         theta_max = float(settings.pitch_feedforward_max)
-        crank_max = 0.9 * float(settings.hip_angle_limit)
+        crank_max = (0.9 * float(settings.hip_angle_limit) if settings.zmp_crank_limit is None
+                     else float(settings.zmp_crank_limit))
         tilt = np.clip(np.arcsin(np.clip((1.0 - split) * np.abs(delta) / z, 0.0, np.sin(theta_max))),
                        0.0, theta_max) * np.sign(a)
         crank = np.clip(np.arcsin(np.clip(split * np.abs(delta) / r, 0.0, np.sin(crank_max))),

@@ -41,6 +41,34 @@ def body_yaw(data: Any) -> float:
     return quaternion_yaw(np.asarray(data.qpos[3:7], dtype=float))
 
 
+GROUND_GEOM_PREFIX = "field_"
+LEGACY_GROUND_GEOM_NAME = "floor"
+
+
+def ground_geom_ids(model: Any) -> tuple[int, ...]:
+    """所有构成“地面”的 geom id。
+
+    地形不止一种：``plane`` / ``rough`` 用一个名为 ``floor`` 的平面，``field`` 用
+    RMUC 2026 场地（41 个 ``field_*`` 棱柱 + 4 个 ``field_boundary_*`` 挡板）。
+    ``MuJoCoDynamics.sensed_contact`` 原来只认 ``model.geom("floor")``，在 ``field``
+    地形上轮子压到中心高地 / 斜坡 / 台阶时不会被判成着地，因此改为按名字集合识别。
+
+    判定条件：名字等于 ``floor``（兼容平面地形）或以 ``field_`` 开头，且参与碰撞
+    （``contype`` 或 ``conaffinity`` 非零，用来排除不参与碰撞的 ``field_visual``）。
+
+    新增或重命名地形 geom 时必须同步更新本函数，否则着地判定会失效。
+    """
+    ids = []
+    for index in range(int(model.ngeom)):
+        name = model.geom(index).name or ""
+        if name != LEGACY_GROUND_GEOM_NAME and not name.startswith(GROUND_GEOM_PREFIX):
+            continue
+        if not (model.geom_contype[index] or model.geom_conaffinity[index]):
+            continue
+        ids.append(index)
+    return tuple(ids)
+
+
 @dataclass
 class MuJoCoRobot:
     """Owns all simulator-facing reads and writes used by the controller."""
