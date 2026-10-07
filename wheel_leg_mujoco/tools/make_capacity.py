@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 import time
 from pathlib import Path
@@ -38,6 +37,7 @@ from gbc_mpc_wbc.dynamics import Gbc486Dynamics  # noqa: E402
 from gbc_mpc_wbc.model_builder import (ACCEL_CAPACITY_MAX, ACCEL_CAPACITY_STEP,  # noqa: E402
                                        GRAVITY, LegInputModelBuilder, capacity_path)
 from gbc_mpc_wbc.simulation import gbc486_mpc_settings  # noqa: E402
+from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
 
 
 def main() -> None:
@@ -51,7 +51,7 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     # 能力表的截断原因（力矩/摩擦/单调性）走 INFO，必须打开才能看到
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(default_level="INFO")
 
     model, data = R.load()
     pose = R.standing_pose(model, data, args.leg_length)

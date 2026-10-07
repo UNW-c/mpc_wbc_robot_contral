@@ -31,14 +31,19 @@ WBC→MPC 的反馈回路整体失效。
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from . import _circleg  # noqa: F401
+from .logging_setup import get_logger  # noqa: E402
 from Algorithm.wbc.projection import ContactElimination, HierarchyResult, TaskLevel, TaskOutcome  # noqa: E402
 from Algorithm.wbc.sns import ActuatorLimits, SNSResult, maximum_scale  # noqa: E402
 
 _ZERO_TOLERANCE = 1e-9
 _DYNAMICS_TOLERANCE = 1e-7
+
+_LOGGER = get_logger(__name__)
 
 
 def _hard_system(elimination: ContactElimination, jacobian: np.ndarray,
@@ -120,6 +125,20 @@ class LimitedWeightedResolver:
         scale = maximum_scale(torque_hard, torque_unbounded - torque_hard, limits.lower, limits.upper)
         qacc = qacc_hard + scale * increment
         torque = elimination.recover_torque(qacc, h)
+        # 硬约束解本身越界时（无可用步长）**不能返回越界力矩**：上层会拿到一个物理上做不到的
+        # 控制量，而且调用方无法从 ``feasible=False`` 分辨“是任务被抑制”还是“硬约束不可行”。
+        # 用户 2026-10-07 要求彻底修，不做补丁：这里明确区分并诊断，返回值裁剪到限幅内
+        # （与实际执行一致——MuJoCo 本来也会裁），同时把越界量记进日志便于定位。
+        hard_infeasible = bool(scale <= _ZERO_TOLERANCE)
+        if hard_infeasible:
+            over = np.maximum(np.maximum(torque - limits.upper, limits.lower - torque), 0.0)
+            worst = int(np.argmax(over))
+            _LOGGER.warning(
+                "WBC 硬约束解越界，scale=%.3e（无可用步长）：最大越界 %.3f N·m 在第 %d 号执行器"
+                "（限幅 [%.3f, %.3f]）。已裁剪到限幅内；feasible=False 表示需上层降低需求。",
+                float(scale), float(over[worst]), worst,
+                float(limits.lower[worst]), float(limits.upper[worst]))
+            torque = np.clip(torque, limits.lower, limits.upper)
 
         # ------------------------------------------------------------- 诊断与反馈
         outcomes = []

@@ -1,1 +1,17 @@
-"""GBC486 轮腿的 MPC + WBC 适配层（方案见 ../MPC-WBC部署方案.md）。"""
+"""GBC486 双轮腿的 MPC + WBC 适配层（方案见 ../MPC-WBC部署方案.md）。
+
+模块地图（改代码前先看这张表；下层不依赖上层，上层只通过明确接口调用下层）
+------------------------------------------------------------------------
+`logging_setup.py`   日志唯一入口：handler / 格式 / 级别（只有它允许碰日志配置）
+`robot.py`           模型加载与几何量：腿空间量、站立位形、接触点、雅可比
+`dynamics.py`        WBC 侧动力学量：选择矩阵、轮接触行、闭链行、腿空间行与偏置
+`model_builder.py`   降阶线性化（6 / 8 状态），产出 A/B 与派生量
+`model_grid.py`      腿长 -> 降阶模型参数（方案 A 的查表，数据来自 model_grid_leg_length.json）
+`wbc.py`             WBC 任务集与接触块（"要满足什么"），不含求解器
+`wbc_limited.py`     WBC 求解器（限幅自洽 WLS，"怎么解"）
+`simulation.py`      闭环装配 + run() 循环（采样 / 控制 / 输出 四段解耦）
+`objective.py`       参数寻优评价函数（工具用，不参与运行链路）
+
+离线数据生成（不参与运行链路）：`../tools/make_model_grid.py`、`../tools/make_capacity.py`
+"""
+

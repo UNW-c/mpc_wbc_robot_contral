@@ -22,11 +22,12 @@ import numpy as np
 from scipy.optimize import brentq, fsolve, least_squares
 
 from . import _circleg  # noqa: F401
+from .logging_setup import get_logger  # noqa: E402
 from . import robot as R
 from .dynamics import Gbc486Dynamics, leg_combination  # noqa: E402
 from Algorithm.mpc import ReducedModel  # noqa: E402
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = get_logger(__name__)
 _EPSILON = 1.0e-5
 
 GRAVITY = 9.81

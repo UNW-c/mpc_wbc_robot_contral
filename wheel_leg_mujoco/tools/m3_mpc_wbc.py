@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import logging
 import math
 import subprocess
 import sys
@@ -33,6 +32,7 @@ import numpy as np  # noqa: E402
 from gbc_mpc_wbc.model_builder import pendulum_pole  # noqa: E402
 from gbc_mpc_wbc.simulation import (Disturbance, Gbc486MpcWbcSimulation, SimulationConfig,  # noqa: E402
                                     default_command)
+from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
 
 RESULTS = ROOT / "results"
 PUSH_TIME = 5.0
@@ -106,7 +106,7 @@ def main():
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(default_level="WARNING")
     RESULTS.mkdir(exist_ok=True)
     revision = circleg_revision()  # 启动时立即记录：导入的就是这一版
     rows, model_info = [], None

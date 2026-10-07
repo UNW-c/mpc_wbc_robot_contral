@@ -27,7 +27,6 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUM
 
 import argparse
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -42,6 +41,7 @@ from gbc_mpc_wbc.simulation import Gbc486MpcWbcSimulation, SimulationConfig  # n
 from Algorithm.mpc import MotionCommand  # noqa: E402
 from APP.mujoco_mpc_wbc import _PRESETS  # noqa: E402
 from gbc_mpc_wbc.simulation import MAX_SPEED
+from gbc_mpc_wbc.logging_setup import setup_logging  # noqa: E402
 
 RESULTS = ROOT / "results"
 
@@ -69,7 +69,7 @@ def main():
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(default_level="INFO")
 
     from mujoco import viewer as mujoco_viewer
     from APP.keyboard_task import KeyboardCommandSource

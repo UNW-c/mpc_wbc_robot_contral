@@ -222,8 +222,21 @@ class Gbc486Dynamics:
         return euler_zyx(self.data.qpos[3:7])
 
     def leg_state(self) -> np.ndarray:
-        """``[L_R, φ_R, L_L, φ_L]``。"""
-        return np.array([v for leg in R.LEGS for v in R.leg_polar(self.model, self.data, leg)])
+        """[L_R, phi_R, L_L, phi_L]：腿长与腿摆角，由关节角**解析推导**。
+
+        几何常数在首次调用时从模型一次性读出（``LegKinematics``），之后每拍只做解析
+        链式组合，不再调用 MuJoCo 的位置接口（``data.xpos``）。旧实现保留在
+        ``robot.leg_polar``，仅作对照，不进运行链路。
+        """
+        if getattr(self, "_leg_kinematics", None) is None:
+            from .leg_kinematics import LegKinematics
+            self._leg_kinematics = {leg.name: LegKinematics(self.model, leg) for leg in R.LEGS}
+        values: list[float] = []
+        for leg in R.LEGS:
+            angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
+                      for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+            values.extend(self._leg_kinematics[leg.name].lengths(angles))
+        return np.asarray(values)
 
     def sensed_contact(self):
         """逐轮汇总轮–地接触力（作用在轮上，世界系），以及非轮–地接触数。"""

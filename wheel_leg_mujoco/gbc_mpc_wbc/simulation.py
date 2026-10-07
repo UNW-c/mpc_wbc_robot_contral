@@ -1,14 +1,33 @@
-"""GBC486 MPC + WBC 闭环。
+"""GBC486 轮腿的闭环装配与运行循环（MPC + WBC）。
 
-**结构与 circleg ``APP/mujoco_mpc_wbc.py::MuJoCoMpcWbcSimulation.run`` 一致**：
-``ControlTiming`` 分频 → ``ControlSupervisor`` 判模式 → ``SupervisedControl.solve_mpc``
-→ ``solve_wbc`` → 写 ``data.ctrl``。跳跃、hip_input 专用分支、viewer 相关部分本阶段不用。
+本模块做什么
+------------
+把「模型 / 动力学 / 降阶模型 / WBC 求解器」这些零件装成一条可运行控制链，
+并给出按物理步推进的 ``run()`` 循环。
 
-只做"换模型必须改"的部分：模型（``Gbc486Dynamics`` + 两个降阶模型 Builder）、
-接触块里的闭链行、以及本机器人的 MPC 物理量覆盖（部署方案第 7 节）。
+``run()`` 内的四段是**刻意分开**的（用户 2026-10-07 要求：采样、输出、控制计算解耦；
+MPC 与 WBC 也解耦，因为两者频率不同，按异步运行）：
 
-``model_variant``：``held_leg`` = 6 状态（对应 circleg held_hip）；``leg_input`` = 8 状态
-（对应 circleg hip_input，共模腿摆角为状态、共模腿力矩为输入）。
+    ============  ==================  ===================================
+    阶段          节拍                职责
+    ============  ==================  ===================================
+    采样级        每物理步（1 kHz）   运动学、接触力、离地判定、状态、监督层模式
+    控制级 A      MPC 节拍（50 Hz）   自己的 ``mpc_due(step)``，与 WBC 异步
+    控制级 B      WBC 节拍（250 Hz）  自己的 ``wbc_due(step)``，取带时间戳轨迹采样
+    输出级        每物理步（1 kHz）   把最近一次控制解写进 ``data.ctrl``（零阶保持）
+    ============  ==================  ===================================
+
+节拍之间只用循环内局部变量传递（``torque`` / ``state`` / ``rows`` / ``contact`` /
+``decision`` / ``sample``），不额外造包装类：改某一级的频率不影响其它级的口径。
+
+本模块不做什么
+--------------
+- 不定义 WBC 任务与接触块（见 ``wbc.py``）、不实现 WBC 求解器（见 ``wbc_limited.py``）
+- 不建模型、不做线性化（见 ``robot.py`` / ``model_builder.py`` / ``model_grid.py``）
+- 不配置日志（见 ``logging_setup.py``）；这里只 ``get_logger`` 后写日志
+
+时序说明：物理步长取模型 ``opt.timestep``；``wbc_dt``/``mpc_dt`` 必须是它的整数倍
+（见 ``Algorithm/timing.py``）。viewer 的实时同步见 ``VIEWER_SYNC_DT`` 处的注释。
 """
 from __future__ import annotations
 
@@ -21,6 +40,8 @@ import mujoco
 import numpy as np
 
 from . import _circleg  # noqa: F401
+from .logging_setup import get_logger  # noqa: E402
+from .loop import VIEWER_SYNC_DT, run_loop  # noqa: E402
 from . import robot as R
 from .dynamics import Gbc486Dynamics, leg_combination
 from .model_builder import HeldLegModelBuilder, LegInputModelBuilder
@@ -36,10 +57,13 @@ from Algorithm.timing import ControlTiming  # noqa: E402
 from Algorithm.wbc import ContactElimination  # noqa: E402
 
 G = 9.81
-# viewer 刷新周期（仿真时间），约 60 fps。见 run() 中 viewer.sync() 的说明：
-# 每物理步都 sync 会让 viewer 比实时慢 9 倍（渲染 91441 顶点的 base_link 等）。
-VIEWER_SYNC_DT = 1.0 / 60.0
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = get_logger(__name__)
+
+# 腿长换挡滞回带宽 [m]。来源：实测站立腿长抖动 0.7 mm（峰峰）而网格间距 0.04 m，
+# 且标称腿长 0.2800 m 正好落在 0.26/0.30 两个格点的中点（判别式 min|g-L| 会打平，
+# 实测 3 s 内换了 9 次挡、能力表来回抖）。取 0.008 m = 网格间距的 1/5 = 实测抖动的 10 倍以上，
+# 等效在中点两侧各留 4 mm 死区（0.284 m 以上才切到上一点）。
+_LEG_LENGTH_GEAR_HYSTERESIS = 0.008
 
 # 驱动阶段（DRIVE 及其后的 BRAKE）的共模腿角预算 [rad]。单一真值来源：
 # objective._settings 与本模块的 gbc486_mpc_settings 都读它。
@@ -288,6 +312,9 @@ class Gbc486MpcWbcSimulation:
         # 任务名随 wbc.py 的任务集变化（现在是每条腿单独的 length_*/angle_*），
         # 用动态字典而不是写死的键，避免 KeyError。
         self.exhausted: dict[str, int] = {}
+        # 腿长拟合参数调度（方案 A）：网格懒加载；记录当前换挡点，仅当最近网格点变化才重建 MPC。
+        self._model_grid = None
+        self._scheduled_grid_point: float | None = None
         self.scaled: dict[str, int] = {}
         self.timings = dict(mpc=[], wbc=[])
 
@@ -317,182 +344,71 @@ class Gbc486MpcWbcSimulation:
 
     # ----------------------------------------------------------------- state
     def chassis_state(self, contact, forces):
-        rows = self.dyn.rowset()
-        rates = rows.task[0] @ self.data.qvel
-        roll, pitch, yaw = self.dyn.attitude()
-        leg = self.dyn.leg_state()
-        leg_rows, _ = leg_combination(rows, +1.0)
-        return ChassisState(
-            position=self.distance, velocity=float(rates[0]),
-            pitch=float(pitch) - self.reduced.metadata["equilibrium_pitch"],
-            pitch_rate=float(rates[2]), yaw=float(yaw), yaw_rate=float(rates[3]),
-            # 降阶模型第 6 个状态是共模腿角偏差 phi_c，反馈也取共模 0.5*(phi_R+phi_L)-phi0。
-            # 用单腿（leg[1]）会让 MPC 与 WBC 的腿角反馈带上一份 phi_d 的系统误差。
-            # 符号见 model_builder.LegInputModelBuilder.set_legs：δφ_c := −(极角 − φ0)。
-            # 算法层依赖 ∂v̇/∂φ_c > 0，所以这里也要取负，否则状态与参考不同号。
-            hip_angle=float(self.pose.angle - 0.5 * (leg[1] + leg[3])),
-            hip_rate=-float(leg_rows[1] @ self.data.qvel),
-            normal_forces=tuple(float(v) for v in forces[:, 2]), contact=contact), rows
+        """薄委托：状态组装已移到 ``sampling.chassis_state``（下列文件仍引用本方法：wheel_leg_mujoco/tools/m2_standalone_wbc.py, wheel_leg_mujoco/gbc_mpc_wbc/sampling.py）。"""
+        from .sampling import chassis_state as _build
+        return _build(dynamics=self.dyn, data=self.data, contact=contact, forces=forces,
+                      distance=self.distance,
+                      equilibrium_pitch=self.reduced.metadata["equilibrium_pitch"],
+                      nominal_angle=self.pose.angle)
 
     # ------------------------------------------------------------------- run
-    def run(self, command, duration: float, disturbances=(), viewer=None):
-        """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。"""
-        m, d = self.model, self.data
-        infinite = not math.isfinite(duration)
-        if infinite and viewer is None:
-            raise ValueError("无限时长需要 viewer 才能停下来")
-        pending = sorted(disturbances, key=lambda item: item.time)
-        steps = None if infinite else int(round(duration / m.opt.timestep))
-        decision, self._command = None, None
-        force_until, wrench = 0.0, np.zeros(6)
-        step = 0
-        while steps is None or step < steps:
-            step_wall_start = time.perf_counter()
-            while pending and d.time >= pending[0].time - 1e-12:
-                push = pending.pop(0)
-                d.qvel[0:3] += np.asarray(push.delta_velocity, dtype=float)
-                d.qvel[3:6] += np.asarray(push.delta_omega, dtype=float)
-                if push.duration > 0.0:
-                    force_until = float(d.time) + float(push.duration)
-                    wrench = np.concatenate([np.asarray(push.force, dtype=float),
-                                             np.asarray(push.torque, dtype=float)])
-            # 持续扰动：在时长内每步施加广义外力（viewer 鼠标拖住不放）
-            d.qfrc_applied[:] = 0.0
-            if d.time < force_until:
-                d.qfrc_applied[:6] = wrench
-            if viewer is not None:
-                # 被动 viewer 只记录鼠标 MjvPerturb；物理在本循环里跑，所以每步在这里刷新
-                d.xfrc_applied[:] = 0.0
-                mujoco.mjv_applyPerturbPose(m, d, viewer.perturb, 0)
-                mujoco.mjv_applyPerturbForce(m, d, viewer.perturb)
-            if self.timing.wbc_due(step):
-                mujoco.mj_forward(m, d)
-                _measured, forces, counts, other = self.dyn.sensed_contact()
-                # 逐轮法向力交给算法层估计器（滞回 + 确认时间）再给监督层；直接拿裸阈值会把
-                # MuJoCo 在几十微米间隙下关闭接触误判成离地（实测轮地间隙仅 +0.02~0.04 mm）。
-                contact = self.contact_estimator.update(
-                    tuple(forces[:, 2]), self.timing.wbc_dt, phase=JumpPhaseHint.NONE).contact
-                state, rows = self.chassis_state(contact, forces)
-                roll, pitch, _ = self.dyn.attitude()
-                decision = self.supervisor.update(
-                    timestamp=d.time, dt=self.timing.wbc_dt, contact=contact, enabled=True,
-                    command_fresh=True, stable=max(abs(roll), abs(pitch)) < self.mpc.settings.pitch_limit,
-                    slipping=False)
-                if not decision.motion_enabled:
-                    self.solution = None
-                if self.timing.mpc_due(step):
-                    current = command(d.time) if callable(command) else command
-                    self._command = current
-                    start = time.perf_counter()
-                    self.solution = self.control.solve_mpc(state, current, decision, self.feedback.consume(state))
-                    self.timings["mpc"].append(time.perf_counter() - start)
-                    if self.solution is not None:
-                        self.counters["mpc_calls"] += 1
-                        self.counters["mpc_fallbacks"] += int(self.solution.fallback)
-                        self.counters["mpc_relaxed"] += int(bool(self.solution.qp.relaxed))
-                sample = (None if self.solution is None
-                          else self.solution.trajectory.sample_at(d.time + self.config.preview_lead))
-                balance, motion = self.tasks.tasks(state, rows, sample)
-                blocks = self.tasks.contact_blocks(rows, decision.contact)
-                start = time.perf_counter()
-                torque, result = self.control.solve_wbc(
-                    mass=self.dyn.mass(), selection=self.dyn.selection, dynamics_bias=self.dyn.dynamics_bias(),
-                    contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=self.dyn.limits,
-                    decision=decision, dt=self.timing.wbc_dt)
-                self.timings["wbc"].append(time.perf_counter() - start)
-                self.counters["wbc_calls"] += 1
-                reason = None
-                predicted_normal = np.zeros(0)
-                if result is not None:
-                    self.counters["wbc_fallback"] += int(result.fallback_used)
-                    self.counters["wbc_clip"] += int(result.clip_applied)
-                    self.counters["wbc_infeasible"] += int(not result.feasible)
-                    # WBC -> MPC 反馈：把任务残差与饱和/越限回传给 planner（circleg APP:593
-                    # 的同一位置）。缺这一句时 ReferenceFeedback.saturated 恒 False、
-                    # motion_residual 恒 0，planner.plan 的 blocked 永不成立，capability
-                    # 不会因 WBC 受限而降级，MPC 会持续规划 WBC 做不到的运动。
-                    self.feedback.observe(result, self.dyn.limits)
-                    exhausted = set()
-                    for outcome in result.hierarchy.outcomes:
-                        self.exhausted[outcome.name] = (self.exhausted.get(outcome.name, 0)
-                                                        + int(outcome.exhausted))
-                        if outcome.exhausted:
-                            exhausted.add(outcome.name)
-                    for name, value in result.scaling.items():
-                        if name not in exhausted:
-                            self.scaled[name] = (self.scaled.get(name, 0)
-                                                 + int(value < 1.0 - 1e-8))
-                    active = [b for b in blocks if all(decision.contact[i] for i in b.wheels)]
-                    jc = np.vstack([b.jacobian for b in active])
-                    predicted_normal = ContactElimination.from_matrices(
-                        jc, self.dyn.selection, self.dyn.mass()).recover_contact_force(
-                        result.qacc, self.dyn.dynamics_bias(), torque)
-                d.ctrl[:] = torque
-                normal_threshold = -max(self.config.force_tolerance,
-                                        self.config.normal_force_margin_ratio
-                                        * self.mpc.settings.nominal_normal_force)
-                normal_min = (float(np.min(predicted_normal[list(
-                    self.tasks.normal_indices(decision.contact))]))
-                    if predicted_normal.size else float("inf"))
-                self._normal_violation_time = (self._normal_violation_time + self.timing.wbc_dt
-                                               if normal_min < normal_threshold else 0.0)
-                # WBC 求解不可行（强扰下 WLS 无法精确满足硬约束，力矩会被 clamp）：
-                # 用户 2026-10-04 指示，这里不判失败、不停机，只记一条警告后继续；
-                # 发散后的处置方案另行安排。力矩仍然是求解器输出的（已 clamp 到限幅内）。
-                if result is not None and not result.feasible and not self._infeasible_active:
-                    _LOGGER.warning("WBC 求解不可行（动力学残差 %.3e，torque_clipped=%s）：仅警告，继续运行",
-                                    result.dynamics_residual_norm, result.clip_applied)
-                self._infeasible_active = bool(result is not None and not result.feasible)
-                if other:
-                    reason = "unexpected_body_contact"
-                elif self.mpc.degraded:
-                    reason = "persistent_mpc_fallback"
-                elif self._normal_violation_time + 1e-12 >= self.config.normal_force_duration:
-                    reason = "negative_predicted_normal_force"
-                elif not self.dyn.limits.contains(torque):
-                    reason = "torque_limit"
-                if step % self.config.record_stride == 0:
-                    self.records.append(self._record(state, decision, sample, torque, result,
-                                                     predicted_normal, rows))
-                if reason:
-                    self.stop_reason = reason
-                    break
-            previous = d.qpos[:3].copy()
-            yaw = self.dyn.attitude()[2]
-            mujoco.mj_step(m, d)
-            middle = yaw + 0.5 * wrap_angle(self.dyn.attitude()[2] - yaw)
-            self.distance += float((d.qpos[:3] - previous) @ np.array([math.cos(middle), math.sin(middle), 0.0]))
-            hits = self.dyn.joint_limit_active()
-            if hits:
-                self.stop_reason = "joint_limit:" + ",".join(sorted(set(hits)))
-                break
-            if not np.all(np.isfinite(np.r_[d.qpos, d.qvel])):
-                self.stop_reason = "nonfinite_state"
-                break
-            if max(abs(v) for v in self.dyn.attitude()[:2]) > self.config.attitude_guard:
-                self.stop_reason = "attitude_guard"
-                break
-            if float(np.linalg.norm(d.qvel[:2])) > self.config.speed_guard:
-                self.stop_reason = "speed_guard"
-                break
-            if viewer is not None:
-                # 被动 viewer 刷新 + 实时限速；关窗口即停。
-                # 2026-10-05：``sync()`` **不再每物理步调用**。实测每步 ``sync()+渲染`` 约 8.2 ms
-                # （物理步长 1 ms），使 viewer 比实时慢 **9.16 倍**：用户看到的“收敛慢/效果差”
-                # 有相当一部分是显示器上的时间被拉长 9 倍造成的假象（headless 同配置为 0.95 倍）。
-                # 现在改为按渲染帧率（约 60 Hz 仿真时间）刷新，物理与控制在 1 kHz 照常推进。
-                # 渲染负担主因：``base_link`` 单个网格 91441 顶点。
-                if float(d.time) - self._viewer_sync_time >= VIEWER_SYNC_DT:
-                    viewer.sync()
-                    self._viewer_sync_time = float(d.time)
-                remaining = m.opt.timestep - (time.perf_counter() - step_wall_start)
-                if remaining > 0.0:
-                    time.sleep(remaining)
-                if not viewer.is_running():
-                    self.stop_reason = "viewer_closed"
-                    break
-            step += 1
-        return self.summary(duration)
+    def run(self, command, duration: float, disturbances=(), viewer=None,
+            frame_callback=None, frame_interval: float = 0.0):
+        """积分情景；四段时序在 ``loop.run_loop``（采样 / MPC / WBC / 输出 + 推进）。
+
+        本方法只做委托：装配在 ``__init__``，时序在 ``loop.py``，控制算法在
+        ``control.py``，反馈在 ``sampling.py``，执行器与护栏在 ``output.py``。
+        """
+        return run_loop(self, command, duration, disturbances=disturbances, viewer=viewer,
+                        frame_callback=frame_callback, frame_interval=frame_interval)
+
+    def _schedule_mpc_leg_length(self) -> None:
+        """方案 A（用户 2026-10-06）：MPC 每次求解前按**当前腿长**填模型参数。
+
+        背景：降阶模型原本在 L=0.28 处一次性线性化后不再变，而实测 A 矩阵随腿长变化极大
+        （max|dA|=65.99，L 从 0.14 到 0.42），腿长一改 MPC 预测就与实际失配、前馈饱和
+        （实测 acceleration=[-70.5, 548.3, 0.14, -706.0]）。这里让模型的 A/B/极点/偏航惯量
+        随腿长走（8 点分段线性），能力表按最近腿长取（各点单独烘焙，不插值）。
+        腿长取**实测值**（由 ``LegKinematics`` 解析给出），与"高频解算、与控制器解耦"一致。
+        """
+        try:
+            from dataclasses import replace as _dataclasses_replace
+            if self._model_grid is None:
+                from .model_grid import ModelGrid
+                self._model_grid = ModelGrid()
+                _LOGGER.info("已加载腿长网格：%s", list(self._model_grid.grid))
+            legs = self.dyn.leg_state()
+            length = 0.5 * (float(legs[0]) + float(legs[2]))
+            params = self._model_grid.interpolate(length)
+            # ReducedModel 是 frozen dataclass（实测 FrozenInstanceError），不能原地改字段；
+            # 只传真正的字段：unstable_pole / yaw_inertia 是派生属性，用 hasattr 过滤会把它们
+            # 也算进来，导致 replace 报 unexpected keyword。
+            base = self.mpc.model
+            updates = {"A": np.asarray(params["A"], dtype=float),
+                       "B": np.asarray(params["B"], dtype=float),
+                       "metadata": {**base.metadata, **params["metadata"]}}
+            new_model = _dataclasses_replace(base, **updates)
+            # 只换 model 对象**不够**（实测：MPC 输出逐位不变）：WheelMPC 在 __init__ 里把 7 项
+            # 由 A/B 派生的量算好后永久缓存（discrete / qp / fallback_gain / _hip_drift_map /
+            # _lead_model / _disturbance_map / _disturbance_lead_map），求解用的是那些缓存，
+            # 必须整体重装 MPC。
+            nearest = float(min(self._model_grid.grid, key=lambda g: abs(float(g) - length)))
+            # 换挡必须带滞回：只有新格点比**当前**格点近出一个带宽才换（见 _LEG_LENGTH_GEAR_HYSTERESIS）。
+            if (self._scheduled_grid_point is None
+                    or abs(length - nearest) + _LEG_LENGTH_GEAR_HYSTERESIS
+                    < abs(length - self._scheduled_grid_point)):
+                previous = self.mpc
+                self.mpc = WheelMPC(new_model, self.mpc.settings)
+                # 换挡会**重建** MPC，而 WheelMPC.__init__ 把 _pitch_bias 置 0；预倾是斜坡累积
+                # 状态（每次求解只前进 pitch_bias_rate*dt），重建等于清零。这里把偏置状态一并迁移。
+                self.mpc.pitch_bias_target = float(previous.pitch_bias_target)
+                self.mpc._pitch_bias = float(getattr(previous, "_pitch_bias", 0.0))
+                self.mpc.pitch_bias_rate = float(previous.pitch_bias_rate)
+                # MPC 被换掉后必须同步给控制层，否则 SupervisedControl 仍持有旧对象。
+                self.control.mpc = self.mpc
+                self._scheduled_grid_point = nearest
+        except Exception as exc:  # 调度失败不能拖垮控制链：保留当前 MPC 继续跑
+            _LOGGER.warning("腿长调度失败（继续使用当前 MPC）：%s", exc)
 
     def _record(self, state, decision, sample, torque, result, predicted_normal, rows) -> dict:
         legs = self.dyn.leg_state()

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from Algorithm.mpc import MotionCommand  # noqa: E402
 from m3_mpc_wbc import PUSH_TIME, case_metrics, circleg_revision  # noqa: E402
 from m4_command_tracking import (CRUISE_WINDOW, DURATION, HOLD_END, HOLD_START,  # noqa: E402
                                  STOP_SPEED, metrics as command_metrics)
+from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
 
 RESULTS = ROOT / "results"
 VARIANTS = ("held_leg", "leg_input")
@@ -136,7 +136,7 @@ def main():
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(default_level="WARNING")
     RESULTS.mkdir(exist_ok=True)
     revision = circleg_revision()
 

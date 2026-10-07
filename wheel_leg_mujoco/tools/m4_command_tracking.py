@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -30,6 +29,7 @@ import numpy as np  # noqa: E402
 from gbc_mpc_wbc.simulation import Gbc486MpcWbcSimulation, SimulationConfig  # noqa: E402
 from Algorithm.mpc import MotionCommand  # noqa: E402
 from m3_mpc_wbc import circleg_revision  # noqa: E402
+from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
 
 RESULTS = ROOT / "results"
 HOLD_START, HOLD_END, DURATION = 2.0, 8.0, 14.0
@@ -111,7 +111,7 @@ def main():
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(default_level="WARNING")
     RESULTS.mkdir(exist_ok=True)
     revision = circleg_revision()
     runs = []
