@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--push-time", type=float, default=1.0, help="推扰时刻 [s]，<0 表示不加")
-    parser.add_argument("--push-speed", type=float, default=0.35, help="推扰速度 [m/s]")
+    parser.add_argument("--push-speed", type=float, default=0.35, help="推扰水平速度 [m/s]")
+    parser.add_argument("--push-speed-z", type=float, default=0.0, help="推扰竖直速度 [m/s]（>0 用于触发离地）")
     parser.add_argument("--backend", default="wls")
     parser.add_argument("--variant", default="leg_input")
     return parser.parse_args()
@@ -59,7 +60,8 @@ def main() -> int:
 
     disturbances = ()
     if args.push_time >= 0.0:
-        disturbances = (Disturbance(time=args.push_time, delta_velocity=(args.push_speed, 0.0, 0.0)),)
+        disturbances = (Disturbance(time=args.push_time,
+                                     delta_velocity=(args.push_speed, 0.0, args.push_speed_z)),)
     _LOGGER.info("开始录制：%.2f s / %d fps / 先平衡后推扰 %.2f m/s @ %.2f s",
                  args.duration, args.fps, args.push_speed, args.push_time)
     sim.run(default_command(), args.duration, disturbances=disturbances,

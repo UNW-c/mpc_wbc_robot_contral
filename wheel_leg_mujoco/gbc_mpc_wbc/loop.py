@@ -55,7 +55,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     pending = sorted(disturbances, key=lambda item: item.time)
     steps = None if infinite else int(round(duration / m.opt.timestep))
     sampler = FeedbackSampler(
-        model=m, data=d, dynamics=sim.dyn, contact_estimator=sim.contact_estimator,
+        model=m, data=d, dynamics=sim.dyn, tasks=sim.tasks,
+        contact_estimator=sim.contact_estimator,
         supervisor=sim.supervisor, reduced=sim.reduced, nominal_angle=sim.pose.angle,
         pitch_limit=sim.mpc.settings.pitch_limit)
     force_until, wrench = 0.0, np.zeros(6)

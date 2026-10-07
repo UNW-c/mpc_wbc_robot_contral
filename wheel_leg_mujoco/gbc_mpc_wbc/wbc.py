@@ -133,6 +133,21 @@ class Gbc486Tasks:
         """堆叠后的约束力向量里法向分量的下标（每轮 ``[切, 法]`` 在前）。"""
         return tuple(range(1, 2 * sum(bool(c) for c in contact), 2))
 
+    def contact_forces(self, recovered: np.ndarray, contact: tuple[bool, bool]) -> np.ndarray:
+        """从反解结果里取出逐轮 ``[切向, 法向]``，形状 ``(着地轮数, 2)``。
+
+        行排布的知识只在本类里维护：``contact_blocks`` 决定行顺序（每轮两块 ``[切, 法]`` 排在最前），
+        采样级与 WBC 级都调这里，避免两处各写一份映射（第 15.1 条：一份逻辑一个持有者）。
+        注意：横向（y）在本构型是**共模**一块（``contact_blocks`` 取两轮横向行的均值），
+        不按轮分开，所以这里只给切向与法向。
+        """
+        count = int(sum(bool(c) for c in contact))
+        return np.asarray(recovered, dtype=float)[:2 * count].reshape(count, 2)
+
+    def contact_normals(self, recovered: np.ndarray, contact: tuple[bool, bool]) -> np.ndarray:
+        """逐轮法向力（``contact_forces`` 的第 2 列）。"""
+        return self.contact_forces(recovered, contact)[:, 1]
+
     # ------------------------------------------------------------ 任务
     def tasks(self, state: ChassisState, rows: RowSet, sample=None):
         """返回 ``(balance_tasks, motion_tasks)``。顺序与 circleg 完全一致：

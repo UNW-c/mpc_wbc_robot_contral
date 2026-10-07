@@ -23,6 +23,10 @@ import numpy as np
 from . import _circleg  # noqa: F401  （sys.path / 字节码设置）
 from . import robot as R
 from Algorithm.wbc import ActuatorLimits  # noqa: E402
+from Algorithm.wbc.projection import ContactElimination  # noqa: E402
+from .logging_setup import get_logger  # noqa: E402
+
+_LOGGER = get_logger(__name__)
 
 _DIFFERENCE_DT = 1.0e-6
 
@@ -217,6 +221,8 @@ class Gbc486Dynamics:
         bias = (self._evaluate_at(plus) - self._evaluate_at(minus)) @ data.qvel / (2 * _DIFFERENCE_DT)
         return RowSet(rows, bias)
 
+
+
     # ---------------------------------------------------------------- sensing
     def attitude(self) -> np.ndarray:
         return euler_zyx(self.data.qpos[3:7])
@@ -238,13 +244,15 @@ class Gbc486Dynamics:
             values.extend(self._leg_kinematics[leg.name].lengths(angles))
         return np.asarray(values)
 
-    def sensed_contact(self):
-        """逐轮汇总轮–地接触力（作用在轮上，世界系），以及非轮–地接触数。"""
-        m, data = self.model, self.data
-        forces = np.zeros((2, 3))
+    def contact_geometry(self):
+        """轮-地接触的**几何排查**（不涉及力）：返回 ``(逐轮接触, 逐轮接触点数, 非轮-地接触数)``。
+
+        只看 MuJoCo 的接触对列表（几何信息），力一律由 ``recover_contact_force`` 反解——
+        原来这里的 ``mj_contactForce`` 已删除（用户 2026-10-07：不要直接调用 MuJoCo 的力 API）。
+        """
+        data = self.data
         counts = np.zeros(2, dtype=int)
         other = 0
-        wrench = np.zeros(6)
         for index in range(data.ncon):
             contact = data.contact[index]
             pair = (int(contact.geom1), int(contact.geom2))
@@ -255,13 +263,32 @@ class Gbc486Dynamics:
             if geom not in self.wheel_geoms:
                 other += 1
                 continue
-            side = self.wheel_geoms.index(geom)
-            mujoco.mj_contactForce(m, data, index, wrench)
-            sign = 1.0 if pair[1] == geom else -1.0
-            forces[side] += sign * contact.frame.reshape(3, 3).T @ wrench[:3]
-            counts[side] += 1
-        active = tuple(bool(n > 0 and f[2] > 0) for n, f in zip(counts, forces))
-        return active, forces, counts, other
+            counts[self.wheel_geoms.index(geom)] += 1
+        return tuple(bool(n > 0) for n in counts), counts, other
+
+    def contact_untrusted(self) -> bool:
+        """本拍接触力反解是否**不可信**。
+
+        有非接触类约束（当前只有关节限位）顶住时，其约束力不在 ``dynamics_bias`` 里，
+        反解会把那份力算进接触力里，所以这一拍的法向力不能用于离地判定。
+        """
+        return bool(self.joint_limit_active())
+
+    def recover_contact_force(self, blocks, qacc, torque, external=None) -> np.ndarray:
+        """接触力的**唯一推导入口**：``f = R⁻¹ Q_cᵀ (M q̈ + h − Sᵀ τ − τ_ext)``。
+
+        两个消费者共用本函数，只是输入不同：
+        - WBC 级（预测）：``qacc = result.qacc``（控制器解出来的指令加速度）、``torque = 解``；
+        - 采样级（实测，离地判定用）：``qacc = data.qacc``、``torque = data.ctrl``（实际施加）。
+        ``external`` 传 ``data.qfrc_applied``：鼠标拖拽/推扰等外部施加力必须从残差里减掉，
+        否则会被算进接触力（法向力虚高、离地判不出来）。
+        """
+        jacobian = np.vstack([b.jacobian for b in blocks])
+        bias = self.dynamics_bias()
+        if external is not None:
+            bias = bias - np.asarray(external, dtype=float)
+        elimination = ContactElimination.from_matrices(jacobian, self.selection, self.mass())
+        return elimination.recover_contact_force(qacc, bias, torque)
 
     def joint_limit_active(self) -> list[str]:
         """当前被 MuJoCo 关节限位约束顶住的关节名。"""

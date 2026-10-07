@@ -69,22 +69,49 @@ def chassis_state(*, dynamics, data, contact, forces, distance: float,
 class FeedbackSampler:
     """采样级的执行者：每次 ``update`` 取一拍反馈，内部不缓存控制量。"""
 
-    def __init__(self, *, model, data, dynamics, contact_estimator, supervisor,
+    def __init__(self, *, model, data, dynamics, tasks, contact_estimator, supervisor,
                  reduced, nominal_angle: float, pitch_limit: float) -> None:
         self.model = model
         self.data = data
         self.dynamics = dynamics
+        # 接触行排布的知识归任务集持有（contact_blocks / contact_normals），采样级只消费
+        self.tasks = tasks
         self.contact_estimator = contact_estimator
         self.supervisor = supervisor
+        self.last_forces: np.ndarray | None = None    # 上一拍可信的逐轮力（反解不可信时沿用）
         self.dt = float(model.opt.timestep)
         self.equilibrium_pitch = float(reduced.metadata["equilibrium_pitch"])
         self.nominal_angle = float(nominal_angle)
         self.pitch_limit = float(pitch_limit)
 
     def update(self, distance: float) -> Feedback:
-        """取一拍反馈：刷新运动学 -> 接触估计 -> 状态/行集 -> 监督层模式。"""
+        """取一拍反馈：运动学 -> 接触几何 -> 力雅可比反解接触力 -> 接触判定 -> 状态/监督层。
+
+        接触力的口径（用户 2026-10-07）：**不用 MuJoCo 的 ``mj_contactForce``**，而是由动力学
+        方程反解**实际状态**（``data.qacc`` + 实际施加的 ``data.ctrl``）：
+        ``f = R⁻¹ Q_cᵀ (M q̈ + h − Sᵀ τ − τ_ext)``。WBC 级用的是同一入口，只是输入换成它自己解出的
+        ``result.qacc``/力矩（那是**预测**，不能用于离地判定）。
+        """
         mujoco.mj_forward(self.model, self.data)
-        _measured, forces, counts, other = self.dynamics.sensed_contact()
+        active, counts, other = self.dynamics.contact_geometry()
+        rows = self.dynamics.rowset()
+        forces = np.zeros((2, 3))
+        flags = tuple(bool(n) for n in counts)
+        if any(flags):
+            blocks = self.tasks.contact_blocks(rows, flags)
+            recovered = self.dynamics.recover_contact_force(
+                blocks, self.data.qacc, self.data.ctrl, external=self.data.qfrc_applied)
+            values = self.tasks.contact_forces(recovered, flags)
+            for pair, side in zip(values, [i for i, f in enumerate(flags) if f]):
+                # [切向, 法向]：切向给 x 分量，法向给 z（横向 y 在本构型是共模量，不按轮拆分）
+                forces[side, 0] = float(pair[0])
+                forces[side, 2] = float(pair[1])
+        if self.dynamics.contact_untrusted():
+            # 关节限位等非接触约束顶住时反解会把限位约束力算进接触力：本拍沿用上一拍可信值，
+            # 不让估计器按假证据翻转（计数在 control 级记 negative_normal/torque，这里只保状态）
+            forces = self.last_forces if self.last_forces is not None else forces
+        else:
+            self.last_forces = forces
         contact = self.contact_estimator.update(
             tuple(forces[:, 2]), self.dt, phase=JumpPhaseHint.NONE).contact
         state, rows = chassis_state(

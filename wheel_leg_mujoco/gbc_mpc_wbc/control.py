@@ -27,7 +27,6 @@ import numpy as np
 
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
-from Algorithm.wbc import ContactElimination  # noqa: E402
 
 _LOGGER = get_logger(__name__)
 
@@ -105,16 +104,16 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         for name, value in result.scaling.items():
             if name not in exhausted_names:
                 scaled[name] = scaled.get(name, 0) + int(value < 1.0 - 1e-8)
-        active = [b for b in blocks if all(feedback.decision.contact[i] for i in b.wheels)]
-        jacobian = np.vstack([b.jacobian for b in active])
-        predicted_normal = ContactElimination.from_matrices(
-            jacobian, dynamics.selection, dynamics.mass()).recover_contact_force(
-            result.qacc, dynamics.dynamics_bias(), torque)
+        # 预测用反解：与采样级的实测反解是**同一个入口**，只是输入换成"控制器解出来的 q̈ + 解出的力矩"
+        predicted_normal = dynamics.recover_contact_force(
+            blocks, result.qacc, torque, external=dynamics.data.qfrc_applied)
     normal_threshold = -max(config.force_tolerance,
                             config.normal_force_margin_ratio * mpc.settings.nominal_normal_force)
-    normal_min = (float(np.min(predicted_normal[list(
-        tasks.normal_indices(feedback.decision.contact))]))
-        if predicted_normal.size else float("inf"))
+    normal_min = (float(np.min(tasks.contact_normals(predicted_normal, feedback.decision.contact)))
+                  if predicted_normal.size else float("inf"))
+    # 关节限位顶住时反解不可信（限位约束力不在 h 里），本拍不累计越界时间
+    if dynamics.contact_untrusted():
+        normal_min = float("inf")
     normal_violation_time = (normal_violation_time + timing.wbc_dt
                              if normal_min < normal_threshold else 0.0)
     # WBC 求解不可行（强扰下 WLS 无法精确满足硬约束，力矩会被 clamp）：

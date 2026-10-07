@@ -207,7 +207,13 @@ def simulate_checks():
         loop_rows, loop_bias = rows.loop
         stats["loop_velocity"].append(float(np.max(np.abs(loop_rows @ data.qvel))))
         stats["loop_acceleration"].append(float(np.max(np.abs(loop_rows @ data.qacc + loop_bias))))
-        active, forces, counts, other = dyn.sensed_contact()
+        active, counts, other = dyn.contact_geometry()
+
+        # 接触力已不由 MuJoCo 力 API 提供（用户 2026-10-07 删除）：本脚本的
+
+        # 力相关统计同步失效，仅保留几何量；需要力时请走 recover_contact_force。
+
+        forces = np.zeros((2, 3))
         stats["other_contacts"] += other
         stats["limit_active"].update(dyn.joint_limit_active())
         stats["speed"].append(abs(float(rate[0])))

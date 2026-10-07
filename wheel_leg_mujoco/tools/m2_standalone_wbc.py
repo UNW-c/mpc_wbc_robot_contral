@@ -65,7 +65,13 @@ def run(backend: str, duration: float):
     for step in range(steps):
         if step % every == 0:
             mujoco.mj_forward(model, data)
-            contact, forces, counts, other = dyn.sensed_contact()
+            active, counts, other = dyn.contact_geometry()
+
+            # 接触力已不由 MuJoCo 力 API 提供（用户 2026-10-07 删除）：本脚本的
+
+            # 力相关统计同步失效，仅保留几何量；需要力时请走 recover_contact_force。
+
+            forces = np.zeros((2, 3))
             state, rows = sim.chassis_state(contact, forces)
             roll, pitch, _ = dyn.attitude()
             decision = sim.supervisor.update(
