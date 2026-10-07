@@ -43,6 +43,8 @@ class WbcOutcome:
     predicted_normal: np.ndarray
     normal_violation_time: float
     infeasible_active: bool
+    normal_warned: bool
+    limit_warned: bool
 
 
 def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
@@ -68,7 +70,8 @@ def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
 def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feedback_accum,
               time_s: float, timing, timings: dict, counters: dict, exhausted: dict,
               scaled: dict, normal_violation_time: float,
-              infeasible_active: bool) -> WbcOutcome:
+              infeasible_active: bool, normal_warned: bool = False,
+              limit_warned: bool = False) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -121,16 +124,27 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         _LOGGER.warning("WBC 求解不可行（动力学残差 %.3e，torque_clipped=%s）：仅警告，继续运行",
                         result.dynamics_residual_norm, result.clip_applied)
     infeasible_active = bool(result is not None and not result.feasible)
+    # 以下两条属"控制器输出检查"，不是机体发散（用户 2026-10-07 要求）：
+    # WBC 解出负的预测法向力、或力矩超出限幅，都**降级为警告 + 计数，不停机**——
+    # 否则一次正常扰动就会直接终止仿真。限幅本身由执行器层 clamp 兜底（MuJoCo 会裁到 ctrlrange）。
+    normal_active = normal_violation_time + 1e-12 >= config.normal_force_duration
+    if normal_active:
+        counters["negative_normal_force"] = counters.get("negative_normal_force", 0) + 1
+        if not normal_warned:
+            _LOGGER.warning("WBC 预测法向力为负已持续 %.3f s（阈值 %.3f s）：降级为警告，继续运行",
+                            normal_violation_time, config.normal_force_duration)
+    limit_active = not dynamics.limits.contains(torque)
+    if limit_active:
+        counters["torque_limit"] = counters.get("torque_limit", 0) + 1
+        if not limit_warned:
+            _LOGGER.warning("WBC 解出力矩超出执行器限幅：降级为警告，继续运行（执行器层会 clamp）")
     reason = None
     if feedback.other:
         reason = "unexpected_body_contact"
     elif mpc.degraded:
         reason = "persistent_mpc_fallback"
-    elif normal_violation_time + 1e-12 >= config.normal_force_duration:
-        reason = "negative_predicted_normal_force"
-    elif not dynamics.limits.contains(torque):
-        reason = "torque_limit"
     return WbcOutcome(torque=torque, reason=reason, sample=sample, result=result,
                       predicted_normal=predicted_normal,
                       normal_violation_time=normal_violation_time,
-                      infeasible_active=infeasible_active)
+                      infeasible_active=infeasible_active,
+                      normal_warned=normal_active, limit_warned=limit_active)

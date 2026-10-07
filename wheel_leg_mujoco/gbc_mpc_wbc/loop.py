@@ -28,9 +28,12 @@ import time
 import mujoco
 import numpy as np
 
+from .logging_setup import get_logger  # noqa: E402
+
 # viewer 刷新周期（仿真时间），约 60 fps。见本文件循环尾部 viewer.sync() 处的说明：
 # 每物理步都 sync 会让 viewer 比实时慢 9 倍（渲染 91441 顶点的 base_link 等）。
 VIEWER_SYNC_DT = 1.0 / 60.0
+_LOGGER = get_logger(__name__)
 
 
 def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
@@ -63,6 +66,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     reason = None
     normal_violation_time = 0.0
     infeasible_active = False
+    airborne_active = False       # 离地档标志（由采样级的离地检测驱动）
+    airborne_since = 0.0
+    normal_warned = limit_warned = False
+    wbc_warning = guard_warning = None   # 告警去抖：只在状态变化的那一拍打日志
     last_frame_time = -1.0e9      # 帧回调节流（离线录像用；frame_callback=None 时无开销）
     step = 0
     while steps is None or step < steps:
@@ -98,8 +105,19 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 schedule_leg_length=sim._schedule_mpc_leg_length,
                 timings=sim.timings, counters=sim.counters)
 
+        # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
+        # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
+        # 进入后 WBC 不求解、也不把它的力矩写进执行器（输出置零），直到重新检测到接触。
+        # 依据：WBC 的硬约束建立在"轮子接地"这一假设上，离地后该假设失效，继续输出没有物理意义。
+        airborne = feedback is not None and not any(feedback.decision.contact)
+        if airborne and not airborne_active:
+            airborne_since = float(d.time)
+            _LOGGER.info("离地检测生效：脱离控制器（t=%.3f s）", airborne_since)
+        elif airborne_active and not airborne:
+            _LOGGER.info("重新检测到接触：恢复控制器（脱离持续 %.3f s）", float(d.time) - airborne_since)
+        airborne_active = airborne
         # ---------------------------- 控制级 B：WBC（自己的节拍，与 MPC 异步）
-        if sim.timing.wbc_due(step):
+        if sim.timing.wbc_due(step) and not airborne_active:
             outcome = wbc_stage(
                 control=sim.control, tasks=sim.tasks, dynamics=sim.dyn, mpc=sim.mpc,
                 config=sim.config, feedback=feedback, solution=solution,
@@ -111,15 +129,24 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             reason = outcome.reason
             normal_violation_time = outcome.normal_violation_time
             infeasible_active = outcome.infeasible_active
+            normal_warned = outcome.normal_warned
+            limit_warned = outcome.limit_warned
             if step % sim.config.record_stride == 0:
                 sim.records.append(sim._record(
                     feedback.state, feedback.decision, outcome.sample, torque,
                     outcome.result, outcome.predicted_normal, feedback.rows))
+            # 控制器检查告警**不停机**（用户 2026-10-07：不要因为保护定值终止仿真）。
+            # 去抖：只在告警出现/变化的那一拍打日志，计数每一拍累加，便于事后统计占比。
+            if reason and reason != wbc_warning:
+                _LOGGER.warning("控制器检查告警（不停机）：%s", reason)
+            wbc_warning = reason
             if reason:
-                sim.stop_reason = reason
-                break
+                key = reason.split(":")[0]
+                sim.counters[key] = sim.counters.get(key, 0) + 1
 
         # -------------------------------------------- 输出级（每物理步）+ 物理推进
+        if airborne_active:
+            torque = np.zeros_like(torque)      # 脱离期间不输出控制解（零力矩）
         write_actuator_output(d, torque)
         if frame_callback is not None and (frame_interval <= 0.0
                                            or float(d.time) - last_frame_time >= frame_interval - 1e-12):
@@ -127,9 +154,19 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             last_frame_time = float(d.time)
         delta, guard = advance_physics(model=m, data=d, dynamics=sim.dyn, config=sim.config)
         sim.distance += delta
-        if guard:
+        # 输出侧护栏同样降级为告警（关节限位 / 姿态 / 速度）：不再停机。
+        # 唯一例外是状态非有限（NaN/Inf）：物理已经死了，继续积分没有任何意义，
+        # 这一条仍然停机，并在日志里说明（如需一并降级请明确说）。
+        if guard == "nonfinite_state":
+            _LOGGER.error("状态出现 NaN/Inf：物理已失效，停机（此条未降级）")
             sim.stop_reason = guard
             break
+        if guard and guard != guard_warning:
+            _LOGGER.warning("输出侧护栏告警（不停机）：%s", guard)
+        guard_warning = guard
+        if guard:
+            key = guard.split(":")[0]
+            sim.counters[key] = sim.counters.get(key, 0) + 1
         if viewer is not None:
             # 被动 viewer 刷新 + 实时限速；关窗口即停。
             # 2026-10-05：sync() 不再每物理步调用。实测每步 sync+渲染约 8.2 ms（物理步长 1 ms），
