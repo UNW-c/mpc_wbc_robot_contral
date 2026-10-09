@@ -173,10 +173,10 @@
   </equality>
 
   <actuator>
-    <general name="Right_front_joint_act" joint="jAB" gainprm="1" ctrlrange="-20 +20" />
-    <general name="Right_rear_joint_act"  joint="jAG"  gainprm="1" ctrlrange="-20 +20" />
-    <general name="Left_front_joint_act"  joint="jIJ"  gainprm="1" ctrlrange="-20 20"  />
-    <general name="Left_rear_joint_act"   joint="jIO"   gainprm="1" ctrlrange="-20 +20" />
+    <general name="Right_front_joint_act" joint="jAB" gainprm="1" ctrlrange="-40 +40" />
+    <general name="Right_rear_joint_act"  joint="jAG"  gainprm="1" ctrlrange="-40 +40" />
+    <general name="Left_front_joint_act"  joint="jIJ"  gainprm="1" ctrlrange="-40 +40"  />
+    <general name="Left_rear_joint_act"   joint="jIO"   gainprm="1" ctrlrange="-40 +40" />
 
     <general name="Right_Wheel_act"       joint="jwheel_right" gainprm="1" ctrlrange="-6 +6"   />
     <general name="Left_Wheel_act"        joint="jwheel_left"  gainprm="-1" ctrlrange="-6 +6"   />

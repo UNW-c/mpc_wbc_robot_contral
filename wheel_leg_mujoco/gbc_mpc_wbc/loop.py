@@ -37,7 +37,10 @@ _LOGGER = get_logger(__name__)
 
 
 def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
-             frame_callback=None, frame_interval: float = 0.0) -> None:
+             frame_callback=None, frame_interval: float = 0.0, trace_sink=None,
+             explicit_jump_reference: bool = False,
+             compression_only: bool = False,
+             freeze_jump_reference: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -47,6 +50,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     m, d = sim.model, sim.data
     from .sampling import FeedbackSampler
     from .control import mpc_stage, wbc_stage
+    from .jump import JumpObservation
+    from Algorithm.contact_state import JumpPhaseHint
+    from Algorithm.mpc.trajectory import MotionSample
+    from . import robot as R
     from .output import advance_physics, write_actuator_output
 
     infinite = not math.isfinite(duration)
@@ -62,6 +69,14 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     force_until, wrench = 0.0, np.zeros(6)
     sim._command = None
     torque = np.zeros(m.nu)      # 输出级：最近一次控制解（零阶保持）
+    jump_command = None           # 跳跃级：最近一拍跳跃指令（飞行段用于"力矩保持"）
+    jump_reference = None         # Diagnostic explicit fixed WBC reference
+    jump_holds = None             # 新部署：跳跃开始时捕获一次的姿态/腿角冻结参考
+    previous_phase = "IDLE"     # Diagnostic-only state-flow audit
+    last_thrust_applied = False
+    thrust_applied_last = False
+    previous_com_xz = None
+    previous_com_time = None
     feedback = None              # 采样级：最近一拍反馈
     solution = None              # MPC 级：最近一次解（WBC 与记录共用）
     reason = None
@@ -75,6 +90,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     step = 0
     while steps is None or step < steps:
         step_wall_start = time.perf_counter()
+        step_time = float(d.time)
+        mpc_called = False
+        wbc_called = False
+        outcome = None
         while pending and d.time >= pending[0].time - 1e-12:
             push = pending.pop(0)
             d.qvel[0:3] += np.asarray(push.delta_velocity, dtype=float)
@@ -93,13 +112,95 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             mujoco.mjv_applyPerturbPose(m, d, viewer.perturb, 0)
             mujoco.mjv_applyPerturbForce(m, d, viewer.perturb)
 
+        # -------------------------------------------------- 起跳触发（跳跃级）
+        if sim.jump is not None and not sim._jump_started and float(d.time) >= sim.config.jump_time:
+            sim._jump_started = True
+            sim._precheck_jump()
+            jump_command = sim.jump.start(float(d.time))
+
         # ------------------------------------------------------ 采样级（每物理步）
-        feedback = sampler.update(distance=sim.distance)
+        if jump_command is None:
+            phase_hint = JumpPhaseHint.NONE
+        else:
+            phase_hint = {
+                "THRUST": JumpPhaseHint.THRUST,
+                "FLIGHT": JumpPhaseHint.FLIGHT,
+                "LANDING": JumpPhaseHint.LANDING,
+            }.get(jump_command.phase.value, JumpPhaseHint.NONE)
+        feedback = sampler.update(distance=sim.distance, phase_hint=phase_hint)
         if not feedback.decision.motion_enabled:
             solution = None
+        # ---------------- 跳跃级：每物理步推进一次（纯计算，只用测量量）----------------
+        previous_jump_phase = None if jump_command is None else jump_command.phase.value
+        if sim.jump is not None:
+            leg = sim.dyn.leg_state()
+            leg_rows = feedback.rows.leg[0]
+            jump_command = sim.jump.update(JumpObservation(
+                time=float(d.time),
+                leg_length=0.5 * (float(leg[0]) + float(leg[2])),
+                leg_length_rate=0.5 * (float(leg_rows[0] @ d.qvel) + float(leg_rows[2] @ d.qvel)),
+                leg_length_R=float(leg[0]), leg_length_rate_R=float(leg_rows[0] @ d.qvel),
+                leg_length_L=float(leg[2]), leg_length_rate_L=float(leg_rows[2] @ d.qvel),
+                wheel_gap=float(np.min(R.wheel_contact_points(m, d)[:, 2])),
+                geometry_contact=tuple(bool(v) for v in sim.dyn.contact_geometry()[0]),
+                contact=feedback.decision.contact, pitch=float(feedback.state.pitch),
+                pitch_rate=float(feedback.state.pitch_rate),
+                thrust_applied=bool(thrust_applied_last)))
+            if (explicit_jump_reference and jump_command is not None
+                    and jump_command.active and jump_reference is None):
+                state = feedback.state.vector(sim.reduced.state_dim)
+                state[1] = 0.0
+                state[2] = 0.0
+                state[3] = 0.0
+                state[5] = 0.0
+                if state.size > 7:
+                    state[6] = 0.0
+                    state[7] = 0.0
+                jump_reference = MotionSample(
+                    state=np.asarray(state, dtype=float),
+                    acceleration=np.zeros(sim.reduced.state_dim, dtype=float),
+                    force=np.zeros(sim.reduced.input_dim, dtype=float),
+                    timestamp=float(d.time),
+                )
+
+        # 新部署：B组实验用“跳跃开始时捕获一次”的姿态/腿角冻结参考。
+        if (freeze_jump_reference and jump_command is not None and jump_command.active
+                and jump_holds is None):
+            roll_now, pitch_now, _yaw_now = sim.dyn.attitude()
+            leg_now = sim.dyn.leg_state()
+            jump_holds = dict(
+                pitch=float(pitch_now), roll=float(roll_now),
+                angle_R=float(sim.pose.angle - leg_now[1]),
+                angle_L=float(sim.pose.angle - leg_now[3]))
+
+        # WP5（compression_only）：压缩完成或立即停止条件都在写 THRUST / 推进物理前生效。
+        if compression_only and jump_command is not None:
+            if jump_command.phase.value == "THRUST":
+                # 在把 THRUST 写入 data.ctrl 之前停止；本轮不得执行释放/飞行/落地。
+                sim.stop_reason = ("compression_complete" if previous_jump_phase == "COMPRESS_BRAKE"
+                                   else "compression_thrust_without_brake")
+                _LOGGER.info("compression_only：压缩完成（%s -> THRUST），在写入 THRUST 前停止本轮"
+                             "（t=%.3f s）", previous_jump_phase, float(d.time))
+                break
+            if jump_command.phase.value == "ABORT":
+                sim.stop_reason = f"compression_abort:{jump_command.abort_reason}"
+                _LOGGER.warning("compression_only：进入 ABORT，立即停止本轮（原因 %s，t=%.3f s）",
+                                jump_command.abort_reason, float(d.time))
+                break
+            if jump_command.active:
+                geometry_flags, _counts, _other = sim.dyn.contact_geometry()
+                normals = np.asarray(feedback.forces[:, 2], dtype=float)
+                if not all(bool(v) for v in geometry_flags) or not bool(np.all(normals > 0.0)):
+                    sim.stop_reason = "compression_contact_lost"
+                    _LOGGER.warning("compression_only：几何接触或实际法向力丢失，立即停止本轮"
+                                    "（geometry=%s normals=%s t=%.3f s）",
+                                    tuple(bool(v) for v in geometry_flags), normals.tolist(),
+                                    float(d.time))
+                    break
 
         # ---------------------------- 控制级 A：MPC（自己的节拍，与 WBC 异步）
         if sim.timing.mpc_due(step):
+            mpc_called = True
             solution, sim._command = mpc_stage(
                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
                 feedback=feedback, command=command,
@@ -110,7 +211,12 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
         # 进入后 WBC 不求解、也不把它的力矩写进执行器（输出置零），直到重新检测到接触。
         # 依据：WBC 的硬约束建立在"轮子接地"这一假设上，离地后该假设失效，继续输出没有物理意义。
-        airborne = feedback is not None and not any(feedback.decision.contact)
+        # 跳跃是独立状态：跳跃期由跳跃规划器（几何真离地）决定是否脱离，离地档不再插手。
+        # 依据（用户 2026-10-07）：力的判定会在轮子仍压地时误报离地，此时断开控制器会让
+        # 机体在最需要控姿的时刻失控（实测俯仰冲到 -19.6 度）。
+        jump_active_now = jump_command is not None and jump_command.active
+        airborne = (feedback is not None and not any(feedback.decision.contact)
+                    and not jump_active_now)
         if airborne and not airborne_active:
             airborne_since = float(d.time)
             _LOGGER.info("离地检测生效：脱离控制器（t=%.3f s）", airborne_since)
@@ -118,14 +224,26 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             _LOGGER.info("重新检测到接触：恢复控制器（脱离持续 %.3f s）", float(d.time) - airborne_since)
         airborne_active = airborne
         # ---------------------------- 控制级 B：WBC（自己的节拍，与 MPC 异步）
-        if sim.timing.wbc_due(step) and not airborne_active:
+        # WP3（2026-10-09）：FLIGHT 或无有效接触时不调用要求接触块的 WBC；
+        # COMPRESS/THRUST 有接触时持续调用 WBC。disconnect 字段仅作状态记录，不再改变 WBC 调用。
+        jump_phase_now = None if jump_command is None else jump_command.phase.value
+        contact_available = bool(feedback is not None and any(feedback.decision.contact))
+        if (sim.timing.wbc_due(step) and not airborne_active
+                and jump_phase_now != "FLIGHT" and contact_available):
+            wbc_called = True
             outcome = wbc_stage(
                 control=sim.control, tasks=sim.tasks, dynamics=sim.dyn, mpc=sim.mpc,
                 config=sim.config, feedback=feedback, solution=solution,
                 feedback_accum=sim.feedback, time_s=float(d.time), timing=sim.timing,
                 timings=sim.timings, counters=sim.counters, exhausted=sim.exhausted,
                 scaled=sim.scaled, normal_violation_time=normal_violation_time,
-                infeasible_active=infeasible_active)
+                infeasible_active=infeasible_active, jump=jump_command,
+                desired_com_acceleration_z=(None if jump_command is None
+                                            else jump_command.desired_com_acceleration_z),
+                jump_holds=jump_holds,
+                sample_override=(jump_reference if explicit_jump_reference
+                                 and jump_command is not None and jump_command.active
+                                 else None))
             torque = outcome.torque
             reason = outcome.reason
             normal_violation_time = outcome.normal_violation_time
@@ -147,8 +265,258 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
 
         # -------------------------------------------- 输出级（每物理步）+ 物理推进
         if airborne_active:
-            torque = np.zeros_like(torque)      # 脱离期间不输出控制解（零力矩）
+            # 飞行段（用户 D4）：跳跃规划器接管时**保持上一拍力矩**（零阶保持，力矩连续）；
+            # 非跳跃的意外离地仍按原逻辑置零。
+            if jump_command is not None and jump_command.hold_torque:
+                pass
+            else:
+                torque = np.zeros_like(torque)
         write_actuator_output(d, torque)
+        if airborne_active:
+            output_source = "jump_hold" if jump_command is not None and jump_command.hold_torque else "airborne_zero"
+        else:
+            output_source = "wbc_update" if wbc_called else "zero_order_hold"
+        # WP3：释放是否执行改由“WBC 已求解且总力矩已写入”确认，不再用 tau_jump 是否非零。
+        thrust_applied_now = bool(
+            jump_command is not None and jump_command.phase.value == "THRUST"
+            and wbc_called and output_source == "wbc_update" and outcome is not None
+            and outcome.result is not None)
+        thrust_applied_last = thrust_applied_now
+        if trace_sink is not None:
+            from . import robot as _trace_robot
+            wheel_points = _trace_robot.wheel_contact_points(m, d)
+            geometry_flags, geometry_counts, geometry_other = sim.dyn.contact_geometry()
+            jump_payload = None if jump_command is None else {
+                "phase": jump_command.phase.value,
+                "active": bool(jump_command.active),
+                "disconnect": bool(jump_command.disconnect),
+                "hold_torque": bool(jump_command.hold_torque),
+                "leg_force": float(jump_command.leg_force),
+                "leg_length_target": (None if jump_command.leg_length_target is None
+                                       else float(jump_command.leg_length_target)),
+                "wheel_torque": float(jump_command.wheel_torque),
+                "desired_com_acceleration_z": (None if jump_command.desired_com_acceleration_z is None
+                                               else float(jump_command.desired_com_acceleration_z)),
+            }
+            sample = None if outcome is None else outcome.sample
+            sample_raw = None if outcome is None else outcome.sample_raw
+            result = None if outcome is None else outcome.result
+            base_id = int(m.body("base").id)
+            com = np.asarray(d.subtree_com[base_id], dtype=float).copy()
+            com_xz = com[[0, 2]]
+            if previous_com_xz is None or previous_com_time is None or step_time <= previous_com_time:
+                com_velocity_xz = np.zeros(2, dtype=float)
+            else:
+                com_velocity_xz = (com_xz - previous_com_xz) / (step_time - previous_com_time)
+            previous_com_xz = com_xz.copy()
+            previous_com_time = step_time
+            hub_xz = np.asarray(d.xpos[list(sim.dyn.wheel_bodies)], dtype=float)[:, [0, 2]].copy()
+            tau_jump_current = (None if outcome is None
+                                else np.asarray(outcome.tau_jump, dtype=float).copy())
+            current_phase = ("IDLE" if jump_payload is None
+                             else str(jump_payload["phase"]))
+            trace_leg = np.asarray(sim.dyn.leg_state(), dtype=float).copy()
+            trace_leg_rate = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float).copy()
+            # WP7：触发条件与是否被临时隔离都取本拍 JumpPlanner 的判定，
+            # 不再用 compression_only 充当隔离标志。侧别与 robot.LEGS=(RIGHT, LEFT) 一致。
+            planner = sim.jump
+            compression_direction_lost_R = bool(planner is not None and planner.direction_lost_R)
+            compression_direction_lost_L = bool(planner is not None and planner.direction_lost_L)
+            compression_direction_lost_isolated_R = bool(
+                planner is not None and planner.direction_lost_isolated_R)
+            compression_direction_lost_isolated_L = bool(
+                planner is not None and planner.direction_lost_isolated_L)
+            compression_direction_lost_isolation_active = bool(
+                planner is not None and planner.direction_lost_isolation_active)
+            compression_direction_lost_isolated = bool(
+                compression_direction_lost_isolated_R or compression_direction_lost_isolated_L)
+            predicted_vec = (np.zeros(0, dtype=float) if outcome is None
+                             else np.asarray(outcome.predicted_normal, dtype=float))
+            predicted_normal_R = None
+            predicted_normal_L = None
+            contact_flags = tuple(bool(v) for v in feedback.decision.contact)
+            contact_count = int(sum(contact_flags))
+            if predicted_vec.size >= 2 * contact_count and contact_count > 0:
+                wheel_forces = sim.tasks.contact_forces(predicted_vec, contact_flags)
+                for row, side in enumerate(i for i, flag in enumerate(contact_flags) if flag):
+                    normal = float(wheel_forces[row, 1])
+                    if side == 0:
+                        predicted_normal_R = normal
+                    elif side == 1:
+                        predicted_normal_L = normal
+            thrust_command_built = bool(
+                jump_payload is not None
+                and current_phase == "THRUST"
+                and float(jump_payload["leg_force"]) > 0.0)
+            thrust_applied = bool(thrust_applied_now)
+            trace_previous_phase = previous_phase
+            trace_transition_reason = None
+            phase_transition = None
+            if current_phase != previous_phase:
+                allowed_predecessors = {
+                    "IDLE": {"RECOVER", "ABORT"},
+                    "COMPRESS": {"IDLE"},
+                    "COMPRESS_BRAKE": {"COMPRESS"},
+                    "THRUST": {"COMPRESS_BRAKE"},
+                    "FLIGHT": {"THRUST"},
+                    "LANDING": {"FLIGHT"},
+                    "RECOVER": {"LANDING"},
+                    "ABORT": {"IDLE", "COMPRESS", "COMPRESS_BRAKE", "THRUST", "FLIGHT", "LANDING", "RECOVER", "ABORT"},
+                }
+                legal_predecessor = previous_phase in allowed_predecessors.get(current_phase, set())
+                geometry_contact_candidate = bool(any(geometry_flags))
+                estimator_contact_confirmed = bool(all(feedback.contact))
+                normal_force_positive = bool(np.all(np.asarray(feedback.forces[:, 2], dtype=float) > 0.0))
+                reasons = []
+                assertion_passed = legal_predecessor
+                if not legal_predecessor:
+                    reasons.append("previous_phase_not_allowed")
+                if previous_phase == "THRUST" and current_phase == "FLIGHT" and not last_thrust_applied:
+                    assertion_passed = False
+                    reasons.append("thrust_not_applied")
+                if previous_phase == "FLIGHT" and current_phase == "LANDING":
+                    if not geometry_contact_candidate:
+                        assertion_passed = False
+                        reasons.append("geometry_contact_not_confirmed")
+                    if not estimator_contact_confirmed:
+                        assertion_passed = False
+                        reasons.append("estimator_contact_not_confirmed")
+                    if not normal_force_positive:
+                        assertion_passed = False
+                        reasons.append("normal_force_not_positive")
+                if previous_phase == "LANDING" and current_phase == "RECOVER" and not estimator_contact_confirmed:
+                    assertion_passed = False
+                    reasons.append("dual_contact_not_confirmed")
+                if previous_phase == "RECOVER" and current_phase == "IDLE" and (not estimator_contact_confirmed or airborne_active):
+                    assertion_passed = False
+                    reasons.append("control_handoff_not_confirmed")
+                phase_transition = {
+                    "previous_phase": previous_phase,
+                    "requested_phase": current_phase,
+                    "legal_predecessor": bool(legal_predecessor),
+                    "assertion_passed": bool(assertion_passed),
+                    "blocking_reasons": tuple(reasons),
+                    "prior_thrust_applied": bool(last_thrust_applied),
+                    "thrust_command_built": bool(thrust_command_built),
+                    "thrust_applied": bool(thrust_applied),
+                    "geometry_contact_candidate": geometry_contact_candidate,
+                    "estimator_contact_confirmed": estimator_contact_confirmed,
+                    "normal_force_positive": normal_force_positive,
+                }
+                trace_transition_reason = None if planner is None else planner.transition_reason
+                previous_phase = current_phase
+            last_thrust_applied = thrust_applied_now
+            trace_sink({
+                "step": int(step), "t": step_time, "t_after": float(d.time),
+                "qpos": np.asarray(d.qpos, dtype=float).copy(),
+                "qvel": np.asarray(d.qvel, dtype=float).copy(),
+                "qacc": np.asarray(d.qacc, dtype=float).copy(),
+                "ctrl": np.asarray(d.ctrl, dtype=float).copy(),
+                "com_xz": com[[0, 2]],
+                "com_vxz": com_velocity_xz.copy(),
+                "wheel_hub_xz": hub_xz,
+                "qfrc_applied": np.asarray(d.qfrc_applied[:6], dtype=float).copy(),
+                "xfrc_applied": np.asarray(d.xfrc_applied, dtype=float).copy(),
+                "jump": jump_payload,
+                "phase_transition": phase_transition,
+                "previous_phase": trace_previous_phase,
+                "transition_reason": trace_transition_reason,
+                "thrust_command_built": bool(thrust_command_built),
+                "thrust_applied": bool(thrust_applied),
+                "pitch": float(feedback.state.pitch),
+                "pitch_rate": float(feedback.state.pitch_rate),
+                "leg_state": np.asarray(sim.dyn.leg_state(), dtype=float).copy(),
+                "leg_rate": np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float).copy(),
+                "leg_length_R": float(trace_leg[0]),
+                "leg_length_L": float(trace_leg[2]),
+                "leg_length_rate_R": float(trace_leg_rate[0]),
+                "leg_length_rate_L": float(trace_leg_rate[2]),
+                "compression_direction_lost_R": compression_direction_lost_R,
+                "compression_direction_lost_L": compression_direction_lost_L,
+                "compression_direction_lost_isolated": compression_direction_lost_isolated,
+                "compression_direction_lost_isolated_R": compression_direction_lost_isolated_R,
+                "compression_direction_lost_isolated_L": compression_direction_lost_isolated_L,
+                "compression_direction_lost_isolation_active": compression_direction_lost_isolation_active,
+                "wheel_points": np.asarray(wheel_points, dtype=float).copy(),
+                "wheel_gap": np.asarray(wheel_points[:, 2], dtype=float).copy(),
+                "contact_geometry": tuple(bool(v) for v in geometry_flags),
+                "contact_geometry_counts": tuple(int(v) for v in geometry_counts),
+                "contact_geometry_other": int(geometry_other),
+                "normal_forces": np.asarray(feedback.forces[:, 2], dtype=float).copy(),
+                "tangent_forces": np.asarray(feedback.forces[:, 0], dtype=float).copy(),
+                "contact_estimator": tuple(bool(v) for v in feedback.contact),
+                "decision": {
+                    "mode": feedback.decision.mode.value,
+                    "contact": tuple(bool(v) for v in feedback.decision.contact),
+                    "motion_enabled": bool(feedback.decision.motion_enabled),
+                    "balance_enabled": bool(feedback.decision.balance_enabled),
+                    "reset_reference": bool(feedback.decision.reset_reference),
+                    "context": int(feedback.decision.context),
+                },
+                "airborne_active": bool(airborne_active),
+                "mpc_called": bool(mpc_called),
+                "wbc_due": bool(sim.timing.wbc_due(step)),
+                "mpc_solution": None if solution is None else {
+                    "fallback": bool(solution.fallback),
+                    "relaxed": bool(solution.qp.relaxed),
+                    "reference": np.asarray(solution.reference.states(solution.trajectory.state_dim)[0], dtype=float).copy(),
+                    "force": np.asarray(solution.force, dtype=float).copy(),
+                },
+                "sample_raw": None if sample_raw is None else {
+                    "state": np.asarray(sample_raw.state, dtype=float).copy(),
+                    "acceleration": np.asarray(sample_raw.acceleration, dtype=float).copy(),
+                },
+                "sample": None if sample is None else {
+                    "state": np.asarray(sample.state, dtype=float).copy(),
+                    "acceleration": np.asarray(sample.acceleration, dtype=float).copy(),
+                },
+                "explicit_jump_reference_active": bool(explicit_jump_reference
+                                                        and jump_command is not None
+                                                        and jump_command.active
+                                                        and jump_reference is not None),
+                "explicit_jump_reference": (None if not (explicit_jump_reference
+                                                          and jump_command is not None
+                                                          and jump_command.active
+                                                          and jump_reference is not None) else {
+                    "state": np.asarray(jump_reference.state, dtype=float).copy(),
+                    "acceleration": np.asarray(jump_reference.acceleration, dtype=float).copy(),
+                    "timestamp": float(jump_reference.timestamp),
+                }),
+                "wbc_called": bool(wbc_called),
+                "wbc_raw_torque": None if outcome is None else np.asarray(outcome.raw_torque, dtype=float).copy(),
+                "tau_jump": None if outcome is None else np.asarray(outcome.tau_jump, dtype=float).copy(),
+                "wbc_task_trace": None if outcome is None else outcome.task_trace,
+                "wbc_result": None if result is None else {
+                    "feasible": bool(result.feasible),
+                    "fallback_used": bool(result.fallback_used),
+                    "clip_applied": bool(result.clip_applied),
+                    "dynamics_residual_norm": float(result.dynamics_residual_norm),
+                    "qacc": np.asarray(result.qacc, dtype=float).copy(),
+                    "scaling": {str(k): float(v) for k, v in result.scaling.items()},
+                    "outcomes": tuple({
+                        "name": item.name,
+                        "residual_norm": float(item.residual_norm),
+                        "scaling": float(result.scaling.get(item.name, item.activated)),
+                        "exhausted": bool(item.exhausted),
+                    } for item in result.hierarchy.outcomes),
+                },
+                "predicted_normal": predicted_vec.copy(),
+                "predicted_normal_R": predicted_normal_R,
+                "predicted_normal_L": predicted_normal_L,
+                "wbc_output_written": bool(wbc_called),
+                "output_source": output_source,
+                "mpc_object_id": int(id(sim.mpc)),
+                "scheduled_grid_point": (None if sim._scheduled_grid_point is None
+                                          else float(sim._scheduled_grid_point)),
+                "mpc_model_A": np.asarray(sim.mpc.model.A, dtype=float).copy(),
+                "mpc_model_B": np.asarray(sim.mpc.model.B, dtype=float).copy(),
+            })
+        if jump_phase_now == "FLIGHT" and sim.stop_reason is None:
+            # WP3 阶段目标（部署文档八）：确认真实离地（状态机进入 FLIGHT）后立即结束本轮测试，
+            # 不进入未修复的 FLIGHT/LANDING 控制调试。
+            sim.stop_reason = "liftoff_confirmed"
+            _LOGGER.info("已确认离地（phase=FLIGHT），本轮测试在此停止：t=%.3f s", float(d.time))
+            break
         if frame_callback is not None and (frame_interval <= 0.0
                                            or float(d.time) - last_frame_time >= frame_interval - 1e-12):
             frame_callback(d)
@@ -168,6 +536,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         if guard:
             key = guard.split(":")[0]
             sim.counters[key] = sim.counters.get(key, 0) + 1
+        if compression_only and guard:
+            sim.stop_reason = f"compression_guard:{guard}"
+            _LOGGER.warning("compression_only：输出侧护栏 %s，立即停止本轮", guard)
+            break
         if viewer is not None:
             # 被动 viewer 刷新 + 实时限速；关窗口即停。
             # 2026-10-05：sync() 不再每物理步调用。实测每步 sync+渲染约 8.2 ms（物理步长 1 ms），

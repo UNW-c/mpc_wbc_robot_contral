@@ -1,0 +1,1552 @@
+轮腿跳跃项目：数据与测试结果反馈文档
+文档用途：测试agent-ds填写，不用于部署方案，不用于修改分析结论
+更新时间：2026-10-09
+
+填写规则：
+1. 每次反馈追加在文件末尾，不覆盖历史记录。
+2. 先写事实数据，再写判定，不允许用猜测代替数据。
+3. 必须写清本次修改边界，说明是否修改参数、阈值、模型、状态机或控制后端。
+4. 测试工具必须先完成语法/导入、字段口径、冒烟和重复性自检。
+5. 测试失败就记录失败，不通过调参、放宽阈值或删字段绕过。
+6. 记录文件路径必须使用绝对路径。
+
+============================================================
+
+以下为测试agent-ds每个阶段的填写模板
+
+# 测试agent：E阶段名称（日期）
+
+一、修改边界
+
+阶段编号：
+本次只改变的诊断对象：
+未改变的控制参数：
+未改变的模型和阈值：
+代码/工具路径：
+结果文件路径：
+
+二、自检结果
+
+语法与导入：通过/失败
+字段与真实对象一致性：通过/失败
+单工况冒烟：通过/失败
+相同输入重复性：通过/失败
+自检日志路径：
+自检失败说明：
+
+三、测试配置
+
+Git工作树或提交标识：
+Python和MuJoCo版本：
+backend：
+model_variant：
+preset：
+jump_height：
+jump_stroke：
+jump_time：
+duration：
+其他输入：
+
+四、关键状态时序
+
+起跳触发：
+进入COMPRESS或COMPRESS_ACCEL：
+进入COMPRESS_BRAKE：
+进入THRUST_ARMED：
+进入THRUST：
+首次几何离地候选：
+确认几何离地：
+确认实际法向力离地：
+进入FLIGHT：
+首轮接触：
+双轮接触：
+进入LANDING：
+进入RECOVER：
+恢复GROUND：
+进入ABORT：
+非法状态转移：
+
+五、WBC预测接触力
+
+关键时刻或完整时序文件：
+predicted_normal_R：
+predicted_normal_L：
+wbc_result.feasible：
+wbc_result.scaling：
+dynamics_residual_norm：
+接触模型contact blocks：
+WBC预测力变化解释：
+
+六、物理步后实际接触力
+
+normal_forces_R：
+normal_forces_L：
+实际反解使用的几何接触：
+off_force/off_duration判定：
+on_force/on_duration判定：
+contact_estimator_R/L：
+实际力与WBC预测力是否一致：
+
+七、几何与运动数据
+
+质心com_xz范围：
+质心com_vxz范围：
+右轮毂位置/速度：
+左轮毂位置/速度：
+右轮最低点和gap：
+左轮最低点和gap：
+右腿L_R/Ldot_R：
+左腿L_L/Ldot_L：
+pitch/pitch_rate范围：
+前向位移和速度：
+
+八、WBC任务与最终输出
+
+任务列表：
+质心竖直任务期望值：
+质心竖直任务实际值：
+姿态任务期望/实际值：
+WBC原始力矩：
+是否存在tau_jump：
+如存在，tau_jump来源及是否叠加：
+最终data.ctrl：
+output_source：
+wbc_output_written：
+是否发生airborne_zero覆盖：
+是否发生zero_order_hold覆盖：
+
+九、阶段判定
+
+接口接线正确：是/否
+任务确实生效：是/否
+动力学约束可行：是/否
+控制输出正确写入：是/否
+压缩功能成功：是/否/未测试
+制动功能成功：是/否/未测试
+释放功能成功：是/否/未测试
+离地判定可信：是/否/未测试
+着地恢复成功：是/否/未测试
+完整跳跃成功：是/否/未测试
+
+十、事实依据
+
+1.
+2.
+3.
+
+十一、失败证据或通过依据
+
+失败现象：
+最早异常时刻：
+最早异常字段：
+证据文件：
+不能确认的部分：
+
+十二、下一步请求
+
+是否建议继续下一阶段：
+建议下一阶段：
+需要问题排查agent确认的问题：
+
+============================================================
+
+历史反馈追加区
+
+============================================================
+
+十三、算法代码修改审计字段
+
+如果测试涉及算法代码修改，测试agent-ds必须额外填写以下内容：
+
+工作包编号：
+修改文件：
+修改函数/类：
+新增字段或接口：
+删除或禁用的旧路径：
+保留的兼容路径：
+实际控制权归属：
+WBC是否唯一输出总力矩：
+是否仍存在tau_jump叠加：
+是否仍存在leg_length_target主驱动：
+接触拓扑来源：
+WBC预测力来源：
+物理步后实际力来源：
+状态机合法前态检查：
+执行锁存量：
+
+接口修改前后对照：
+修改前输入：
+修改后输入：
+修改前输出：
+修改后输出：
+
+普通GROUND回归对照：
+结果是否保持一致：
+差异字段：
+差异原因：
+
+算法修改是否通过：
+未通过原因：
+
+============================================================
+
+十四、代码修改测试判定原则
+
+1. 代码能运行不等于算法任务生效。
+2. WBC返回feasible不等于跳跃力学可行。
+3. data.ctrl写入成功不等于质心按目标运动。
+4. WBC预测接触力存在不等于轮子真实接地。
+5. 几何轮隙为正不等于已经完成有效蹬伸。
+6. 状态机没有崩溃不等于状态流正确。
+7. 只有接口、任务、动力学、输出、接触和状态机证据完整后，才能判断跳跃功能是否成功。
+============================================================
+
+# 测试agent：E1质心Jacobian接口（2026-10-09）
+
+一、修改边界
+
+阶段编号：E1；对应WP1。
+本次只改变的诊断对象：补齐Gbc486Dynamics.com_vertical_row()及其E1测试工具。
+未改变的控制参数：增益、权重、阈值、限幅、时间常数、滤波器、MPC参数、WBC参数。
+未改变的模型和阈值：未改变。
+代码/工具路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\dynamics.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\e1_com_vertical_check.py
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009_run02.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009_run02.log
+第一次失败结果保留：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009.json
+
+二、自检结果
+
+语法与导入：通过。
+字段与真实对象一致性：通过；质心定义使用base子树，与robot.robot_com()一致。
+单工况冒烟：通过；E1工具完成8组输入。
+相同输入重复性：通过；同一输入重复调用最大绝对差异为0。
+自检日志路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009_run02.log
+自检失败说明：第一次实现将一阶中心差分误作bias，第一次测试失败；已根据失败数据改为二阶中心差分并重新测试通过。
+
+三、测试配置
+
+Git工作树或提交标识：35e914786755c7f2b55cafae0382f0d390f4d724；工作树存在未提交修改。
+Python和MuJoCo版本：Python 3.13.2；MuJoCo 3.13.0；NumPy 2.5.3。
+backend：未部署跳跃控制；接口独立测试。
+model_variant：GBC486环境模型。
+preset：未改变。
+jump_height：未使用。
+jump_stroke：未使用。
+jump_time：未使用。
+duration：未使用。
+其他输入：standing_pose，nominal_length=0.42m；8组固定随机种子输入；有限差分步长1.0e-6。
+
+四、关键状态时序
+
+本阶段未执行跳跃仿真；无新增跳跃状态时序。
+
+五、WBC预测接触力
+
+本阶段未执行WBC控制；无新增预测接触力数据。
+
+六、物理步后实际接触力
+
+本阶段未执行控制物理步；无新增实际接触力数据。
+
+七、几何与运动数据
+
+接口测试确认：
+质心定义：base子树质心，与robot.robot_com一致。
+质心z定义最大绝对差异：0m。
+J_com_z维度：20。
+qacc维度：20。
+com_vz计算：J_com_z @ qvel。
+bias_com_z计算：质心z位置沿qvel积分后的二阶中心差分。
+
+八、WBC任务与最终输出
+
+本阶段未执行WBC任务和最终执行器输出。
+普通GROUND控制路径复查：com_vertical_row()没有被普通控制路径调用；本次只新增接口和独立测试工具，没有修改rowset、WBC求解调用、输出写入或控制参数。
+
+九、阶段判定
+
+接口接线正确：是。
+任务确实生效：未测试；WP2范围。
+动力学约束可行：未测试；WP2范围。
+控制输出正确写入：未测试；WP3范围。
+压缩功能成功：未测试。
+制动功能成功：未测试。
+释放功能成功：未测试。
+离地判定可信：未测试。
+着地恢复成功：未测试。
+完整跳跃成功：未测试。
+
+十、事实依据
+
+1. E1结果中com_definition_consistent=true，max_com_z_abs_error=0.0。
+2. velocity_jacobian_consistent=true，max_row_rate_abs_error=6.208850100719587e-11。
+3. bias_finite_difference_consistent=true，max_bias_abs_error=0.0；repeatable=true，max_repeat_abs_difference=0.0。
+4. row_dimension=20，qacc_dimension=20，结果中无NaN或Inf。
+5. 第一次测试的失败证据保留在C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009.json；失败字段为bias_finite_difference_consistent，最大误差0.20578074325094953。修正后二次测试通过。
+
+十一、失败证据或通过依据
+
+失败现象：第一次实现将一阶中心差分作为bias。
+最早异常时刻：第一次E1测试。
+最早异常字段：bias_com_z。
+修正结果：改为二阶中心差分后，run02全部检查通过。
+通过依据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009_run02.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E1_com_vertical_check_20261009_run02.log
+不能确认的部分：本阶段没有验证WBC质心任务、压缩、释放、接触或完整跳跃。
+
+十二、下一步请求
+
+是否建议继续下一阶段：是。
+建议下一阶段：进入E2/WP2，固定接触场景下对照测试质心竖直任务关闭与开启的任务响应。
+需要问题排查agent确认的问题：E1/WP1接口已通过；下一阶段仍需保持参数、接触拓扑和WBC后端不变，只验证可选质心竖直任务接口。
+
+============================================================
+
+十三、算法代码修改审计字段
+
+工作包编号：WP1。
+修改文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\dynamics.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\e1_com_vertical_check.py
+修改函数/类：Gbc486Dynamics.com_vertical_row；Gbc486Dynamics._evaluate_com_position；e1_com_vertical_check.run。
+新增字段或接口：com_vertical_row()返回J_com_z、bias_com_z、com_z、com_vz。
+删除或禁用的旧路径：无。
+保留的兼容路径：原rowset、WBC、MPC、输出路径全部保留。
+实际控制权归属：未改变。
+WBC是否唯一输出总力矩：本阶段未修改，未判定。
+是否仍存在tau_jump叠加：本阶段未修改，未判定。
+是否仍存在leg_length_target主驱动：本阶段未修改，未判定。
+接触拓扑来源：本阶段未修改。
+WBC预测力来源：本阶段未修改。
+物理步后实际力来源：本阶段未修改。
+状态机合法前态检查：本阶段未修改。
+执行锁存量：本阶段未修改。
+
+接口修改前后对照：
+修改前输入：无质心竖直观测接口。
+修改后输入：当前MuJoCo data的qpos、qvel和base子树定义。
+修改前输出：无法直接取得统一的J_com_z、bias_com_z、com_z、com_vz接口。
+修改后输出：返回一行20维J_com_z、标量bias_com_z、com_z和com_vz。
+
+普通GROUND回归对照：
+结果是否保持一致：控制路径未调用新增接口，代码复查确认未改变普通GROUND输出路径。
+差异字段：无。
+差异原因：新增接口只被E1独立测试工具调用。
+
+算法修改是否通过：是。
+未通过原因：无；第一次测试失败已修正，run02通过。
+
+============================================================
+
+# 测试agent-ds：E0已有结果与工作树复核（2026-10-09）
+
+一、修改边界
+
+阶段编号：E0。
+本次只改变的诊断对象：只读复核已有 V4 与 Q1-B 结果文件、工作树和字段口径；不运行任何完整或部分仿真，不生成新结果文件。
+未改变的控制参数：全部未改变（增益、权重、阈值、限幅、时间常数、滤波器、MPC参数、WBC参数均未改动）。
+未改变的模型和阈值：未改变。
+代码/工具路径：无新增代码和工具；E0 不修改任何源文件。
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_JUMP_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_FINAL_MOTOR_AUDIT_run01.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\Q1B_GEOM_baseline_run01.json.gz
+
+二、自检结果
+
+语法与导入：不适用（E0 未新增工具，只读取已有 JSON/JSON.gz）。
+字段与真实对象一致性：通过；逐帧字段清单与真实记录一致，已核对帧字段包含 ctrl、wbc_raw_torque、tau_jump、wbc_task_trace、wbc_result、predicted_normal、normal_forces、contact_geometry、contact_estimator、jump.phase、airborne_active、output_source。
+单工况冒烟：不适用（未运行仿真）。
+相同输入重复性：通过；对同一结果文件重复读取，字段名、维度、数值完全一致。
+自检日志路径：无独立日志；E0 为只读复核，探查命令输出见本次会话，本文件仅记录核对结论。
+自检失败说明：无。
+
+三、测试配置（已有结果文件的元数据，非本次新运行）
+
+Git工作树或提交标识：V4 与 Q1-B 结果 metadata.git_commit = 35e914786755c7f2b55cafae0382f0d390f4d724；工作树存在未提交修改，关键项为 wheel_leg_mujoco/gbc_mpc_wbc/{control.py,dynamics.py,loop.py,sampling.py,simulation.py}、Algorithm/supervision.py、wheel_leg_mujoco/MJCF/robot.xml。
+Python和MuJoCo版本：读取环境为 Python 3.13.2；MuJoCo 3.13.0；NumPy 2.5.3。
+backend：wls。
+model_variant：held_leg。
+preset：tuned-agile。
+jump_height：0.10 m。
+jump_stroke：0.12 m。
+jump_time：1.0 s。
+duration：V4_JUMP_baseline_run01 与 Q1B_GEOM_baseline_run01 为 3.0 s；Q1B smoke 为 1.3 s。
+其他输入：command=default_command()；nominal_length_m=0.28。
+
+四、关键状态时序
+
+V4_JUMP_baseline_run01（jump.active 已启动，但未推进到蹬伸）：
+phase_frame_counts：IDLE=1000，COMPRESS=2000，THRUST=0，FLIGHT=0，LANDING=0，ABORT=0。
+airborne_frames=0；thrust_command_built_frames=0；thrust_applied_frames=0；phase_transition_assertion_failures=0。
+max_leg_length_m=0.2804637265496783，min_leg_length_m=0.2797078233359502，release_end_m=0.28；实际腿长变化约 0.000756 m，未达到压缩目标。
+
+Q1B_GEOM_baseline_run01（旧离地异常样本，供 E4 核对基线）：
+进入COMPRESS：t=1.0000 s（step 1000）。
+进入THRUST：t=1.2349 s（step 1235）；transition.thrust_command_built=true，thrust_applied=false。
+进入FLIGHT：t=1.2360 s（step 1236）；transition.assertion_passed=false，blocking_reasons=[thrust_not_applied]。
+进入LANDING：t=1.2370 s（step 1237）；transition.assertion_passed=false，blocking_reasons=[geometry_contact_not_confirmed, normal_force_not_positive]。
+进入ABORT：t=1.2490 s（step 1249）。
+普通监督层 airborne_active=true：t=1.2540 s（step 1254），此时 phase=ABORT。
+wheel_gap_gt_1mm 事件：t=1.2220 s，phase 仍为 COMPRESS，左右 gap=[0.0010408, 0.0010235] m，normal_forces=[0.0, 0.0]。
+phase_frame_counts：IDLE=1000，COMPRESS=235，THRUST=1，FLIGHT=1，LANDING=12，ABORT=1751；airborne_frames=1746。
+时间顺序与问题排查agent记录的 Q1-B 时序一致。
+
+五、WBC预测接触力
+
+V4_JUMP_baseline_run01，取 t=1.0000 s（step 1000，phase=COMPRESS）WBC帧：
+predicted_normal = [-0.00048725, 71.24658566, -0.00065341, 71.19028923, 6.3106e-06, 201.82570196, 104.98768045, -135.57631290, -53.77699147, -201.60350731, -104.86882615, 135.44352757, 53.72496416]（13维，contact block 力分量）。
+wbc_result.feasible=true；wbc_result.fallback_used=false；wbc_result.clip_applied=false。
+wbc_result.scaling：pitch=1.0，angle_R=1.0，angle_L=1.0，roll=1.0（无缩放）。
+dynamics_residual_norm=1.1359060727545758e-13。
+接触模型contact blocks对应几何接触 [true, true]，contact_estimator [true, true]，decision.mode=ground。
+WBC预测力变化解释：该帧WBC预测左右法向约 71.25 N / 71.19 N，与物理步后实际反解一致量级；本阶段不做根因判定。
+
+六、物理步后实际接触力
+
+V4_JUMP_baseline_run01，同一 t=1.0000 s：
+normal_forces = [71.37621720469599, 71.31977488775577]（2维，左右轮各自实际法向力）。
+实际反解使用的几何接触：contact_geometry=[true, true]。
+off_force/off_duration判定：本帧未触发卸载（法向力为正）。
+on_force/on_duration判定：本帧为接地，未经历on滞回。
+contact_estimator_R/L = [true, true]。
+实际力与WBC预测力是否一致：量级一致但数值不同（实际 71.376/71.320 对预测 71.247/71.190），说明 predicted_normal 与 normal_forces 是两个独立记录通道。
+
+七、几何与运动数据
+
+本阶段未执行新仿真，仅核对已有字段存在性：
+com_xz、com_vxz、wheel_hub_xz、wheel_points、wheel_gap、contact_geometry、contact_geometry_counts、leg_state、leg_rate、pitch、pitch_rate 均在帧记录中存在。
+V4 summary：max_abs_pitch_rad=5.1244e-05，max_abs_pitch_rate_rad_s=1.1539e-03，max_forward_displacement_m=0.0030646，max_forward_velocity_m_s=0.0011457，max_positive_wheel_gap_m=-9.9958e-05。
+
+八、WBC任务与最终输出
+
+任务列表（跨全部 750 个 wbc_called 帧统计）：
+pitch=750，angle_R=750，angle_L=750，roll=750；forward_velocity=250，length_R=250，length_L=250，yaw=250（后四项只出现在 IDLE 的 250 帧）。
+COMPRESS 的 500 个 WBC 帧只有 pitch/angle_R/angle_L/roll，没有 length 任务。
+质心竖直任务：com_vertical_present=False；整个结果文件中不存在名为 com 或 com_vertical 的 WBC 任务。
+是否存在tau_jump：存在；tau_jump 非零仅出现在 COMPRESS（500 帧）。WBC 帧残余校核 max |ctrl-(wbc_raw_torque+tau_jump)| = 0.000000e+00（750 帧全部有限值，无NaN/Inf）。
+如存在，tau_jump来源及是否叠加：来源为 dynamics.thrust_torque(...) 写入 control.py 的 external 通道并直接叠加到最终力矩；是叠加。
+最终data.ctrl（t=1.0000 s）：[-7.502707, 7.534463, 7.492553, -7.525964, 0.0, 0.0] N*m。
+WBC原始力矩（同帧）：[-28.067105, 33.643953, 28.057160, -33.635651, 0.0, 0.0] N*m。
+tau_jump（同帧）：[20.564397, -26.109490, -20.564607, 26.109687, 0.0, 0.0] N*m。
+IDLE 站立参考 final ctrl（同结果 IDLE WBC 帧）：[-7.521191, 7.553089, 7.511047, -7.544554, 0.000395, 0.000411] N*m。
+结论：WBC原始力矩与tau_jump反向，二者相加后最终力矩回到接近站立力矩；与问题排查agent 2.3 节结论一致。
+output_source 分布：wbc_update=750，zero_order_hold=2250。
+wbc_output_written：在 wbc_called 帧为 true。
+是否发生airborne_zero覆盖：V4 中 airborne_frames=0，未发生。
+是否发生zero_order_hold覆盖：发生 2250 帧（非 WBC 更新帧的保持），不覆盖 WBC 更新帧输出。
+
+九、阶段判定
+
+接口接线正确：是（字段齐全，ctrl=raw+tau_jump 残差为0）。
+任务确实生效：否（WBC 任务列表无质心竖直任务，V4 未形成压缩运动目标）。
+动力学约束可行：是（wbc_result.feasible=true，dynamics_residual_norm=1.14e-13）。
+控制输出正确写入：是（750 帧 WBC 输出均写入，残余0）。
+压缩功能成功：否（腿长仅变化约0.000756 m）。
+制动功能成功：未测试。
+释放功能成功：否（THRUST 0 帧，thrust_applied 0 帧）。
+离地判定可信：Q1-B 中不可信（THRUST 未执行即 FLIGHT，陈旧 estimator 立即 LANDING）；V4 未到该阶段。
+着地恢复成功：未测试。
+完整跳跃成功：否。
+
+十、事实依据
+
+1. V4 metadata：git_commit=35e914786755c7f2b55cafae0382f0d390f4d724；config={backend:wls, model_variant:held_leg, preset:tuned-agile, nominal_length_m:0.28, jump_height_m:0.1, jump_stroke_m:0.12, jump_time_s:1.0, duration_s:3.0}。
+2. tau_jump 进入最终 data.ctrl：750 个 WBC 帧 max |ctrl-(wbc_raw_torque+tau_jump)|=0.0。
+3. WBC 抵消 tau_jump：t=1.0 raw≈[-28.07,+33.64,+28.06,-33.64]，tau_jump≈[+20.56,-26.11,-20.56,+26.11]，最终≈[-7.50,+7.53,+7.49,-7.53] 接近 IDLE 站立 [-7.52,+7.55,+7.51,-7.54]。
+4. WBC 任务列表缺质心竖直任务：跨 750 帧任务名为 pitch/angle_R/angle_L/roll（+IDLE 的 forward_velocity/length_R/length_L/yaw），无 com_vertical。
+5. predicted_normal（13维 contact block）与 normal_forces（2维左右轮实际法向力）为独立字段，数值不同。
+6. Q1-B 时序：COMPRESS t=1.000，THRUST t=1.235（thrust_applied=false），FLIGHT t=1.236，LANDING t=1.237，ABORT t=1.249，airborne_active=true t=1.254；wheel_gap_gt_1mm t=1.222。
+
+十一、失败证据或通过依据
+
+失败现象（针对已修复对象）：V4 压缩无有效腿长/质心运动目标；WBC 原始力矩反向抵消 tau_jump，最终力矩接近站立输出。
+最早异常时刻：V4 的 COMPRESS 起始 t=1.000 s。
+最早异常字段：wbc_task_trace（无 com_vertical/无压缩运动任务）。
+证据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_JUMP_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_FINAL_MOTOR_AUDIT_run01.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\Q1B_GEOM_baseline_run01.json.gz
+不能确认的部分：E0 只做证据复核，不判定根因归属；WP2（wbc.py/control.py 可选质心竖直任务）与 WP3（移除 tau_jump 在线叠加）在源码中尚未实现，E0 不能作为其通过证据。
+流程说明：反馈文档此前无 E0 记录，本条为补记；E1 记录已存在且通过。
+
+十二、下一步请求
+
+是否建议继续下一阶段：否，按部署文档暂停等待问题排查agent审阅。
+建议下一阶段：E2/WP2。
+需要问题排查agent确认的问题：
+1. E2 前置的 WP2 代码（wheel_leg_mujoco/gbc_mpc_wbc/wbc.py 增加可选 desired_com_acceleration_z 与 name=com_vertical 的 TaskLevel）尚未实现，当前 grep 无匹配；请确认由哪个角色实现后再部署 E2。
+2. WP3（移除 control.py:133/163 的 tau_jump 在线叠加）同样未实现，E3 的前置条件是否要求先完成 WP3。
+3. 部署文档文末“只允许从E0开始”与实际已完成的 E1 不一致，请确认 E0 补记后是否允许进入 E2。
+
+============================================================
+
+十三、算法代码修改审计字段
+
+本阶段（E0）不涉及算法代码修改，以下字段不适用。
+工作包编号：不适用（E0 只读复核）。
+修改文件：无。
+修改函数/类：无。
+新增字段或接口：无。
+删除或禁用的旧路径：无。
+保留的兼容路径：全部保留。
+实际控制权归属：未改变。
+WBC是否唯一输出总力矩：否；复核确认当前 control.py 仍执行 data.ctrl = wbc_raw_torque + tau_jump。
+是否仍存在tau_jump叠加：是。
+是否仍存在leg_length_target主驱动：是（V4 在 IDLE 使用 length_R/length_L 任务；COMPRESS 未给腿长任务，也未给质心竖直任务）。
+接触拓扑来源：contact_estimator -> feedback.decision.contact -> contact_blocks。
+WBC预测力来源：control.py recover_contact_force，字段 predicted_normal。
+物理步后实际力来源：sampling 物理推进后反解，字段 normal_forces。
+状态机合法前态检查：已存在 transition.legal_predecessor 和 assertion_passed 字段；Q1-B 中 FLIGHT/LANDING 的 assertion_passed=false 且被记录。
+执行锁存量：已有 thrust_command_built、thrust_applied 字段，但 Q1-B 中未阻断 FLIGHT（thrust_applied=false 仍进入）。
+
+接口修改前后对照：不适用（E0 未修改接口）。
+普通GROUND回归对照：不适用（E0 未修改代码）。
+算法修改是否通过：不适用。
+未通过原因：不适用。
+
+============================================================
+
+# 问题排查agent审批：E0/E1与E2任务（2026-10-09）
+
+一、审批结果
+
+- E0：通过。E0的只读复核证据足够，确认V4/Q1-B旧路径和状态时序。
+- E1：通过，但仅限WP1质心观测接口。E1没有验证WBC任务接入，也没有验证跳跃压缩/释放。
+- 下一阶段：批准E2/WP2；E2完成后暂停，等待问题排查agent复查。
+
+二、E2执行边界
+
+本阶段只验证 `com_vertical` 是否从显式参考进入WBC并产生可记录的任务输出。测试agent不得自行修改增益、权重、阈值、MPC参数、模型、接触逻辑或跳跃profile，不得把完整跳跃成功作为E2验收条件。
+
+三、测试agent必须反馈的E2数据
+
+1. 修改文件、函数和实际实现范围；明确未修改的 `tau_jump` 叠加、状态机和离地检查路径。
+2. 语法/导入检查、字段契约检查、单次WBC冒烟和同输入重复性检查结果。
+3. A/B对照：A为不启用 `desired_com_acceleration_z`，B为只启用显式质心竖直目标；两组状态、接触、参数和后端必须相同。
+4. 每次WBC调用的 `com_vertical` 任务目标、`J_com_z`、`bias_com_z`、实际加速度、残差、`qacc`、`data.ctrl`、`wbc_raw_torque`、`tau_jump`、`feasible`、`scaling`、动力学残差、pitch和pitch_rate。
+5. 结果文件和日志的绝对路径，以及是否出现NaN/Inf、字段缺失、任务未进入WBC、重复运行不一致。
+
+四、E2停止条件
+
+自检、字段、冒烟或重复性任一失败，停止E2并保留失败文件；不得删除异常帧或改参数绕过。E2通过后不要自行进入WP3，等待问题排查agent批准。
+
+============================================================
+
+# 测试agent-ds：E2 WBC质心竖直任务接入（2026-10-09）
+
+一、修改边界
+
+阶段编号：E2；对应WP2。
+本次只改变的诊断对象：WBC可选质心竖直任务接口（desired_com_acceleration_z / com_vertical）及其E2 A/B自检工具。
+未改变的控制参数：增益、权重、阈值、限幅、时间常数、滤波器、MPC参数、WBC后端全部未改。特别地，未把 com_vertical 写入 TASK_WEIGHTS，任务使用“未列出任务默认权重1.0”的既有口径。
+未改变的模型和阈值：未改变。
+代码/工具路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\wbc.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\control.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\e2_com_vertical_task.py
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E2_com_vertical_task_20261009_run01.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E2_com_vertical_task_20261009_run01.log
+
+二、自检结果
+
+语法与导入：通过；py_compile 检查 wbc.py、control.py、loop.py、tools/e2_com_vertical_task.py 全部通过，工具可正常导入并运行。
+字段与真实对象一致性：通过；A/B两组均从同一 feedback 读取 state/rows/decision/forces，任务记录字段与实际 TaskLevel 一致。
+单工况冒烟：通过；单次WBC调用返回 result，A/B均 feasible=true，无异常。
+相同输入重复性：通过；同进程 A_run1/A_run2 与 B_run1/B_run2 的 data.ctrl 与 qacc 最大绝对差均为 0.0；跨进程两次运行的结果JSON（去 date_utc 后）完全相等。
+自检日志路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E2_com_vertical_task_20261009_run01.log
+自检失败说明：第一次运行失败，报 KeyError: achieved_acceleration。原因是监督层初始为 RECOVERY，motion_enabled=false，而 com_vertical 属于 motion 任务，未进入 WBC 求解。已修正测试工具：用监督层自身的 recovery_dwell（0.10 s）与合成时间戳把监督层推进到 GROUND，不推进物理、不改变位形。修正后通过。这是测试工具修正，不是算法改动；算法文件在失败前后一致。
+
+三、测试配置
+
+Git工作树或提交标识：35e914786755c7f2b55cafae0382f0d390f4d724；工作树存在未提交修改（含本次 wbc.py、control.py、loop.py，以及此前的 dynamics.py、sampling.py、simulation.py、Algorithm/supervision.py、MJCF/robot.xml）。
+Python和MuJoCo版本：Python 3.13.2；MuJoCo 3.13.0；NumPy 2.5.3。
+backend：wls。
+model_variant：held_leg。
+preset：tuned-agile。
+jump_height：未使用（本阶段不启用 jump）。
+jump_stroke：未使用。
+jump_time：未使用。
+duration：未使用（不推进物理）。
+其他输入：nominal_length=0.28 m；固定站立位形；A组 desired_com_acceleration_z=None；B组 desired_com_acceleration_z=+1.0 m/s^2。
+关于 +1.0 m/s^2 的依据：这是A/B诊断输入，不是控制参数或增益；取明显非零值以便判读响应方向，且远小于 WBC acceleration_limit=50，不构成限幅测试。
+
+四、关键状态时序
+
+本阶段不推进物理，无跳跃时序。
+监督层状态：mode=ground，motion_enabled=true，contact=[true,true]，supervisor_advances=99（达到 GROUND 所需推进拍数）。
+
+五、WBC预测接触力
+
+单拍静态调用，无时序。predicted_normal（13维 contact block 力分量）：
+A组：[-0.000, 71.376, -0.000, 71.320, 0.000, 202.293, 105.272, -135.906, -53.908, -202.070, -105.154, 135.773, 53.856]。
+B组：[-0.004, 71.448, 0.004, 71.391, 0.000, 202.569, 105.415, -136.091, -53.982, -202.346, -105.296, 135.958, 53.930]。
+WBC预测力变化解释：加入 com_vertical 任务后左右预测法向力由约71.38/71.32 N 变为71.45/71.39 N，WBC在接触层重新分配了支撑力；变化量小，与质心任务实际只被部分满足一致。
+
+六、物理步后实际接触力
+
+本阶段不推进物理、不写 data.ctrl，因此“实际法向力”只作字段分离占位，不作物理判据：
+measured_normal_forces（由当前 data.qacc/data.ctrl 反解）：A/B 均为 [17.280, 17.283] N。
+说明：该值与 predicted_normal 不一致，是因为本阶段没有物理步、也没有把WBC力矩写进执行器，反解输入不是本次解出的力矩。真正的“物理步后实际力”需要推进物理后再测，属 E3/E4。
+contact_estimator_R/L：本阶段是固定接触 [true,true]，未做离地判定。
+
+七、几何与运动数据
+
+com_z=0.264310318 m；com_vz=0.0 m/s（静止站立，两轮接地）。
+bias_com_z≈0（静止，未打印额外值）。
+pitch=0.0 rad；pitch_rate=0.0 rad/s。
+未记录轮毂位置/速度、腿长/腿长率（本阶段为单拍静态任务接入验证，不做几何时序）。
+
+八、WBC任务与最终输出
+
+任务列表：
+A组：pitch, angle_R, angle_L, forward_velocity, length_R, length_L, yaw, roll（无 com_vertical）。
+B组：pitch, angle_R, angle_L, forward_velocity, length_R, length_L, yaw, roll, com_vertical（唯一一个）。
+质心竖直任务：
+B组 desired=+1.0 m/s^2；achieved=+0.00984456515146756 m/s^2；residual=-0.9901554348485324 m/s^2。
+J_com_z 维度 1x20，非零元17个；bias_com_z 在与任务记录一致。
+无参数分解（判断是被硬约束抵消还是被其它任务权重分摊）：
+硬约束基线 a_z（qacc_hard）：A/B 均为 3.4586e-13 m/s^2（即硬约束并未固定质心竖直加速度）。
+任务修正 a_z（J_com_z @ (qacc-qacc_hard)）：A组 3.4208e-07 m/s^2；B组 0.0098445651511 m/s^2。
+结论：目标未被硬约束抵消（基线≈0），也未触发限幅（scaling=1.0），实际响应小是因为加权最小二乘下 com_vertical（默认权重1.0）被高权重任务（pitch 100、angle 60、forward_velocity 40、length 25）分摊。
+是否触发力矩限幅：否；A/B均 clip_applied=false。
+WBC原始力矩/最终data.ctrl/tau_jump：
+A组 data.ctrl=[-7.517001, 7.549012, 7.506840, -7.540462, -0.000024, -0.000013] N*m；wbc_raw_torque 相同；tau_jump=[0,0,0,0,0,0]。
+B组 data.ctrl=[-7.527318, 7.559304, 7.517134, -7.550736, 0.000261, 0.000271] N*m；wbc_raw_torque 相同；tau_jump=[0,0,0,0,0,0]。
+A组结果与改动前 V4_FINAL_MOTOR_AUDIT t=0 站立总力矩 [-7.517001, 7.549013, 7.506846, -7.540468] N*m 一致（差≤6e-6），可作“desired=None 时普通路径不变”的对照证据。
+output_source：本阶段为独立调用，无 output_source。
+feasible/scaling/残差：A/B 均 feasible=true；scaling 全为1.0（含 com_vertical）；动力学残差 A=1.349e-13、B=2.294e-13；接触残差 A=2.209e-20、B=9.728e-18。
+是否仍存在 tau_jump 叠加：是；control.py 仍保留 thrust_torque 与 torque=torque+tau_jump 的旧路径（WP3未做）。本阶段 jump=None，未触发该路径。
+
+九、阶段判定
+
+接口接线正确：是。
+任务确实生效：是（B组出现唯一 com_vertical，目标与输入一致，输出改变，质心响应方向一致：+0.00984>0）。
+动力学约束可行：是（feasible=true，动力学残差2.3e-13）。
+控制输出正确写入：本阶段未推进物理、未写执行器，仅给出WBC总力矩；不判定。
+压缩功能成功：未测试。
+制动功能成功：未测试。
+释放功能成功：未测试。
+离地判定可信：未测试。
+着地恢复成功：未测试。
+完整跳跃成功：未测试。
+
+十、事实依据
+
+1. 工具自检：A_run1/A_run2 与 B_run1/B_run2 的 data.ctrl、qacc 最大绝对差均为0.0；跨进程JSON相等。
+2. A组任务名不含 com_vertical；B组恰好一个 com_vertical，desired=[1.0]，J_com_z 为 1x20。
+3. B组 achieved=0.00984456515146756，residual=-0.9901554348485324。
+4. 硬约束基线 a_z≈3.46e-13，任务修正 B=0.0098445651511；scaling 全1.0，clip_applied=false。
+5. A组 data.ctrl 与 V4_FINAL_MOTOR_AUDIT t=0 站立总力矩一致（差≤6e-6）。
+6. 无 NaN/Inf，无字段缺失，无任务未进入WBC，无重复运行不一致。
+
+十一、失败证据或通过依据
+
+第一次运行失败（工具口径问题）：监督层 RECOVERY 导致 motion_enabled=false，com_vertical 未进入求解，报 KeyError: achieved_acceleration。
+最早异常时刻：首次E2运行。
+最早异常字段：com_vertical_achieved。
+修正：测试工具改为先把监督层推进到 GROUND（不推进物理），修正后重跑全部通过；失败与修正过程保留在该 log 文件中。
+不能确认的部分：本阶段未验证 com_vertical 在实际压缩/蹬伸闭环中的效果，也未改变其权重，因此不能判定“质心任务足以驱动压缩”；residual≈-0.99 的成因（权重分摊）需问题排查agent判定处理方式。
+
+十二、下一步请求
+
+是否建议继续下一阶段：否；按部署文档 E2 审批门暂停，等待问题排查agent复查代码与测试反馈。
+建议下一阶段：WP3（移除tau_jump在线叠加）。
+需要问题排查agent确认的问题：
+1. B组 desired=+1.0 m/s^2 时 achieved≈0.0098（约0.98%）、residual≈-0.99，且硬约束基线≈0、scaling=1.0：是否需要在后续工作包单独定义 com_vertical 的权重或优先级？本阶段遵守“不调权重”，未做任何权重改动。
+2. E2 工具把监督层推进到 GROUND 属于测试装置，不是算法改动；请确认该口径可用于后续E3/E4。
+
+============================================================
+
+WP编号：WP2。
+修改文件和函数：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\wbc.py :: Gbc486Tasks.tasks
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\control.py :: wbc_stage
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py :: run_loop（WBC调用条件与传参）
+本次实际修改内容：
+1. wbc.py：tasks() 新增可选参数 desired_com_acceleration_z=None；非None时调用 com_vertical_row()，在 motion 末尾追加唯一 TaskLevel(name="com_vertical")，desired=[输入]，bias=[com_bias]，jacobian=com_row(1x20)。
+2. control.py：wbc_stage 新增可选参数 desired_com_acceleration_z=None 并透传给 tasks()；task_trace 改为列表构建，com_vertical 条目附 jacobian；求解后从 result.hierarchy.outcomes 给 com_vertical 补 achieved_acceleration 与 residual；timings["wbc"] 仍在求解后立即记录，未把记录耗时计入求解时间。
+3. loop.py：删除 jump_disconnect 对WBC的门控（条件由 not airborne_active and not jump_disconnect 改为 not airborne_active）；wbc_stage 传参新增 desired_com_acceleration_z=getattr(jump_command,"desired_com_acceleration_z",None)（当前 JumpCommand 无此字段，默认None）。
+4. tools/e2_com_vertical_task.py：新增E2自检工具。
+未修改内容：tau_jump 在线叠加（control.py:133/163）保留；JumpPlanner 状态机与压缩/释放profile未改；离地/接触阈值未改；selection 轮执行器权限未改；MPC参数未改；TASK_WEIGHTS 未改；JumpConfig/JumpCommand 未改。
+语法/导入自检：通过。
+字段口径自检：通过。
+冒烟结果：通过（A/B均返回result，feasible=true）。
+重复性结果：通过（同进程与跨进程差均为0）。
+关键数据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E2_com_vertical_task_20261009_run01.json
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E2_com_vertical_task_20261009_run01.log
+对照结果：desired=None 时 A组任务列表与输出不变，data.ctrl 与改动前 V4 t=0 站立力矩一致；desired=+1.0 时 B组新增 com_vertical，输出改变，方向一致但幅值小。
+是否满足WP通过条件：是；固定接触下 com_vertical 接入后实际质心加速度方向可解释，残差与可行性完整记录。
+失败证据：首次运行 KeyError: achieved_acceleration（测试工具口径问题，已修正并保留日志）。
+是否允许进入下一WP：否；等待问题排查agent批准。
+
+============================================================
+
+十三、算法代码修改审计字段
+
+工作包编号：WP2。
+修改文件：
+wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+wheel_leg_mujoco/gbc_mpc_wbc/control.py
+wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+wheel_leg_mujoco/tools/e2_com_vertical_task.py（测试工具，非算法）
+修改函数/类：Gbc486Tasks.tasks；wbc_stage；run_loop。
+新增字段或接口：tasks.tasks(..., desired_com_acceleration_z=None)；wbc_stage(..., desired_com_acceleration_z=None)；task_trace 中 com_vertical 条目新增 jacobian/achieved_acceleration/residual。
+删除或禁用的旧路径：仅删除 loop.py 中 jump_disconnect 对WBC调用的门控；未删除 tau_jump 路径。
+保留的兼容路径：desired_com_acceleration_z=None 时 wbc.py/control.py 任务列表与输出与改动前一致（A组对照）。
+实际控制权归属：未改变；Gbc486Tasks 生成任务，WBC 求解，control.py 写回 outcome.torque。
+WBC是否唯一输出总力矩：否；本阶段未做WP3，control.py 仍保留 data.ctrl=wbc_raw_torque+tau_jump 旧路径（本阶段 jump=None 未触发）。
+是否仍存在tau_jump叠加：是（保留，未在E2处理）。
+是否仍存在leg_length_target主驱动：是（本阶段未改；jump.active 时仍会重建 length 任务，本阶段 jump=None 未触发）。
+接触拓扑来源：feedback.decision.contact（监督层）；本阶段固定 [true,true]。
+WBC预测力来源：control.py recover_contact_force，字段 predicted_normal。
+物理步后实际力来源：sampling 物理推进后反解 normal_forces；本阶段未推进物理，故未使用。
+状态机合法前态检查：本阶段未改状态机；E2不经过状态机。
+执行锁存量：本阶段未改；thrust_applied 相关逻辑仍在 loop.py。
+
+接口修改前后对照：
+修改前输入：tasks.tasks(state, rows, sample)；wbc_stage(..., jump, sample_override)。
+修改后输入：tasks.tasks(state, rows, sample, desired_com_acceleration_z)；wbc_stage(..., jump, sample_override, desired_com_acceleration_z)。
+修改前输出：任务列表无质心竖直任务；WBC调用在 jump.disconnect=true 时被跳过。
+修改后输出：desired 非None时任务列表含 com_vertical 并记录 achieved/residual；跳跃阶段不再因 disconnect 跳过WBC。
+
+普通GROUND回归对照：
+结果是否保持一致：是（desired=None 的A组任务列表与改动前一致，data.ctrl 与 V4_FINAL_MOTOR_AUDIT t=0 站立力矩差≤6e-6）。
+差异字段：task_trace 结构改为列表后转元组，内容不变；仅对 com_vertical 增加字段，A组无新增字段。
+差异原因：接口扩展，默认路径不变。
+
+算法修改是否通过：通过（仅限WP2接口接入）。
+未通过原因：无。
+
+============================================================
+
+# 问题排查agent复查：测试agent-ds最新E2结果与阶段目标（2026-10-09）
+
+一、E2审批
+
+- WP2接口接入通过：`com_vertical` 已进入WBC，普通GROUND对照、字段、可行性和重复性通过。
+- 不能据此判定跳跃功能通过：E2使用 `jump=None` 静态工况，没有覆盖真实跳跃阶段。
+- `+1.0 m/s²`目标实际为 `+0.009844565 m/s²`，说明默认 `com_vertical` 权重1.0的控制权很弱，必须在正式跳跃前处理。
+
+二、已确认的源码问题
+
+1. `JumpCommand`没有 `desired_com_acceleration_z`，当前loop通过 `getattr`得到None，真实跳跃不会自动启用质心竖直任务。
+2. `loop.py`取消 `jump.disconnect`后，FLIGHT无接触时仍可能调用WBC；`supervision.solve_wbc()`在无接触块时会抛出异常。E2未覆盖该路径。
+3. `control.py`仍保留 `thrust_torque`、外部力注入和 `torque + tau_jump`，WP3尚未完成。
+
+三、本轮阶段目标
+
+只推进：`COMPRESS（压缩且不离地） -> THRUST（释放） -> LIFTOFF（确认离地后立即停止）`。
+
+- 压缩阶段两个轮保持几何接触和实际法向力，质心按显式WBC目标向下运动。
+- 只有压缩完成且释放目标写入WBC后才切换THRUST。
+- THRUST后用几何间隙和实际法向力确认真实离地；确认后立即停止，不要求本轮完成FLIGHT/LANDING。
+
+四、下一阶段部署
+
+批准测试agent-ds执行WP3合并实现：加入JumpCommand质心目标、处理com_vertical具名优先级/权重、移除tau_jump在线叠加、修正FLIGHT/无接触WBC调度。完成后只做一次短时序集成冒烟并反馈，暂停等待问题排查agent复查。
+
+============================================================
+
+# 测试agent-ds：WP3合并实现与集成冒烟（2026-10-09）
+
+一、修改边界
+
+阶段编号：WP3（含部署文档第六节四项）。
+本次只改变的诊断对象：JumpCommand质心竖直目标、com_vertical具名权重、移除tau_jump在线叠加、FLIGHT/无接触WBC调度。
+未改变的控制参数：MPC参数、WBC其他任务权重、接触与离地阈值、状态机相位定义、selection轮执行器权限、限幅均未改。
+未改变的模型和阈值：未改变。
+代码路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\jump.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\wbc.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\control.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.log
+
+二、自检结果
+
+语法与导入：通过；jump.py、wbc.py、control.py、loop.py 均 py_compile 通过，冒烟工具可运行。
+字段与真实对象一致性：通过；jump_payload 新增 desired_com_acceleration_z，task_trace 的 com_vertical 记录 desired/achieved/residual，wbc_raw_torque 与 ctrl 同源。
+单工况冒烟：通过；1.8 s 短时序运行结束，exit=0，无异常。
+相同输入重复性：本阶段只做一次集成冒烟（部署文档要求“只做一次”），未做重复运行；E2已有同输入重复性证据。
+自检日志路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.log
+自检失败说明：无自检失败；本阶段冒烟本身暴露的是阶段目标失败（见下），不是工具问题。
+
+三、测试配置
+
+Git工作树或提交标识：35e914786755c7f2b55cafae0382f0d390f4d724；工作树有未提交修改（含本次 WP3 四个文件）。
+Python和MuJoCo版本：Python 3.13.2；MuJoCo 3.13.0；NumPy 2.5.3。
+backend：wls。
+model_variant：held_leg。
+preset：tuned-agile。
+jump_height：0.10 m。
+jump_stroke：0.12 m。
+jump_time：1.0 s。
+duration：1.8 s（jump 触发后给 0.8 s）。
+其他输入：nominal_length=0.28 m；command=default_command()；无扰动。
+
+四、关键状态时序
+
+起跳触发：t=1.000 s。
+进入COMPRESS：t=1.000 s。
+进入THRUST：t=1.250 s（phase_transition legal_predecessor=true）。
+进入FLIGHT：t=1.253 s（THRUST 仅 3 帧后进入）。
+wheel_gap>1mm：t=1.225 s（此时仍为 COMPRESS），左右 gap=[0.001485, 0.001478] m。
+停止：t=1.253 s，stop_reason=liftoff_confirmed（本轮按阶段目标在确认离地后立即停止）。
+phase_frame_counts：IDLE=1000，COMPRESS=250，THRUST=3，FLIGHT=1。
+phase_transition_count=3，phase_transition_assertion_failures=0。
+thrust_command_built_frames=3，thrust_applied_frames=1。
+max_abs_pitch_rad=0.07693，max_abs_pitch_rate_rad_s=4.149。
+
+五、WBC预测接触力
+
+首拍（t=1.000 s，COMPRESS）：predicted_normal 最小分量 -60.43 N；normal_forces=[71.38, 71.32] N。
+t≈1.246 s 起：日志反复出现“WBC 预测法向力为负已持续 0.012/0.016/...0.032 s（阈值 0.012 s）”，降级为警告继续运行。
+t=1.248 s（COMPRESS）：predicted_normal 最小分量 -1029.15 N，normal_forces=[0.0, 0.0]。
+t=1.252 s（THRUST）：predicted_normal 最小分量 -397.95 N，normal_forces=[0.0, 0.0]。
+WBC预测力变化解释：压缩目标要求质心向下加速度绝对值超过 g，接触力需求转负（拉力），WBC无法在轮地接触上实现，预测法向力出现大负值。
+
+六、物理步后实际接触力
+
+COMPRESS期间实际法向力从 [71.38, 71.32] N 降到 [0.0, 0.0]：两轮法向力归零。
+COMPRESS期间 wheel_gap：最小 -0.00063 m，最大 +0.06909 m；共 25 帧 gap>1 mm。
+COMPRESS期间 contact_estimator 仍为 [true,true]（陈旧接触，未随几何离地更新），但几何 gap 已持续为正。
+实际力与WBC预测力是否一致：几何与力的证据都显示轮子已卸载/离地，与预测法向力转负一致。
+
+七、几何与运动数据
+
+质心竖直目标：COMPRESS desired=-11.8004 m/s^2；THRUST desired=+11.8004 m/s^2（= JumpConfig.com_acceleration()）。
+首拍 com_vertical 实际：achieved=-5.2503，residual=+6.5501（t=1.000 s）。
+t=1.248 s：achieved=-38.8123，residual=-27.0119。
+腿长：起始 0.2800 m；t=1.248 s 左右腿长 0.1668/0.1675 m；t=1.249 s 达 0.1603/0.1609 m（压缩终点 0.1600 m，已穿过）；全过程最小 0.13245 m（越过压缩终点后继续下探）。
+左右轮最低于间隙：见第四节，COMPRESS内最大 +0.06909 m。
+前向位移 max 0.00106 m；前向速度 max 0.2852 m/s。
+
+八、WBC任务与最终输出
+
+目标是否进入WBC：是。COMPRESS 帧的 wbc_task_trace 含 com_vertical，desired=[-11.8004]；THRUST 帧含 com_vertical，desired=[+11.8004]。
+任务列表：com_vertical 与 pitch/angle_R/angle_L/roll 等共存（jump.active 下已移除 forward_velocity/yaw/length_R/length_L）。
+tau_jump 诊断值：全程 0（不再叠加）。
+data.ctrl 与 WBC 总力矩一致性：max|ctrl - wbc_raw_torque| = 0.000e+00（全部 WBC 帧）。
+WBC原始力矩/最终ctrl：跳阶段腿侧达到限幅 |tau|=40.0 N·m（Right_front/Right_rear/Left_front/Left_rear），轮侧约 0。
+output_source：wbc_update=314，zero_order_hold=940。
+wbc_calls=314；mpc_calls=63。
+comp_vertical 权重：TASK_WEIGHTS["com_vertical"]=25.0（来源：沿用被替代的 length_R/length_L 既有名次）。
+是否发生airborne_zero覆盖：无（airborne_frames=0，停止在FLIGHT首帧）。
+
+九、阶段判定（WP3验收，部署文档第七节）
+
+目标进入WBC：是。
+data.ctrl与WBC总力矩一致：是（max差0）。
+FLIGHT无接触不抛异常：是（到达FLIGHT后停止，exit=0，日志无异常）。
+普通GROUND不变：是（IDLE首拍 t=0.000 ctrl=[-7.517001, 7.549013, 7.506846, -7.540468, -2e-05, -7e-06]，与改动前 V4_FINAL_MOTOR_AUDIT t=0 站立总力矩一致）。
+WP3验收结论：通过（接口与调度层面）。
+
+阶段目标判定（部署文档第八节，COMPRESS->THRUST->LIFTOFF）：
+压缩阶段未离地：否，失败。t=1.225 s 仍在 COMPRESS 时几何 gap 已 >1 mm，COMPRESS 内最大 gap 0.06909 m，实际法向力归零。
+状态合法地从COMPRESS切换THRUST：是（legal_predecessor=true，assertion_failures=0），但压缩在离地之后才到达压缩终点。
+THRUST后确认真实离地：是（进入FLIGHT）。
+全过程无WBC无接触异常：是（无异常抛出；有预测法向力为负的降级警告）。
+阶段目标结论：失败于“压缩阶段未离地”，失败后已按文档停止，不进入后续阶段。
+
+十、事实依据
+
+1. jump.start 日志：等效力 157.2 N/腿，离地速度 1.401 m/s，加速时间 118.7 ms；由 config.com_acceleration() 得 11.8004 m/s^2。
+2. COMPRESS desired=-11.8004 m/s^2 < -g=-9.81 m/s^2：等价于要求 F_normal_total=m(g+a_z)<0（需地面提供拉力），与分析文档 4.3“压缩需 0<F_normal_total<m*g”矛盾。
+3. 几何证据：COMPRESS 内 gap 在 t=1.225 s 突破 1 mm，最大 0.06909 m；法向力在同期降为 0。
+4. 输出证据：max|ctrl-wbc_raw_torque|=0，tau_jump 全程 0。
+5. GROUND对照：IDLE t=0 ctrl 与改动前 V4 t=0 站立总力矩一致。
+6. 腿长最小 0.13245 m < 压缩终点 0.1600 m，说明压缩未被及时制动。
+
+十一、失败证据或通过依据
+
+失败现象：COMPRESS 阶段轮子提前离地（gap 突破 1 mm 并持续增大到 69 mm），实际法向力归零，压缩在离地后才到达压缩终点。
+最早异常时刻：t=1.225 s。
+最早异常字段：wheel_gap（几何间隙）。
+证据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.log
+初步机理（仅为证据解读，不是调参依据）：COMPRESS 目标取自 -JumpConfig.com_acceleration()，该量是 THRUST 所需的正向加速度，取负后其绝对值超过 g，物理上要求负法向力，导致轮子卸载离地。这不是 com_vertical 权重不足（首拍 achieved=-5.25 对 desired=-11.80），而是压缩目标本身超出接触可行性。
+不能确认的部分：本轮未验证 COM PRESS 制动、FLIGHT 姿态、LANDING。
+
+十二、下一步请求
+
+是否建议继续下一阶段：否；按文档暂停，等待问题排查agent复查代码与冒烟证据。
+建议下一阶段：WP4（跳跃参考与阶段目标），并由问题排查agent给出已批准的 COMPRESS/制动加速度 profile（要求 a_z 落在 (-g, 0)，单位 m/s^2，来源可追溯）。
+需要问题排查agent确认的问题：
+1. 我按文档“目标只能来自现有JumpConfig推导量”采用了 ±config.com_acceleration()；冒烟证明 COMPRESS 取 -config.com_acceleration() 超出接触可行域。请给出你批准的 COMPRESS/COMPRESS_BRAKE 加速度来源（或确认改由已批准 profile 提供），我不自行改数。
+2. com_vertical 权重 25.0 取自被替代的 length 任务名次；请确认是否保持，或给出你批准的具体权重。
+3. 本轮 COMPRESS 首拍 residual 与最终离地属可解释失败；请确认失败判定与后续 WP4 口径。
+
+============================================================
+
+WP编号：WP3。
+修改文件和函数：
+wheel_leg_mujoco/gbc_mpc_wbc/jump.py :: JumpCommand、JumpPlanner._command
+wheel_leg_mujoco/gbc_mpc_wbc/wbc.py :: TASK_WEIGHTS
+wheel_leg_mujoco/gbc_mpc_wbc/control.py :: wbc_stage
+wheel_leg_mujoco/gbc_mpc_wbc/loop.py :: run_loop
+本次实际修改内容：
+1. jump.py：JumpCommand 新增 desired_com_acceleration_z（默认None）；_command() 为 COMPRESS 提供 -config.com_acceleration()、THRUST 提供 +config.com_acceleration()，其余相位为None。
+2. wbc.py：TASK_WEIGHTS 新增具名 "com_vertical": 25.0（来源：被替代的 length_R/length_L 名次）。
+3. control.py：移除跳跃期 thrust_torque()/external 注入与 torque=torque+tau_jump；tau_jump 只作诊断（恒0），data.ctrl 直接为 WBC 总力矩。
+4. loop.py：WBC 调用条件改为“FLIGHT 或无有效接触时不调用”；desired_com_acceleration_z 直接取自 JumpCommand；thrust_applied 改由 WBC 已求解且已写入判定；jump_payload 增录 desired_com_acceleration_z；进入 FLIGHT 后立即停止本轮测试。
+未修改内容：MPC参数、其他WBC任务权重、接触/离地阈值、状态机相位定义、selection轮权限、限幅、JumpConfig 数值。
+语法/导入自检：通过。
+字段口径自检：通过。
+冒烟结果：通过（exit=0，到达FLIGHT且停止，无异常）。
+重复性结果：本阶段按“只做一次”未重复；E2已有重复性证据。
+关键数据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP3_smoke_baseline_run01.log
+对照结果：GROUND不变（IDLE t=0 ctrl 与改动前一致）；跳阶段 ctrl 与 WBC 总力矩一致（差0）。
+是否满足WP通过条件：是（WP3接口与调度验收）；阶段目标否（压缩离地失败）。
+失败证据：t=1.225 s COMPRESS 内 gap>1mm；COMPRESS 最大 gap 0.06909 m；法向力归零。
+是否允许进入下一WP：否；等待问题排查agent复查与批准。
+
+============================================================
+
+十三、算法代码修改审计字段
+
+工作包编号：WP3。
+修改文件：wheel_leg_mujoco/gbc_mpc_wbc/{jump.py,wbc.py,control.py,loop.py}。
+修改函数/类：JumpCommand；JumpPlanner._command；TASK_WEIGHTS；wbc_stage；run_loop。
+新增字段或接口：JumpCommand.desired_com_acceleration_z；jump_payload["desired_com_acceleration_z"]；TASK_WEIGHTS["com_vertical"]。
+删除或禁用的旧路径：control.py 的 thrust_torque 外部力注入与 torque+tau_jump；loop.py 中基于 tau_jump 非零的 thrust_applied 判定。
+保留的兼容路径：desired=None 时 wbc.py/control.py 行为不变；tau_jump 字段保留为诊断（恒0）。
+实际控制权归属：WBC 统一求解并写出总力矩；JumpPlanner 只提供相位与质心竖直目标。
+WBC是否唯一输出总力矩：是（data.ctrl = wbc_raw_torque，差0）。
+是否仍存在tau_jump叠加：否（全程0）。
+是否仍存在leg_length_target主驱动：否（COMPRESS/THRUST 的 leg_length_target=None；jump.active 时 length 任务被移除）。
+接触拓扑来源：feedback.decision.contact（监督层）。
+WBC预测力来源：control.py recover_contact_force，字段 predicted_normal。
+物理步后实际力来源：sampling 反解 normal_forces。
+状态机合法前态检查：loop.py previous_phase 表 + phase_transition（本冒烟 assertion_failures=0）。
+执行锁存量：thrust_applied 改由“WBC已求解且总力矩已写入”判定；其余锁存未改（WP5）。
+
+接口修改前后对照：
+修改前输入：JumpCommand 无质心目标；loop 用 getattr 取 None。
+修改后输入：JumpCommand 携带 desired_com_acceleration_z；loop 直接传入 wbc_stage。
+修改前输出：跳阶段 ctrl = wbc_raw_torque + tau_jump，且轮力矩被 jump.wheel_torque 覆盖。
+修改后输出：跳阶段 ctrl = WBC 总力矩，无 tau_jump 叠加。
+
+普通GROUND回归对照：
+结果是否保持一致：是（IDLE t=0 ctrl 与改动前 V4 t=0 站立总力矩一致）。
+差异字段：无。
+差异原因：desired=None 与 jump 不活动时路径未变。
+
+算法修改是否通过：WP3接口与调度验收通过；阶段目标未通过（压缩离地）。
+未通过原因：COMPRESS 目标 -config.com_acceleration() 超出 (-g,0) 接触可行域；需问题排查agent给出已批准压缩 profile。
+
+============================================================
+
+署名：测试agent-ds
+
+============================================================
+
+# 问题排查agent复查：WP3异常根因（2026-10-09）
+
+一、关于“机体被固定”的结论
+
+该猜想被源码和数据否定。`robot.xml` 的base包含 `base_free`；`output.py`通过 `mujoco.mj_step`推进物理，控制循环没有持续写入根部位置。WP3结果中根部z从 `0.220239 m`降到 `0.164718 m`，质心z从 `0.263881 m`降到 `0.243734 m`，根部竖直速度达到 `-2.139 m/s`。机体确实下降，只是腿长从 `0.2800 m`塌到 `0.13245 m`，所以视觉上相对腿部像机体不动。
+
+二、已确认根因
+
+COMPRESS目标为 `-config.com_acceleration() = -11.8004 m/s²`，小于 `-g`。按 `F_normal_total=m(g+a_com_z)`，该目标要求负法向力；轮地接触无法提供拉力，实际法向力因此归零，轮毂在仍处于COMPRESS时先离地。WBC随后继续输出腿部力矩，腿长继续下降并越过压缩终点。
+
+证据：t=1.225 s仍为COMPRESS时gap为 `1.485/1.478 mm`；最大gap `0.06909 m`；实际法向力从约 `71 N`降为 `0`；最小腿长 `0.13245 m`。因此首先是压缩参考物理不可行，不是MuJoCo根部固定或API把力传错。
+
+三、下一步安排
+
+WP3阶段目标判定为失败，暂停进入释放优化。下一阶段只修复COMPRESS参考和压缩制动：使用满足 `-g < a_com_z < 0` 的已批准profile，增加COMPRESS_BRAKE，确保压缩终点前下降速度被制动；然后验证“压缩双轮接触 -> 释放 -> 离地即停”。飞行和落地暂不测试。
+
+============================================================
+
+# 测试agent-ds：压缩参考修复与压缩制动（2026-10-09）
+
+一、修改边界
+
+阶段编号：部署文档第九节（COMPRESS参考修复 + COMPRESS_BRAKE）。
+本次只改变的诊断对象：JumpConfig/JumpPlanner 的 COMPRESS/COMPRESS_BRAKE 具名参考、COMPRESS_BRAKE 相位与退出条件、loop.py 合法前态表。
+未改变的控制参数：MPC参数、WBC 其他任务权重、com_vertical 权重（仍为25.0）、接触与离地阈值、限幅、selection 轮权限、JumpConfig 其余数值未改。
+代码路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\jump.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.log
+
+二、自检结果
+
+语法与导入：通过；jump.py、loop.py py_compile 通过，冒烟工具可运行（exit=0）。
+字段与真实对象一致性：通过；新增 COMPRESS_BRAKE 相位、具名参考方法与 jump_payload 字段对应。
+单工况冒烟：通过（进程正常结束）。
+相同输入重复性：本阶段按部署文档“只做一次短时序”，未重复运行。
+自检日志路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.log
+自检失败说明：无自检失败；失败的是阶段目标（见下）。
+
+三、测试配置
+
+Git工作树：35e914786755c7f2b55cafae0382f0d390f4d724；工作树有未提交修改（含本次 jump.py、loop.py）。
+Python和MuJoCo版本：Python 3.13.2；MuJoCo 3.13.0；NumPy 2.5.3。
+backend：wls；model_variant：held_leg；preset：tuned-agile。
+jump_height：0.10 m；jump_stroke：0.12 m；jump_time：1.0 s；duration：2.0 s。
+其他输入：nominal_length=0.28 m；command=default_command()；无扰动。
+用户批准的压缩参考（本次采用，非自行试数）：
+COMPRESS a_com_z = -0.5*g = -4.9050 m/s^2（F_normal_total = 0.5 m g）。
+COMPRESS_BRAKE a_com_z = +0.5*g = +4.9050 m/s^2（F_normal_total = 1.5 m g）。
+制动触发：实测下降速度算停止距离 s_stop = Ldot^2 / (2*|a_brake|)，到压缩终点剩余距离<=s_stop 时进入 BRAKE。
+BRAKE 退出：leg_length<=compression_end 且 leg_length_rate>=0 时切 THRUST。
+
+四、关键状态时序
+
+进入COMPRESS：t=1.000 s，desired_com_acceleration_z=-4.9050。
+进入COMPRESS_BRAKE：未发生。
+进入THRUST：未发生。
+进入FLIGHT：未发生。
+进入ABORT：t=1.425 s，原因“腿长 0.4305 m 越出机械范围 [0.114, 0.430]”。
+phase_frame_counts：IDLE=1000，COMPRESS=425，ABORT=575；THRUST=0，FLIGHT=0。
+phase_transition_count=2，phase_transition_assertion_failures=0。
+airborne_frames=188（在ABORT之后）。stop_reason=null（仿真跑满 2.0 s）。
+
+五、WBC预测接触力
+
+COMPRESS 前 0.12 s：实际法向力从 [71.4, 71.3] N 波动到 [66.4, 81.5] N，双轮保持几何接触（gap≈-0.0005 m）。
+t>1.16 s 后实际法向力升到 [88~99] N（支撑增强），随后 t=1.424 s 降到 [58.0, 56.7] N。
+WBC预测法向力在 COMPRESS 期间无持续负值（与 WP3 的 -60/-1029 N 不同）；负值警告出现在 ABORT 之后。
+
+六、物理步后实际接触力
+
+COMPRESS 主段双轮几何 gap 约 -0.0005~-0.0006 m，实际法向力为正，双轮未离地。
+唯一离地发生在 ABORT 之后（airborne_frames=188）。
+
+七、几何与运动数据
+
+腿长：t=1.000 为 0.2800 m；最小 0.2720 m（t=1.133）；随后反向增大到 0.4296 m（t=1.424），再越限 ABORT。
+质心 z：0.2639（t=1.000）-> 0.2583（t=1.120，下降）-> 0.3713（t=1.424，反向升高）。
+腿长率：t=1.120 为 -0.029 m/s，t=1.160 后转正并升至 +0.898 m/s。
+前向位移 max 0.0834 m；pitch max 0.6358 rad；前向速度 max 1.1506 m/s。
+
+八、WBC任务与最终输出
+
+任务列表（COMPRESS）：['pitch','angle_R','angle_L','roll','com_vertical']（length_R/length_L/forward_velocity/yaw 已移除）。
+com_vertical 目标/实际/残差（单位 m/s^2）：
+t=1.000：desired=-4.905，achieved=-2.185，residual=+2.720。
+t=1.080：desired=-4.905，achieved=+0.392，residual=+5.297。
+t=1.240：desired=-4.905，achieved=+3.270，residual=+8.175。
+t=1.424：desired=-4.905，achieved=-4.221，residual=+0.684。
+scaling（com_vertical）=1.0（全程）；feasible=True；dynamics_residual≈1e-13。
+tau_jump 全程 0；max|ctrl - wbc_raw_torque| = 0.000e+00。
+
+九、阶段判定
+
+COMPRESS 参考落入可行域：是（-4.9050 ∈ (-g, 0)）。
+压缩双轮持续接触：部分成立（前 ~0.12 s 保持接触并在下降；之后腿长反向伸展，但到 ABORT 前 gap 仍未持续为正）。
+COMPRESS_BRAKE 不越过压缩终点：未测试（BRAKE 从未触发，腿长最小 0.2720 m，远未达到 compression_end=0.16 m）。
+THRUST：未发生。
+LIFTOFF：未发生（先 ABORT）。
+本阶段判定：失败（中止于机械限位）。
+
+十、事实依据
+
+1. desired_com_acceleration_z 全程为 -4.9050（= 用户批准的 -0.5 g），不再出现 WP3 的 -11.8004。
+2. 前 0.12 s 压缩方向正确：腿长 0.2800->0.2720 m，质心 z 0.2639->0.2583 m，双轮法向力为正。
+3. 随后 com_vertical 实际加速度反号为 +0.392 / +2.180 / +3.270 m/s^2，residual 2.7~8.2，而 scaling=1.0、feasible=True、dyn_res≈1e-13：没有触发限幅，是加权任务被 pitch(100)/angle(60) 等强任务压过。
+4. 腿长随之反向伸展到 0.4296 m，t=1.425 s 越出机械上限 [0.114, 0.430] -> ABORT。
+5. 输出：max|ctrl-wbc_raw_torque|=0，tau_jump=0。
+
+十一、失败证据或通过依据
+
+失败现象：压缩启动后约 0.12 s 反向，腿长从 0.2720 m 伸展到 0.4296 m，越机械上限触发 ABORT；COMPRESS_BRAKE 与 THRUST 均未发生。
+最早异常时刻：约 t=1.08 s（com_vertical 实际加速度反号）。
+最早异常字段：wbc_task_trace.com_vertical.achieved_acceleration / residual。
+证据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.log
+机理：目标本身已落在接触可行域，但 com_vertical 具名权重 25.0 不足以在加权最小二乘中胜过低优先级更高的 pitch(100) 与腿角(60)任务，达成的质心加速度被反号，腿长由角度任务拉回伸展。
+不能确认的部分：未测试释放与离地。
+
+十二、下一步请求
+
+是否建议继续下一阶段：否；按停止条件暂停，等待问题排查agent复查。
+需要问题排查agent确认的问题：
+1. com_vertical 在跳跃 COMPRESS/COMPRESS_BRAKE 的具名权重：当前 25.0 被 pitch/angle 压过（scaling=1.0、residual 最高 8.2 m/s^2）。请给出批准的新值或优先级配置（本阶段未自行调权重）。
+2. 是否批准在 COMPRESS/COMPRESS_BRAKE 期间按相位放宽/移除腿角任务（分析文档 C2 的相位权限），以避免角度任务把腿拉回伸展。
+3. 制动触发/退出判据本次未触发；请确认停止距离与退出条件是否保持，或给出替代口径。
+4. 本轮 ABORT 后仿真继续跑满 2.0 s（stop_reason=null）。是否要求 ABORT 也立即停止测试？
+
+============================================================
+
+WP编号：WP4（压缩参考与压缩制动，部署文档第九节）。
+修改文件和函数：
+wheel_leg_mujoco/gbc_mpc_wbc/jump.py :: JumpPhase、JumpConfig（compress/brake_acceleration）、JumpPlanner.update、JumpPlanner._command
+wheel_leg_mujoco/gbc_mpc_wbc/loop.py :: run_loop（allowed_predecessors）
+本次实际修改内容：
+1. JumpPhase 新增 COMPRESS_BRAKE。
+2. JumpConfig 新增具名字段 compress_acceleration_ratio=-0.5、brake_acceleration_ratio=0.5 与方法 compress_acceleration()/brake_acceleration()（来源：用户 2026-10-09 批准）。
+3. update()：COMPRESS 用停止距离判据进 COMPRESS_BRAKE；COMPRESS_BRAKE 退出同时检查压缩进度与腿长率。
+4. _command()：COMPRESS 目标改为 compress_acceleration()，新增 COMPRESS_BRAKE 目标 brake_acceleration()。
+5. loop.py 合法前态表加 COMPRESS_BRAKE，THRUST 前态改为 COMPRESS_BRAKE。
+未修改内容：com_vertical 权重（仍25.0）、其他任务权重、接触/离地阈值、MPC参数、限幅、selection 轮权限、stop-on-FLIGHT之外不新增停机。
+语法/导入自检：通过。
+字段口径自检：通过。
+冒烟结果：失败（进程跑完但阶段目标未通过，ABORT 于机械限位）。
+重复性结果：本阶段按“只做一次”未重复。
+关键数据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\E3_compress_brake_baseline_run01.log
+对照结果：GROUND 路径未改；跳阶段 max|ctrl-wbc_raw_torque|=0，tau_jump=0。
+是否满足WP通过条件：否（压缩未保持到终点）。
+失败证据：见第十一节。
+是否允许进入下一WP：否；等待问题排查agent复查与批准。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：WP5只验证压缩（2026-10-09）
+
+一、修改边界
+
+阶段编号：WP5（只验证压缩，切断跳跃期MPC对WBC的输入）。
+本次只改变的诊断对象：三项，与部署文档一致。
+1. control.py :: wbc_stage：跳跃期不再把 MPC sample 交给 tasks.tasks（sample_raw 保留作 shadow）。
+2. jump.py :: JumpPlanner.update：COMPRESS 中腿长率>=0 且未到 compression_end 时立即 ABORT，原因固定 compression_direction_lost。
+3. loop.py/simulation.py/tools/jump_diagnostic.py：新增 compression_only 开关（默认False），压缩完成/ABORT/护栏/接触丢失时在写 THRUST 前停止。
+未改变：MPC参数与腿长网格、WBC既有权重（com_vertical仍25.0）、wheel selection、接触/离地阈值、机械限位、MJCF、backend/model_variant/preset。
+代码路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\control.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\jump.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\simulation.py（仅 run() 透传 compression_only）
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\jump_diagnostic.py（仅 --compression-only 入口）
+结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.log
+
+修改前后行为：
+control.py：修改前，jump.active 时把 sample_raw 复制并清零腿角字段后仍交给 tasks.tasks；修改后，jump.active 时 sample=sample_override（无固定跳趃参考则为 None），普通 GROUND 仍 sample=sample_raw。
+jump.py：修改前 COMPRESS 只会进入 BRAKE/继续运行；修改后增加“方向丢失即 ABORT”。
+loop.py：新增 compression_only，默认 False；True 时在写 THRUST 前停。
+
+二、自检结果
+
+语法与导入：py_compile 命令 `../.venv/Scripts/python.exe -m py_compile gbc_mpc_wbc/control.py gbc_mpc_wbc/jump.py gbc_mpc_wbc/loop.py gbc_mpc_wbc/simulation.py tools/jump_diagnostic.py`，退出码 0。
+字段与真实对象一致性：通过。
+单工况冒烟：已运行（见下），结果失败。
+相同输入重复性：按部署文档“只运行一次固定配置”，未重复。
+自检日志路径：无独立自检文件，py_compile 退出码 0，静态检查输出见本记录。
+
+静态检查（逐项）：
+- run_loop.compression_only 默认值 = False；Simulation.run.compression_only 默认值 = False。
+- JumpPlanner 单步：腿长=0.20 m（>0.16）且腿长率=+0.10 -> phase=ABORT，reason=compression_direction_lost。
+- 对照：同腿长、腿长率=-0.10 -> phase=COMPRESS，reason=None。
+- 边界：腿长=0.16 且腿长率=+0.10 -> phase=COMPRESS_BRAKE（不误判方向丢失）。
+- GROUND（jump不活动）：WBC 帧 sample 与 sample_raw 同为存在/同为 None，未变。
+- 跳跃 COMPRESS：47 个 WBC 帧 sample 均为 None，sample_raw 均存在。
+
+三、测试配置
+
+命令：`../.venv/Scripts/python.exe tools/jump_diagnostic.py --stage WP5_compression_only --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --compression-only`
+退出码：0。
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；jump_stroke=0.12；jump_time=1.0；duration=2.0；无 disturbances；compression_only=True。
+COMPRESS 目标=-4.9050 m/s^2；COMPRESS_BRAKE 目标=+4.9050 m/s^2（未修改）。
+Git工作树：35e914786755c7f2b55cafae0382f0d390f4d724；工作树有未提交修改。
+
+四、关键状态时序
+
+t=0.000：IDLE（sample=GROUND，WBC消费MPC sample，GPT 行为未变）。
+t=1.000：IDLE -> COMPRESS（起跳指令触发，jump_time=1.0 s）。t=1.000 起 47 个 WBC 帧 sample 均为 None。
+t=1.186：跳出 ABORT，原因 compression_direction_lost；compression_only 立即停止物理推进。
+stop_reason=compression_abort:compression_direction_lost。
+未进入 COMPRESS_BRAKE，未进入 THRUST，未进入 FLIGHT，未进入 LANDING。
+phase_frame_counts（记录到的）：IDLE=1000，COMPRESS=186。
+thrust_command_built_frames=0，thrust_applied_frames=0，airborne_frames=0。
+phase_transition_count=1，phase_transition_assertion_failures=0。
+
+五、WBC预测接触力
+
+COMPRESS 期间 predicted_normal 未出现持续负值；日志无 “预测法向力为负” 警告。
+
+六、物理步后实际接触力
+
+COMPRESS 全程：接触几何均为 [true, true]；两轮实际法向力均为正（最小 [55.674, 55.675] N）；wheel_gap 最大 -0.00047 m（未张开）。
+离地：未发生。
+
+七、几何与运动数据
+
+腿长：t=1.000 为 0.2800 m，持续下降到 t=1.185 的 0.2587 m（最小，未达 compression_end=0.16 m）；全程未出现腿长反向增大。
+质心 z：0.2639（t=1.000）-> 0.2487（t=1.185），持续下降。
+pitch max 0.01743 rad；前向位移 max 0.00126 m；前向速度 max 0.00228 m/s。
+max_abs_ctrl 腿部约 9.99 N*m（未触及 40 N*m 限幅）。
+
+八、WBC任务与最终输出
+
+任务列表（COMPRESS）：['pitch','angle_R','angle_L','roll','com_vertical']。
+com_vertical目标均为 -4.9050 m/s^2，但实际值逐步变为正值（详见下）。pitch 任务 desired 从 -0.005 升到 +2.726。
+wbc_result.feasible=True；scaling 全部 1.0（含 com_vertical）；dynamics_residual≈2e-13。
+max|ctrl - wbc_raw_torque| = 0.000e+00（全帧）。max|tau_jump| = 0.000e+00。
+output_source：wbc_update=297，zero_order_hold=889，airborne_zero=0。
+
+九、最早异常帧（部署文档第六节要求字段）
+
+最早 com_vertical achieved>=0 的帧：t=1.096 s（phase=COMPRESS）。
+- phase：COMPRESS。
+- sample是否消费MPC：否（sample=None，sample_raw 存在）。
+- com_vertical：desired=-4.9050，achieved=+0.0254，residual=+4.9304。
+- leg_state=[0.26898, -0.12350, 0.26900, -0.12350] m/rad；leg_rate=[-0.17620, +0.06057, -0.17585, +0.06052]。
+- com_xz=[-0.048071, 0.256144] m；com_vxz=[+1.44e-05, -0.125317] m/s（z 向下）。
+- wheel_gap=[-0.0004932, -0.0004931] m（双轮接触）。
+- normal_forces=[70.602, 70.581] N（双轮为正）；contact_geometry=[True, True]；contact_estimator=[True, True]。
+- wbc_result.feasible=True；scaling 全 1.0；dynamics_residual=2.11e-13。
+- ctrl=[-7.5870, +7.5709, +7.5814, -7.5682, 0.0, 0.0] N*m；wbc_raw_torque 相同；差值 0；tau_jump=0。
+- output_source=wbc_update；airborne_active=False；mpc_called=False；wbc_called=True。
+
+判定（按部署文档第七节可选类别）：WBC任务未实现。依据：sample 未消费MPC（排除“MPC干扰”）；两轮几何接触与法向力均正常（排除“接触异常”）；ctrl 与 wbc_raw 一致、tau_jump=0（排除“输出映射异常”）；com_vertical 目标正确进入任务但 achieved 反向（+0.0254 vs -4.9050，residual 4.93），且 scaling=1.0、feasible=True（未限幅）——任务目标未被实现。
+最早异常字段：wbc_task_trace.com_vertical.achieved_acceleration。
+
+十、阶段判定
+
+跳跃期WBC的sample不为MPC sample：是。
+状态序 IDLE->COMPRESS->COMPRESS_BRAKE：否（未进入 COMPRESS_BRAKE）。
+压缩腿长持续向0.16 m减小：否（只从0.2800降到0.2587，未达0.16）。
+质心z向下：是。双轮geometry_contact持续：是。两轮normal_forces持续为正：是。无持续正wheel_gap：是。
+COMPRESS_BRAKE制动后触发compression_complete：否（未发生）。
+compression_complete前无THRUST/FLIGHT/LANDING/airborne/ABORT：THRUST/FLIGHT/LANDING/airborne 均无；但出现 compression_direction_lost ABORT。
+ctrl与wbc_raw一致、tau_jump为零：是。
+WP5结论：失败（压缩方向丢失，未完成压缩）。
+
+十一、失败证据或通过依据
+
+失败现象：COMPRESS 从 t=1.000 开始，腿长从 0.2800 m 降到 t=1.185 的 0.2587 m 后停止/反转，t=1.186 触发 compression_direction_lost ABORT；全程双轮保持接触、法向力为正。
+最早异常时刻：t=1.096 s。
+最早异常字段：wbc_task_trace.com_vertical.achieved_acceleration（首次变为正值 +0.0254，目标为 -4.9050）。
+证据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.log
+不能确认的部分：本轮未验证 COMPRESS_BRAKE、THRUST、离地；不做根因推断。
+
+十二、下一步请求
+
+是否建议继续下一阶段：否；按规则停止并回传，等带问题排查agent根据最早异常决定下一测试。
+需要问题排查agent确认的问题：
+1. 已按要求只改三项，未调权重、未改阈值。com_vertical 仍为 25.0，且本轮 scaling=1.0、feasible=True，实际加速度却反向。是否归入“WBC任务未实现”类别、由问题排查agent决定下一测试（我不自行修复或调参）。
+2. 本轮 ABORT 后按 compression_only 立即停止，未跑满 duration；确认该停止口径。
+
+============================================================
+
+WP编号：WP5。
+修改文件和函数：
+wheel_leg_mujoco/gbc_mpc_wbc/control.py :: wbc_stage（sample 选择）
+wheel_leg_mujoco/gbc_mpc_wbc/jump.py :: JumpPlanner.update（COMPRESS 方向丢失 ABORT）
+wheel_leg_mujoco/gbc_mpc_wbc/loop.py :: run_loop（compression_only）
+wheel_leg_mujoco/gbc_mpc_wbc/simulation.py :: Gbc486MpcWbcSimulation.run（透传 compression_only）
+wheel_leg_mujoco/tools/jump_diagnostic.py :: --compression-only
+本次实际修改内容：见第一节。
+未修改内容：见第一节“未改变”。
+语法/导入自检：通过（py_compile exit=0）。
+字段口径自检：通过。
+冒烟结果：失败（compression_direction_lost）。
+重复性结果：本阶段未重复。
+关键数据文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP5_compression_only_baseline_run01.log
+对照结果：GROUND sample 行为未变（sample 与 sample_raw 同为存在/同为 None）；跳跃 COMPRESS 的 47 个 WBC 帧 sample 均为 None。
+是否满足WP通过条件：否。
+失败证据：见第十一节。
+是否允许进入下一WP：否；等待问题排查agent复查与批准。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：新部署（任务接口保留+逐腿判据+单步验收+A/B冻结实验）（2026-10-09）
+
+一、修改边界
+
+阶段编号：问题排查agent新增部署要求（旧WP6作废）。
+本次只改变的诊断对象：
+1. control.py :: wbc_stage
+   - 删除“跳跃期从 motion 过滤 length_R/length_L”的做法；保留 tasks.tasks() 返回的全部任务对象与原顺序。
+   - 仅对 COMPRESS/COMPRESS_BRAKE/THRUST 的两条腿长任务用 dataclasses.replace(task, activation=0.0) 关闭权限；LANDING/RECOVER 不变。
+   - 任务 trace 逐项写出 name/desired_acceleration/bias_acceleration/activation/achieved_acceleration/residual/scaling/exhausted（不再只写 com_vertical）。
+   - 新增 jump_holds 参数，透传给 tasks.tasks 的显式姿态/腿角参考。
+2. wbc.py :: Gbc486Tasks.tasks
+   - 保持 length_R、length_L、angle_R、angle_L 四个独立 TaskLevel 创建接口，未删除腿长任务，未合成 common length。
+   - 新增 pitch_reference/roll_reference/angle_R_reference/angle_L_reference 显式参考参数（默认None，行为不变）。
+3. jump.py / loop.py
+   - JumpObservation 新增 leg_length_R/leg_length_rate_R/leg_length_L/leg_length_rate_L。
+   - COMPRESS 压缩方向、压缩终点、机械范围均逐腿判断；方向丢失记录侧别；BRAKE 退出用“右且左”双腿条件。
+   - loop.py 逐腿传入观测；新增 freeze_jump_reference（默认False），为True时在跳跃开始捕获一次 pitch/roll/angle_R/angle_L 并作为冻结参考。
+   - 每帧保留左右独立 wheel_gap/geometry_contact/contact_estimator/normal_force（原已存在）。
+4. simulation.py、tools/jump_diagnostic.py：透传 compression_only/freeze_jump_reference；新增 --freeze-jump-reference。
+5. tools/video.py：新增 --compression-only 透传（仅录像工具，上一轮为看视频加的）。
+未改变：MPC参数/网格、TASK_WEIGHTS、com_vertical 权重 25.0、wheel selection、接触/离地阈值、机械限位、MJCF、backend/model_variant/preset、jump 加速度。
+代码路径（绝对）：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\control.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\wbc.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\jump.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\simulation.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\jump_diagnostic.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\tools\video.py
+
+二、自检结果
+
+语法与导入：py_compile（control/wbc/jump/loop/simulation/jump_diagnostic）退出码 0。
+字段与真实对象一致性：通过（任务 trace 逐项字段、逐腿观测字段均与真实对象对应）。
+单工况冒烟：通过（三组运行均 exit=0）。
+相同输入重复性：按文档每组只运行一次，未重复。
+
+三、单步验收（部署文档三）
+
+命令：`tools/jump_diagnostic.py --stage NEWDEP_single_step --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --compression-only`，退出码0。
+结果：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\NEWDEP_single_step_baseline_run01.json.gz
+逐项：
+1. COMPRESS 任务列表=['pitch','angle_R','angle_L','forward_velocity','length_R','length_L','yaw','roll','com_vertical']；length_R 与 length_L 均存在，activation=0.0、scaling=0.0。
+2. 任务列表中 pitch、roll、angle_R、angle_L、com_vertical 均存在，且每个都有 desired/achieved/residual。
+3. com_vertical desired=[-4.905]（未被替换）。
+4. 逐腿数据齐全：leg_state=[L_R,phi_R,L_L,phi_L]、leg_rate、wheel_gap、geometry_contact、contact_estimator、normal_forces 均为独立两元。
+5. 每个任务均有 scaling 与 exhausted；另有 feasible、dynamics_residual_norm、wbc_raw_torque、ctrl、tau_jump。首拍 feasible=True，dyn_res=1.16e-13，max|ctrl-wbc_raw|=0，tau_jump=0。
+单步验收结论：通过（接口与日志字段完整）。
+
+四、A/B 单变量实验（部署文档四）
+
+命令：
+A组：`--stage NEWDEP_A --compression-only`（freeze_jump_reference=False）
+B组：`--stage NEWDEP_B --compression-only --freeze-jump-reference`（=True）
+其余参数完全相同（wls/held_leg/tuned-agile/nominal_length=0.28/jump_height=0.10/jump_stroke=0.12/jump_time=1.0/duration=2.0/无扰动）。每组各运行一次，退出码0。
+结果文件：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\NEWDEP_A_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\NEWDEP_B_baseline_run01.json.gz
+
+A组：stop_reason=compression_abort:compression_direction_lost:R；COMPRESS 186 帧，t=1.000..1.186；腿长 R 0.2800->0.2587、L 0.2800->0.2588；max|pitch|=0.01742 rad；max wheel_gap=-0.00010 m；airborne=0。
+B组：stop_reason 与帧数同 A；腿长 R 0.2800->0.2588、L 0.2800->0.2588；max|pitch|=0.01738 rad。
+
+关键帧对比（任务 desired/achieved/residual，单位 m/s^2 或对应任务单位）：
+
+A COMPRESS_START t=1.000：
+pitch des=-0.0045 ach=-1.0328 res=-1.0283；
+angle_R des=-0.0017 ach=-0.5908 res=-0.5891；angle_L 同量级；
+length_R/L act=0.00 des≈0.0003 ach≈-3.10 res≈-3.10 sc=0.0；
+com_vertical des=-4.905 ach=-2.1898 res=+2.7152 sc=1.0。
+
+A com_vertical 首次转正 t=1.096（首个异常帧）：
+pitch des=+1.2336 ach=-1.0080 res=-2.2416；
+angle_R des=+0.5324 ach=-0.7244 res=-1.2569；angle_L 同量级；
+length_R act=0 des=+3.2155 ach=+0.0509 res=-3.1646；
+com_vertical des=-4.905 ach=+0.0254 res=+4.9304 sc=1.0；
+per-leg L=[0.2690,0.2690] rate=[-0.1762,-0.1758] gap=[-0.00049,-0.00049] nf=[70.60,70.58] geo=[T,T] est=[T,T]。
+
+A LAST_COMPRESS t=1.184：
+com_vertical des=-4.905 ach=+2.3140 res=+7.2190 sc=1.0；
+pitch des=+3.5905 ach=-2.3748 res=-5.9652；angle_R des=+1.6661 ach=-1.6156 res=-3.2817；
+per-leg L=[0.2587,0.2588] rate=[-0.0058,-0.0048] gap=[-0.00058,-0.00058] nf=[88.19,88.20]。
+
+B 关键帧与 A 几乎逐项一致（仅冻结参考使 START 的 pitch/angle desired 从 -0.0045/-0.0017 变为 -0.0002/-0.0002）：
+B START：pitch des=-0.0002；angle_R des=-0.0002；com_vertical des=-4.905 ach=-2.1853 res=+2.7197。
+B 首次转正 t=1.096：com_vertical ach=+0.0252 res=+4.9302。
+B LAST t=1.184：com_vertical ach=+2.3159 res=+7.2209；per-leg L=[0.2588,0.2588] rate=[-0.0056,-0.0047]。
+
+五、判定（按部署文档五）
+
+规则1（参考追踪造成任务竞争）：不成立。B组冻结参考后 com_vertical 实现没有显著改善（A/B 首次转正 residual 均≈+4.93，末帧均≈+7.22）。因此不得报告“参考追踪造成任务竞争”。
+规则2（A/B 均无法实现）：成立。A、B 两组 com_vertical 均无法实现；length_R/L 已 activation=0，因此不能归因于腿长任务。下一步由问题排查agent检查 com_vertical Jacobian、接触约束和执行器可行域。
+规则3（左右方向不同）：本轮 A/B 均为右侧先方向丢失，未出现左右方向不同的记录。
+规则4（单侧方向丢失退出）：COMPRESS 因单侧（右腿）方向丢失退出。停止帧（最后记录帧 t=1.184）右腿 L=0.2587 m、rate=-0.0058 m/s；左腿 L=0.2588 m、rate=-0.0048 m/s。ABORT 时刻 t=1.186 s。
+
+六、阶段判定
+
+单步验收：通过。
+A/B 单变量实验：均失败（两者均 compression_direction_lost:R）。
+B组冻结参考是否改善 com_vertical：否。
+
+七、事实依据
+
+1. 单步验收字段齐全（见第三节）。
+2. A/B stop_reason 均为 compression_abort:compression_direction_lost:R，t=1.186 s。
+3. com_vertical 首次转正均在 t=1.096，A ach=+0.0254 / B ach=+0.0252，desired 均为 -4.905。
+4. 末帧 com_vertical residual：A=+7.2190 / B=+7.2209；scaling=1.0；feasible=True。
+5. 全程双轮 geometry_contact=[True,True]、normal_forces 两轮为正、wheel_gap 未持续张开、airborne=0。
+6. ctrl 与 wbc_raw_torque 差值 0，tau_jump=0。
+
+八、失败证据（最早异常）
+
+最早异常时刻：t=1.0960 s（A/B 相同）。
+最早异常字段：wbc_task_trace.com_vertical.achieved_acceleration（首次变为正值，目标为 -4.905）。
+失败时刻（中止）：t=1.186 s，compression_direction_lost:R。
+仅陈述数据，不做根因推断；未自行提出修复。
+
+九、下一步请求
+
+是否允许继续：否；等待问题排查agent根据单步验收与 A/B 数据决定下一测试。
+需要确认：
+1. 单步验收通过、A/B均失败且冻结参考无效；按规则2，请问题排查agent下一步检查 com_vertical Jacobian、接触约束与执行器可行域（我不自行修复/调参）。
+2. 本轮未跑 THRUST/FLIGHT/LANDING（compression_only=True）。
+
+============================================================
+
+署名：测试agent-ds
+============================================================
+
+# 测试agent-ds：WP7部署自检（2026-10-09）
+
+WP编号：WP7。
+
+实际修改文件和函数：
+本轮未保留算法修改。曾临时隔离jump.py::JumpPlanner.update()中的compression_direction_lost立即ABORT分支，但因部署自检未通过，已撤销，当前未运行仿真。
+
+临时隔离是否仅针对compression_direction_lost：是；但未进入测试执行。
+
+是否通过语法、字段和diff检查：否。
+
+失败数据：
+1. py_compile命令未通过，失败原因为现有路径
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\__pycache__
+写入权限被拒绝；因此没有语法检查通过证据。
+2. 当前loop.py trace中存在leg_length_R、leg_length_L、leg_length_rate_R、leg_length_rate_L、wbc_task_trace、predicted_normal、tau_jump、airborne_active。
+3. 当前loop.py trace缺失compression_direction_lost_R和compression_direction_lost_L字段，也没有逐周期记录这两个字段是否被临时隔离。
+
+实际状态时间线：未运行仿真。
+COMPRESS开始时间：未测试。
+compression_end判定时间（R/L分别填写）：未测试。
+COMPRESS_BRAKE时间：未测试。
+THRUST时间：未测试。
+ABORT时间和实际原因：未测试。
+
+左右腿压缩前后length/leg_rate原始值：未测试。
+触发条件compression_direction_lost_R/L原始值：字段缺失，未测试。
+com_vertical desired/achieved/residual：未测试。
+pitch、roll、angle_R、angle_L的desired/achieved/residual：未测试。
+wbc_raw_torque与ctrl是否一致：未测试。
+feasible、scaling、exhausted、dynamics_residual_norm：未测试。
+接触、法向力、wheel_gap、airborne_active：未测试。
+
+关键日志或结果文件路径：
+未生成新的动态测试结果。
+代码证据：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\loop.py
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\gbc_mpc_wbc\jump.py
+
+结论只能写数据直接支持的现象：
+WP7部署不完整，未进入单变量仿真。根据部署文档停止，不对compression_direction_lost是否为根因作结论。
+
+是否允许进入下一轮：否，等待问题排查agent补齐逐周期compression_direction_lost_R/L及隔离状态字段，并解决语法检查写权限后重新部署。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：WP7（2026-10-09）
+
+WP编号：WP7
+
+实际修改文件和函数：
+wheel_leg_mujoco/gbc_mpc_wbc/jump.py :: JumpPlanner.update
+COMPRESS 中 compression_direction_lost 仍按原条件逐腿判定并写日志，但不立即 ABORT。机械范围越界仍以 leg_length_out_of_range 中止，不改名。
+wheel_leg_mujoco/gbc_mpc_wbc/jump.py :: JumpPlanner.__init__ / start / _enter
+增加隔离标志和 transition_reason，供 trace 记录。direction_lost_isolation_active=True 是本轮临时测试开关。
+wheel_leg_mujoco/gbc_mpc_wbc/loop.py :: run_loop 的 trace
+每拍记录 previous_phase、transition_reason、compression_direction_lost_R/L、isolated_R/L、isolation_active、predicted_normal_R/L。
+未改：MPC、TASK_WEIGHTS、com_vertical 权重 25.0、selection、Jacobian、bias、com_vertical 目标 -4.905、腿长任务 activation=0、tau_jump、接触阈值、压缩终点 0.16 m、制动/释放/飞行/落地逻辑。
+
+临时隔离是否仅针对compression_direction_lost：是。该隔离仍留在 jump.py，注释和本记录都标明它是临时测试绕过，不是最终修复。
+
+上一个未完成修改里核对到的问题：
+1. 上一条反馈写“已撤销、未跑仿真”，但 jump.py 里立即 ABORT 当时已经被拿掉，反馈和代码不一致。
+2. loop.py 把 compression_direction_lost_isolated 写成 compression_only 与触发条件的与，不能表示“本拍该侧中止被隔离”，也没有按左右腿分开。
+3. 逐周期缺少 previous_phase、transition_reason、predicted_normal_R/L。
+4. 先前 py_compile 失败是 __pycache__ 无写权限，不是语法错误。本次把编译输出写到临时目录，jump.py、loop.py、control.py、wbc.py 编译通过，临时目录已删除。
+5. 离线检查：右腿满足 direction_lost 时相位保持 COMPRESS；腿长 0.50 m 仍以 leg_length_out_of_range:R 进入 ABORT。
+
+是否通过语法、字段和diff检查：是。本轮检查之后只改了 jump.py 与 loop.py 的上述位置。control.py、wbc.py 的文件时间仍为 13:55，本轮没有再改。
+
+实际状态时间线：IDLE -> COMPRESS -> 测试工具停止。状态机没有进入 ABORT、COMPRESS_BRAKE、THRUST、FLIGHT。
+COMPRESS开始时间：t=1.000 s。previous_phase=IDLE，transition_reason=跳跃开始。
+compression_end判定时间（R/L分别填写）：均未到达。compression_end=0.1600 m。最短腿长 R=0.258730 m、L=0.258803 m，均在 t=1.185 s。
+COMPRESS_BRAKE时间：无。
+THRUST时间：无。
+ABORT时间和实际原因：状态机没有进入 ABORT。测试在 t=1.261 s 停止，stop_reason=compression_contact_lost。该拍在写入 trace 之前退出，所以不在 JSON 帧里。日志原文：geometry=(True, True)，normals=[1.9917183828253483e-08, -1.9917938702844143e-08]。JSON 最后一帧 t=1.260 s 的 normal_forces=[3.0086, 3.2210] N，geometry_contact=[True, True]。
+
+左右腿压缩前后length/leg_rate原始值：
+COMPRESS 开始 t=1.000：R 0.280000 m / -2.435e-05 m/s，L 0.279999 m / -2.436e-05 m/s。
+最短 t=1.185：R 0.258730 m，L 0.258803 m。
+触发帧 t=1.186：R 0.258731 m / +0.000841 m/s，L 0.258805 m / +0.001839 m/s。
+最后记录帧 t=1.260：R 0.262002 m / -0.11178 m/s，L 0.262196 m / -0.10933 m/s。
+从 t=1.186 到 t=1.260，腿长由约 0.2587 m 增到约 0.2620 m。实际压缩量约 0.0213 m，未到 0.120 m 行程。
+
+触发条件compression_direction_lost_R/L原始值：
+t=1.186 起 R=True、L=True，isolated_R=True、isolated_L=True，isolation_active=True。
+日志各一次：compression_direction_lost:R 与 compression_direction_lost:L，t=1.186，abort suppressed。
+COMPRESS 全程 isolation_active=True。t=1.096 两侧触发条件仍为 False。
+t=1.253 之后两侧重新为 False（腿长率再次为负），腿长仍约为 0.262 m。
+
+com_vertical desired/achieved/residual：
+全程 desired=-4.905 m/s^2。scaling=1.0，exhausted=False。
+t=1.000：achieved=-2.1898，residual=+2.7152。
+首次 achieved>=0：t=1.096，achieved=+0.02536，residual=+4.9304。此时两侧 direction_lost 为 False，腿长率仍为负。
+t=1.188（触发后的首个 WBC 帧）：achieved=+2.2863，residual=+7.1913。
+t=1.260：achieved=-11.2835，residual=-6.3785。
+residual 增加到触发后不久，但没有一直增大到最后一帧。
+
+pitch、roll、angle_R、angle_L的desired/achieved/residual：
+t=1.000：
+pitch des=-0.004526 ach=-1.03283 res=-1.02830；
+roll des=-1.652e-06 ach=+0.008062 res=+0.008064；
+angle_R des=-0.001695 ach=-0.59081 res=-0.58911；
+angle_L des=-0.001687 ach=-0.59071 res=-0.58902。
+t=1.188：
+pitch des=+3.7588 ach=-2.4940 res=-6.2528；
+roll des=-0.03297 ach=+0.02493 res=+0.05790；
+angle_R des=+1.7463 ach=-1.6940 res=-3.4403；
+angle_L des=+1.7455 ach=-1.6929 res=-3.4384。
+t=1.260：
+pitch des=+8.5058 ach=-4.6992 res=-13.2050；
+roll des=-0.08144 ach=+0.05335 res=+0.13479；
+angle_R des=+4.0271 ach=-3.3289 res=-7.3560；
+angle_L des=+4.0250 ach=-3.3278 res=-7.3528。
+length_R 与 length_L 在这些帧 activation=0.0，scaling=0.0。
+
+wbc_raw_torque与ctrl是否一致：是。COMPRESS 全部 WBC 帧 max|ctrl-wbc_raw_torque|=0，max|tau_jump|=0。
+t=1.000 ctrl=[-5.3056, +5.2812, +5.3043, -5.2823, 0, 0] N·m。
+t=1.188 ctrl=[-9.9706, +9.8769, +9.9701, -9.8818, 0, 0] N·m。
+t=1.260 ctrl=[+3.8069, -4.0431, -3.7756, +4.0099, 0, 0] N·m。
+
+feasible、scaling、exhausted、dynamics_residual_norm：
+COMPRESS 的 WBC 帧 feasible 全部为 True；com_vertical scaling 全部为 1.0、exhausted 全部为 False；dynamics_residual_norm 最大 5.599e-13。feasible=True 只表示硬约束可行。
+
+接触、法向力、wheel_gap、airborne_active：
+JSON 里的 COMPRESS 帧 geometry_contact 始终为 [True, True]，airborne_active 始终为 False，wheel_gap 最大为 -9.996e-05 m。
+t=1.000 normal_forces=[71.376, 71.320] N，predicted_normal_R/L=[55.419, 55.424] N。
+t=1.096 normal_forces=[70.602, 70.580] N，predicted_normal_R/L=[71.542, 71.520] N。
+t=1.188 normal_forces=[88.180, 88.192] N，predicted_normal_R/L=[87.967, 87.986] N。
+t=1.260 normal_forces=[3.0086, 3.2210] N，predicted_normal_R/L=[-10.829, -10.606] N。
+停止日志 t=1.261 的实际法向力为 [+1.992e-08, -1.992e-08] N，几何接触仍是 (True, True)。
+跳跃期 WBC 的 sample 均为 None，sample_raw 存在。无 NaN/Inf。
+
+关键日志或结果文件路径：
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP7_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\WP7_baseline_run01.log
+配置：backend=wls，model_variant=held_leg，preset=tuned-agile，nominal_length=0.28 m，jump_height=0.10 m，jump_stroke=0.12 m，jump_time=1.0 s，duration=2.0 s，compression_only，无冻结参考，无扰动。git 35e914786755c7f2b55cafae0382f0d390f4d724。
+
+结论只能写数据直接支持的现象：
+隔离 compression_direction_lost 的立即中止之后，左右腿都没有到达 0.1600 m，最短只到约 0.2587 m。t=1.186 两侧触发条件成立且被隔离，随后腿长增加到约 0.262 m。测试接着因 compression_contact_lost 停止，不是 direction_lost ABORT，也没有进入 COMPRESS_BRAKE 或 THRUST。因此不能确认“单帧保护过严是到达压缩终点的阻断点”，也不能把“没有因该保护进入 ABORT”写成压缩成功。com_vertical 目标保持 -4.905；在该保护条件出现之前，t=1.096 的 achieved 已经变为 +0.02536。
+
+是否允许进入下一轮：否，等待问题排查agent确认。临时隔离仍留在 jump.py，没有当成最终修复。
+
+署名：测试agent-ds

@@ -91,6 +91,29 @@ class RowSet:
         return 2 * active + (1 if active else 0)
 
 
+@dataclass(frozen=True)
+class LegKinematicObservation:
+    """独立的腿部运动学观测，顺序固定为 R 长度、R 摆角、L 长度、L 摆角。
+
+    位置量来自解析闭环运动学，速度量来自同一当前状态的腿部 Jacobian
+    与 ``qvel``。跳跃状态机、WBC 任务和记录器都应通过该接口读取腿部状态，
+    不应各自重新从不同的 MuJoCo 字段计算。
+    """
+
+    position: np.ndarray
+    velocity: np.ndarray
+
+    def __post_init__(self) -> None:
+        position = np.asarray(self.position, dtype=float).reshape(-1)
+        velocity = np.asarray(self.velocity, dtype=float).reshape(-1)
+        if position.shape != (4,) or velocity.shape != (4,):
+            raise ValueError("腿部运动学观测必须是 [L_R, phi_R, L_L, phi_L] 的四维向量")
+        if not np.all(np.isfinite(position)) or not np.all(np.isfinite(velocity)):
+            raise ValueError("腿部运动学观测不能包含 NaN 或 Inf")
+        object.__setattr__(self, "position", position)
+        object.__setattr__(self, "velocity", velocity)
+
+
 def leg_combination(rows: RowSet, sign: float):
     """腿空间行的共模 / 差模组合。
 
@@ -223,6 +246,39 @@ class Gbc486Dynamics:
 
 
 
+    def com_vertical_row(self) -> tuple[np.ndarray, float, float, float]:
+        """Return the base-subtree center-of-mass observation in world z."""
+        data = self.data
+        model = self.model
+        mujoco.mj_comPos(model, data)
+        body_id = int(model.body("base").id)
+        jacobian = np.zeros((3, model.nv), dtype=float)
+        mujoco.mj_jacSubtreeCom(model, data, jacobian, body_id)
+
+        plus = data.qpos.copy()
+        minus = data.qpos.copy()
+        mujoco.mj_integratePos(model, plus, data.qvel, _DIFFERENCE_DT)
+        mujoco.mj_integratePos(model, minus, data.qvel, -_DIFFERENCE_DT)
+        plus_com = self._evaluate_com_position(plus)
+        minus_com = self._evaluate_com_position(minus)
+        com_position = np.asarray(data.subtree_com[body_id], dtype=float)
+        center_com = np.asarray(data.subtree_com[body_id], dtype=float)
+        bias = float((plus_com[2] - 2.0 * center_com[2] + minus_com[2])
+                     / (_DIFFERENCE_DT * _DIFFERENCE_DT))
+        row = np.asarray(jacobian[2], dtype=float).copy()
+        com_velocity = float(row @ data.qvel)
+        return row, bias, float(com_position[2]), com_velocity
+
+    def _evaluate_com_position(self, qpos: np.ndarray) -> np.ndarray:
+        """Evaluate the same base-subtree COM definition on scratch data."""
+        scratch = self.scratch
+        scratch.qpos[:] = qpos
+        scratch.qvel[:] = self.data.qvel
+        mujoco.mj_kinematics(self.model, scratch)
+        mujoco.mj_comPos(self.model, scratch)
+        body_id = int(self.model.body("base").id)
+        return np.asarray(scratch.subtree_com[body_id], dtype=float).copy()
+
     # ---------------------------------------------------------------- sensing
     def attitude(self) -> np.ndarray:
         return euler_zyx(self.data.qpos[3:7])
@@ -243,6 +299,53 @@ class Gbc486Dynamics:
                       for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
             values.extend(self._leg_kinematics[leg.name].lengths(angles))
         return np.asarray(values)
+
+    def leg_velocity(self, rows: RowSet | None = None) -> np.ndarray:
+        """返回 ``[Ldot_R, phidot_R, Ldot_L, phidot_L]``，单位为 m/s、rad/s。
+
+        速度定义为当前腿部 Jacobian 乘以完整广义速度：
+
+        ``[Ldot, phidot] = J_leg(q) @ qvel``。
+
+        ``rows`` 可传入本周期已经计算好的 ``RowSet``，保证速度与同一次
+        反馈采样使用完全相同的 Jacobian；不传时才重新计算运动学行。
+        """
+        current_rows = self.rowset() if rows is None else rows
+        return np.asarray(current_rows.leg[0] @ self.data.qvel, dtype=float)
+
+    def leg_kinematic_observation(self, rows: RowSet | None = None) -> LegKinematicObservation:
+        """一次性返回独立腿部运动学位置和速度，避免调用方混用计算口径。"""
+        return LegKinematicObservation(self.leg_state(), self.leg_velocity(rows))
+
+    def thrust_torque(self, force_per_leg) -> tuple[np.ndarray, float]:
+        """竖直等效力（施加在机体上，逐腿 [N]）-> 执行器力矩 + 峰值关节力矩。
+
+        约定（与 ``LegKinematics`` 的极坐标 ``(L, phi)`` 功率对偶）：竖直力 ``F_z`` 在腿极坐标系下
+        的分量为 ``F_L = F_z cos(phi)``、``F_phi = -F_z L sin(phi)``，于是 ``tau = J^T @ [F_L, F_phi]``，
+        ``J = d(L, phi)/d(q_act)``（已消被动关节速率）。J **逐拍用实测位形算**：该系数随腿长变化
+        21%~34%（方案第 2.1 节），不能取常数。
+
+        执行器顺序与腿的驱动关节顺序一致：``leg_actuators`` 为
+        (Right_front, Right_rear, Left_front, Left_rear)，对应 (jAB, jAG) 与 (jIJ, jIO)。
+        """
+        forces = np.asarray(force_per_leg, dtype=float).reshape(-1)
+        if forces.size != len(R.LEGS):
+            raise ValueError("force_per_leg 需要逐腿给一个竖向力")
+        self.leg_state()          # 惰性建立解析运动学（几何常数只从模型读一次）
+        torque = np.zeros(self.model.nu)
+        peak = 0.0
+        for side, leg in enumerate(R.LEGS):
+            kin = self._leg_kinematics[leg.name]
+            angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
+                      for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+            length, phi = kin.lengths(angles)
+            wrench = np.array([float(forces[side]) * np.cos(phi),
+                               -float(forces[side]) * float(length) * np.sin(phi)])
+            tau = kin.jacobian(angles).T @ wrench
+            peak = max(peak, float(np.max(np.abs(tau))))
+            for offset, actuator in enumerate(self.leg_actuators[2 * side:2 * side + 2]):
+                torque[actuator] = float(tau[offset])
+        return torque, peak
 
     def contact_geometry(self):
         """轮-地接触的**几何排查**（不涉及力）：返回 ``(逐轮接触, 逐轮接触点数, 非轮-地接触数)``。

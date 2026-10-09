@@ -42,14 +42,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push-speed", type=float, default=0.35, help="推扰水平速度 [m/s]")
     parser.add_argument("--push-speed-z", type=float, default=0.0, help="推扰竖直速度 [m/s]（>0 用于触发离地）")
     parser.add_argument("--backend", default="wls")
-    parser.add_argument("--variant", default="leg_input")
+    parser.add_argument("--variant", default="held_leg")
+    parser.add_argument("--preset", default="tuned-agile")
+    parser.add_argument("--explicit-jump-reference", action="store_true")
+    parser.add_argument("--compression-only", action="store_true",
+                        help="WP5：压缩完成/ABORT即停止，不执行 THRUST/FLIGHT/LANDING")
+    parser.add_argument("--jump-height", type=float, default=None,
+                        help="启用跳跃并给定目标质心抬升 [m]")
+    parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
+    parser.add_argument("--jump-time", type=float, default=1.0, help="起跳指令时刻 [s]")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     setup_logging(default_level="INFO")
-    sim = Gbc486MpcWbcSimulation(SimulationConfig(backend=args.backend, model_variant=args.variant))
+    sim = Gbc486MpcWbcSimulation(SimulationConfig(
+        jump_height=args.jump_height, jump_stroke=args.jump_stroke, jump_time=args.jump_time,
+        backend=args.backend, model_variant=args.variant, preset=args.preset))
     model, data = sim.model, sim.data
     renderer = mujoco.Renderer(model, args.height, args.width)
     frames: list = []
@@ -65,7 +75,9 @@ def main() -> int:
     _LOGGER.info("开始录制：%.2f s / %d fps / 先平衡后推扰 %.2f m/s @ %.2f s",
                  args.duration, args.fps, args.push_speed, args.push_time)
     sim.run(default_command(), args.duration, disturbances=disturbances,
-            frame_callback=grab, frame_interval=1.0 / args.fps)
+            frame_callback=grab, frame_interval=1.0 / args.fps,
+            explicit_jump_reference=args.explicit_jump_reference,
+            compression_only=args.compression_only)
     summary = sim.summary(args.duration)
     _LOGGER.info("仿真结束：完成=%s 停止原因=%s 里程=%.4f m",
                  summary["completed"], summary["stop_reason"], sim.distance)
@@ -76,7 +88,7 @@ def main() -> int:
     # 必须用**当前解释器**（sys.executable）取 ffmpeg：裸 "python" 指向系统解释器，
     # 它不一定装了 imageio_ffmpeg（本工作区的依赖装在 .venv 里）。
     ffmpeg = subprocess.run([sys.executable, "-c",
-                             "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())"],
+                             "import imageio_ffmpeg,sys;sys.stdout.write(imageio_ffmpeg.get_ffmpeg_exe())"],
                             capture_output=True, text=True, check=True).stdout.strip()
     command = [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{args.width}x{args.height}", "-r", str(args.fps), "-i", "-",

@@ -46,6 +46,10 @@ TASK_WEIGHTS = {
     "length_R": 25.0, "length_L": 25.0,
     "yaw": 15.0,
     "roll": 10.0,
+    # E2/WP3（2026-10-09）：跳跃期 COMPRESS/THRUST 移除腿长任务后，com_vertical 取
+    # 代其作为竖直方向主任务（分析文档 C2）。权重来源：沿用被替代的 length_R/length_L
+    # 在既有具名权重表中的名次 25；未做任何试数搜索，待问题排查agent复查。
+    "com_vertical": 25.0,
 }
 
 BACKENDS = ("nullspace", "wls", "qp")
@@ -149,12 +153,26 @@ class Gbc486Tasks:
         return self.contact_forces(recovered, contact)[:, 1]
 
     # ------------------------------------------------------------ 任务
-    def tasks(self, state: ChassisState, rows: RowSet, sample=None):
+    def tasks(self, state: ChassisState, rows: RowSet, sample=None,
+              desired_com_acceleration_z: float | None = None,
+              pitch_reference: float | None = None, roll_reference: float | None = None,
+              angle_R_reference: float | None = None, angle_L_reference: float | None = None):
         """返回 ``(balance_tasks, motion_tasks)``。顺序与 circleg 完全一致：
 
         ``(pitch, hip_tasks[-1], roll)`` + ``(yaw, height, forward_velocity) + hip_tasks[:-1]``，
         其中 6 状态模型的 ``hip_tasks = (leg_tracking标称,)``、8 状态模型为
         ``(leg_tracking跟踪MPC, leg_differential)``。
+
+        ``desired_com_acceleration_z``（E2/WP2）为 None 时保持原任务列表不变（普通 GROUND
+        路径）；给定时额外追加唯一名为 ``com_vertical`` 的质心竖直加速度任务
+        ``J_com_z q̈ + bias_com_z = desired_com_acceleration_z``，Jacobian 与 bias 来自
+        E1 通过的 ``Gbc486Dynamics.com_vertical_row()``。目标是显式诊断/跳跃参考，不从
+        MPC ``sample`` 隐式借用。
+
+        新部署（2026-10-09）：``pitch_reference`` / ``roll_reference`` /
+        ``angle_R_reference`` / ``angle_L_reference`` 为非 None 时，对应任务目标改为保持该
+        显式参考（由调用方在跳跃开始时捕获一次），用于冻结压缩期姿态/腿角参考的单变量实验。
+        默认 None 时保持原有参考逻辑不变。
         """
         data = self.dyn.data
         nv = self.dyn.model.nv
@@ -179,6 +197,11 @@ class Gbc486Tasks:
             reference[2:6] = 0.0
         pitch_target = acceleration[1] + kp * (reference[2] - state.pitch) + kd * (reference[3] - state.pitch_rate)
         roll_target = -kp * roll - kd * (task_rows[1] @ data.qvel)
+        # 显式冻结参考（非 None）覆盖上面两个默认目标（本轮不改变默认 None 的行为）。
+        if pitch_reference is not None:
+            pitch_target = kp * (pitch_reference - state.pitch) - kd * state.pitch_rate
+        if roll_reference is not None:
+            roll_target = kp * (roll_reference - roll) - kd * (task_rows[1] @ data.qvel)
         yaw_target = acceleration[2] + kp * wrap_angle(reference[4] - state.yaw) + kd * (reference[5] - state.yaw_rate)
         if sample is None:
             # 非 GROUND：没有 MPC 轨迹，前进速度只做阻尼（circleg 的 sample is None 分支同式）
@@ -208,7 +231,10 @@ class Gbc486Tasks:
             angle_measured = n.leg_angle - float(leg[angle_index])
             angle_rate = -float(leg_rows[angle_index] @ data.qvel)
             length_target = kp_h * (n.leg_length - float(leg[length_index])) - kd_h * length_rate
-            if self.leg_input and sample is not None:
+            angle_reference = angle_R_reference if side == 0 else angle_L_reference
+            if angle_reference is not None:
+                angle_target = kp_r * (angle_reference - angle_measured) - kd_r * angle_rate
+            elif self.leg_input and sample is not None:
                 angle_target = (acceleration[3]
                                 + kp_r * (reference[6] - angle_measured)
                                 + kd_r * (reference[7] - angle_rate))
@@ -233,4 +259,11 @@ class Gbc486Tasks:
                       activation=max(roll_gain_scale_from_factor(authority),
                                      self.gains.roll_activation_floor)),
         )
+        if desired_com_acceleration_z is not None:
+            com_row, com_bias, _com_z, _com_vz = self.dyn.com_vertical_row()
+            motion = motion + (
+                TaskLevel(np.atleast_2d(np.asarray(com_row, dtype=float)),
+                          np.array([float(desired_com_acceleration_z)]),
+                          np.array([float(com_bias)]), name="com_vertical"),
+            )
         return balance, motion

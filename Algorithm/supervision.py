@@ -253,7 +253,8 @@ class SupervisedControl:
     def solve_wbc(self, *, mass, selection, dynamics_bias, contacts: tuple[ContactBlock, ...],
                   balance_tasks: tuple[TaskLevel, ...], motion_tasks: tuple[TaskLevel, ...],
                   limits: ActuatorLimits, decision: ControlDecision, dt: float,
-                  estimate: DisturbanceEstimate | None = None):
+                  estimate: DisturbanceEstimate | None = None,
+                  external_force: np.ndarray | None = None):
         if not decision.balance_enabled:
             if self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
                 self.compensation.reset()
@@ -273,8 +274,14 @@ class SupervisedControl:
         tasks = list(balance_tasks) + (list(motion_tasks) if decision.motion_enabled else [])
         if not balance_tasks:
             raise ValueError("Supported control requires explicit balance tasks")
+        # external_force：调用方直接注入的广义等效力（跳跃用，方案 v3 第 6 节）。
+        # 注入期间**跳过扰动补偿**：两者写同一条通道，且补偿会把跳跃力当扰动去对抗（用户定案）。
         external = None
-        if self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
+        if external_force is not None:
+            external = np.asarray(external_force, dtype=float).reshape(-1)
+            if self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
+                _LOGGER.warning("已注入外部等效力：本拍跳过扰动补偿（两者互斥）")
+        elif self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
             external = self.compensation.route(estimate, timestamp=decision.timestamp, dt=dt,
                                                context=decision.context, enabled=decision.motion_enabled)
         elimination = ContactElimination.from_matrices(jacobian, selection, mass)

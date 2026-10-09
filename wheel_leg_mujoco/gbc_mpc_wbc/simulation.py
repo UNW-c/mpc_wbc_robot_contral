@@ -218,6 +218,46 @@ class Disturbance:
     duration: float = 0.0                                          # [s]
 
 
+def _leg_length_limits(model, data, angle: float, margin: float = 0.0,
+                       low: float = 0.100, high: float = 0.470, step: float = 0.002):
+    """扫描腿长机械可用范围：返回所有**受限**关节距限位 >= margin 的腿长区间 [m]。
+
+    用模型自带的逆运动学 ``R.solve_leg`` 取位形，只读关节角与限位，不碰控制链路。
+    受限关节为 jAB/jAG/jGH（右腿）/jIJ/jIO/jOP（左腿）；被动 jBE/jEC/jCF 在 MJCF 里没有限位
+    （``jnt_range`` 为 [0,0]），若参与判定余量恒为负（本次踩过的坑，见方案 9.3 节）。
+    """
+    leg = R.RIGHT
+    joints = [name for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints
+              if model.joint(name).limited]
+    accepted = []
+    for value in np.arange(low, high + 1e-9, step):
+        R.solve_leg(model, data, leg, float(value), angle)
+        worst = min(min(float(data.qpos[model.joint(name).qposadr[0]]) - model.jnt_range[model.joint(name).id][0],
+                        model.jnt_range[model.joint(name).id][1] - float(data.qpos[model.joint(name).qposadr[0]]))
+                    for name in joints)
+        if worst >= margin:
+            accepted.append(float(value))
+    return (min(accepted), max(accepted)) if accepted else (float("nan"), float("nan"))
+
+
+def _com_rise_ratio(model, data, angle: float, length_hi: float, length_lo: float) -> float:
+    """kappa = 质心相对**轮地接触点**的抬升 / 腿长行程。
+
+    固定机身位形下分别取两个腿长，比较 "子树质心 z - 轮心 z" 的差值——等价于轮子压在地面上时
+    机体抬升多少（用户口径：跳跃高度算的是质心抬升）。
+    """
+    heights = []
+    for length in (length_hi, length_lo):
+        for leg in R.LEGS:
+            R.solve_leg(model, data, leg, length, angle)
+        mujoco.mj_kinematics(model, data)
+        mujoco.mj_comPos(model, data)
+        com = float(data.subtree_com[model.body("base").id][2])
+        wheel = float(data.xpos[model.body(R.RIGHT.wheel_body).id][2])
+        heights.append(com - wheel)
+    return (heights[0] - heights[1]) / (length_hi - length_lo)
+
+
 @dataclass(frozen=True)
 class SimulationConfig:
     """对应 circleg ``SimulationConfig`` 中本阶段用到的字段（同名、同默认值）。"""
@@ -249,6 +289,11 @@ class SimulationConfig:
     normal_force_margin_ratio: float = 0.05
     normal_force_duration: float = 0.012   # [s] 连续 3 个 WBC 周期
     record_stride: int = 4
+    # ---------------- 跳跃（方案 v3，用户 2026-10-07 审阅）----------------
+    # 目标质心抬升 [m]；None = 不启用跳跃。压缩行程 [m] 由用户给定（= 加速行程）。
+    jump_height: float | None = None
+    jump_stroke: float = 0.12
+    jump_time: float = 1.0                 # [s] 起跳指令时刻
     wbc_gains: WbcGains = field(default_factory=WbcGains)
     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
     # 可达 [−0.784, +0.674]，相对 φ0 = −0.1263 即 −0.658 / +0.800，取 0.65（不超可达范围）。
@@ -314,6 +359,24 @@ class Gbc486MpcWbcSimulation:
         self.exhausted: dict[str, int] = {}
         # 腿长拟合参数调度（方案 A）：网格懒加载；记录当前换挡点，仅当最近网格点变化才重建 MPC。
         self._model_grid = None
+        # ---------------- 跳跃装配（方案 v3）----------------
+        # 跳跃是独立状态：规划器只吃测量量（腿长/腿长率/接触/姿态），不持有模型与控制器对象。
+        self.jump = None
+        self._jump_started = False
+        if config.jump_height is not None:
+            from .jump import JumpConfig, JumpPlanner
+            scratch = mujoco.MjData(self.model)
+            limits = _leg_length_limits(self.model, scratch, self.pose.angle, margin=0.0)
+            ratio = _com_rise_ratio(self.model, scratch, self.pose.angle,
+                                    config.nominal_length, config.nominal_length - config.jump_stroke)
+            self.jump = JumpPlanner(JumpConfig(
+                target_height=float(config.jump_height),
+                compression_stroke=float(config.jump_stroke),
+                leg_length_nominal=float(config.nominal_length),
+                com_rise_ratio=float(ratio),
+                total_mass=float(np.sum(self.model.body_mass)),
+                leg_length_min=float(limits[0]), leg_length_max=float(limits[1]),
+                pitch_limit=float(self.mpc.settings.pitch_limit)))
         self._scheduled_grid_point: float | None = None
         self.scaled: dict[str, int] = {}
         self.timings = dict(mpc=[], wbc=[])
@@ -353,14 +416,39 @@ class Gbc486MpcWbcSimulation:
 
     # ------------------------------------------------------------------- run
     def run(self, command, duration: float, disturbances=(), viewer=None,
-            frame_callback=None, frame_interval: float = 0.0):
+            frame_callback=None, frame_interval: float = 0.0, trace_sink=None,
+            explicit_jump_reference: bool = False, compression_only: bool = False,
+            freeze_jump_reference: bool = False):
         """积分情景；四段时序在 ``loop.run_loop``（采样 / MPC / WBC / 输出 + 推进）。
 
         本方法只做委托：装配在 ``__init__``，时序在 ``loop.py``，控制算法在
         ``control.py``，反馈在 ``sampling.py``，执行器与护栏在 ``output.py``。
         """
         return run_loop(self, command, duration, disturbances=disturbances, viewer=viewer,
-                        frame_callback=frame_callback, frame_interval=frame_interval)
+                        frame_callback=frame_callback, frame_interval=frame_interval,
+                        trace_sink=trace_sink,
+                        explicit_jump_reference=explicit_jump_reference,
+                        compression_only=compression_only,
+                        freeze_jump_reference=freeze_jump_reference)
+
+    def _precheck_jump(self) -> None:
+        """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。
+
+        用户要求"不暴力迭代、不可行就停"：这里只算一次并如实报告（超限也不擅自改目标）。
+        用当前实测位形 + 压缩终点两个位形各算一次，取较大者。
+        """
+        config = self.jump.config
+        _LOGGER.info("起跳前预检：等效力 %.1f N/腿 | 压缩终点 %.4f m | 当前腿长 %.4f m",
+                     config.leg_force(), config.compression_end, float(self.dyn.leg_state()[0]))
+        leg_force = config.leg_force()
+        _, peak_now = self.dyn.thrust_torque((leg_force, leg_force))
+        limit = float(np.max(self.dyn.limits.upper[list(self.dyn.leg_actuators)]))
+        if peak_now > limit:
+            _LOGGER.warning("起跳前预检：所需关节力矩峰值 %.2f N*m 超过限幅 %.2f N*m（%.0f%%）——"
+                            "按方案要求如实报告，不迭代", peak_now, limit, 100.0 * peak_now / limit)
+        else:
+            _LOGGER.info("起跳前预检通过：关节力矩峰值 %.2f N*m <= 限幅 %.2f N*m",
+                         peak_now, limit)
 
     def _schedule_mpc_leg_length(self) -> None:
         """方案 A（用户 2026-10-06）：MPC 每次求解前按**当前腿长**填模型参数。

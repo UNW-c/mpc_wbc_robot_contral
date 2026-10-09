@@ -63,6 +63,10 @@ def main():
     parser.add_argument("--duration", type=float, default=float("inf"),
                         help="仿真时长 [s]；默认无限，关窗口结束")
     parser.add_argument("--no-keyboard", action="store_true", help="不启用键盘指令源")
+    parser.add_argument("--jump-height", type=float, default=None,
+                        help="启用跳跃并给定目标质心抬升 [m]（例如 0.10）")
+    parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
+    parser.add_argument("--jump-time", type=float, default=2.0, help="起跳指令时刻 [s]")
     parser.add_argument("--leg-length", type=float, default=None,
                         help="标称腿长 [m]，默认 0.28（行程带中点）；机构范围约 0.14–0.43")
     parser.add_argument("--output", type=Path, default=None, help="结束时写入的记录（JSON.gz）")
@@ -74,7 +78,7 @@ def main():
     from mujoco import viewer as mujoco_viewer
     from APP.keyboard_task import KeyboardCommandSource
 
-    config = SimulationConfig(backend=args.backend, model_variant=args.model_variant, preset=args.preset,
+    config = SimulationConfig(jump_height=args.jump_height, jump_stroke=args.jump_stroke, jump_time=args.jump_time, backend=args.backend, model_variant=args.model_variant, preset=args.preset,
                               **({} if args.leg_length is None else {"nominal_length": args.leg_length}))
     if args.tuned:
         from gbc_mpc_wbc.objective import MODEL_VARIANT, TUNED, _apply_task_weights, _gains, _settings
@@ -88,7 +92,7 @@ def main():
         settings, _, _ = _settings(params)
         gains = _gains(params)
         _apply_task_weights(params)             # WLS/QP 任务权重（resolver 构造时读模块级 TASK_WEIGHTS）
-        config = SimulationConfig(backend=args.backend, model_variant=variant,
+        config = SimulationConfig(jump_height=args.jump_height, jump_stroke=args.jump_stroke, jump_time=args.jump_time, backend=args.backend, model_variant=variant,
                                   preset=args.preset, wbc_gains=gains,
                                   wheel_torque_limit=params.get("wheel_torque_limit"),
                                   leg_torque_limit=params.get("leg_torque_limit"),

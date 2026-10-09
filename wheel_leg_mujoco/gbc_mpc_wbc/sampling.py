@@ -84,7 +84,7 @@ class FeedbackSampler:
         self.nominal_angle = float(nominal_angle)
         self.pitch_limit = float(pitch_limit)
 
-    def update(self, distance: float) -> Feedback:
+    def update(self, distance: float, phase_hint: JumpPhaseHint = JumpPhaseHint.NONE) -> Feedback:
         """取一拍反馈：运动学 -> 接触几何 -> 力雅可比反解接触力 -> 接触判定 -> 状态/监督层。
 
         接触力的口径（用户 2026-10-07）：**不用 MuJoCo 的 ``mj_contactForce``**，而是由动力学
@@ -113,7 +113,7 @@ class FeedbackSampler:
         else:
             self.last_forces = forces
         contact = self.contact_estimator.update(
-            tuple(forces[:, 2]), self.dt, phase=JumpPhaseHint.NONE).contact
+            tuple(forces[:, 2]), self.dt, phase=phase_hint).contact
         state, rows = chassis_state(
             dynamics=self.dynamics, data=self.data, contact=contact, forces=forces,
             distance=distance, equilibrium_pitch=self.equilibrium_pitch,

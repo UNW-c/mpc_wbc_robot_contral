@@ -1,0 +1,1158 @@
+# 问题排查agent：WBC跳跃控制与离地检测重规划
+
+更新时间：2026-10-09
+
+## 0. 文档与工作边界
+
+- 本文件是后续问题排查agent与测试agent的唯一交互文档。
+- 历史文档 `docs/agent交互文档.md` 仅作为历史资料，不再追加。
+- 本文件中的结论只基于当前对话、当前源码和已经生成的测试结果。
+- 当前角色只负责问题排查、方案设计、测试要求和结果解释，不代替测试agent执行正式测试。
+- 未经用户明确批准，不修改控制算法、模型、参数、增益、权重、阈值、限幅或MPC腿长拟合。
+- 测试目的首先是确认根因，不是通过调参让结果看起来更好。
+- 所有测试脚本必须先完成语法/导入、字段口径、单工况冒烟和重复性自检。
+
+---
+
+## 1. 当前核心结论
+
+### 1.1 跳跃力不应再通过腿长终点直接交给WBC
+
+此前方案是：
+
+```text
+COMPRESS:
+    给WBC一个压缩终点腿长，由腿长PD任务驱动压缩
+
+THRUST:
+    通过腿部雅可比生成tau_jump，同时仍给WBC腿长目标
+```
+
+该方案会让主动腿长变化、姿态控制、MPC参考和接触约束相互影响，不能保证跳跃力被正确建模，也不能保证压缩期间轮子保持接地。
+
+### 1.2 external_force不是“请WBC执行这份跳跃力”接口
+
+`external_force`表示已经存在的已知外部广义力。它改变WBC动力学右端，但不会自动要求WBC实现该力造成的跳跃运动。
+
+V4已经证明：
+
+```text
+tau_jump进入WBC external通道
+WBC继续满足原有姿态/接触/闭链任务
+WBC原始力矩反向抵消tau_jump的大部分作用
+最终总力矩仍接近站立控制输出
+```
+
+因此撤回此前“只要把tau_jump放进external_force，WBC就不会抵消它”的判断。
+
+### 1.3 推荐方向：WBC统一求解跳跃运动和总执行器力矩
+
+```text
+JumpPlanner
+    -> 相位管理
+    -> 生成压缩/制动/释放阶段的质心竖直目标
+
+WBC
+    -> 接触、闭链、欠驱动约束
+    -> pitch、roll、腿角、质心竖直任务
+    -> 一次求解全部执行器总力矩
+
+Output
+    -> 只写WBC求出的总力矩
+```
+
+跳跃模块不再单独生成并叠加`tau_jump`。WBC成为唯一执行器力矩求解者，但JumpPlanner仍负责相位、参考生成和状态事件管理。
+
+---
+
+## 2. 已有证据
+
+### 2.1 V4压缩控制重建失败
+
+结果文件：
+
+```text
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_JUMP_baseline_run01.json.gz
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_JUMP_baseline_run01.log
+C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\V4_FINAL_MOTOR_AUDIT_run01.json
+```
+
+测试配置：
+
+```text
+model_variant = held_leg
+preset = tuned-agile
+jump_height = 0.10 m
+jump_stroke = 0.12 m
+jump_time = 1.0 s
+duration = 3.0 s
+```
+
+实际结果：
+
+```text
+IDLE = 1000 frames
+COMPRESS = 2000 frames
+THRUST = 0
+FLIGHT = 0
+ABORT = 0
+airborne = 0 frames
+WBC calls = 750
+```
+
+腿长只在约`0.279708～0.280464 m`范围内变化，实际变化约`0.0003 m`，没有达到`0.160 m`压缩终点。
+
+这说明：
+
+- 压缩力矩没有丢失；
+- 最终输出链没有丢失；
+- WBC没有被离地检测切断；
+- 但当前WBC任务没有形成有效的竖直压缩运动目标。
+
+### 2.2 输出链路没有发现重复映射或丢失
+
+V4电机审计显示：
+
+```text
+data.ctrl = wbc_raw_torque + tau_jump
+```
+
+逐拍最大误差为`0.000e+00 N*m`。这证明输出级没有丢数据，但不代表跳跃行为正确。
+
+### 2.3 V4中WBC抵消了大部分压缩前馈
+
+典型t=1.000 s数据：
+
+| 执行器 | WBC原始力矩 | tau_jump | 最终ctrl |
+|---|---:|---:|---:|
+| Right_front | -28.067105 | +20.564397 | -7.502707 |
+| Right_rear | +33.643953 | -26.109490 | +7.534463 |
+| Left_front | +28.057160 | -20.564607 | +7.492553 |
+| Left_rear | -33.635651 | +26.109687 | -7.525964 |
+
+起跳前站立力矩约为：
+
+```text
+[-7.521191, +7.553089, +7.511047, -7.544554] N*m
+```
+
+最终总力矩仍接近站立力矩。这是“WBC没有跳跃运动任务，只是在维持原有接触/姿态任务”的直接证据。
+
+### 2.4 旧Q1-B存在真实异常卸载，但不是普通airborne档先触发
+
+旧Q1-B关键时序：
+
+```text
+1.222 s：仍为COMPRESS，双轮几何接触False，gap约+1 mm，法向力为0，估计接触仍True
+1.235 s：进入THRUST，腿长约0.160 m，thrust_built=True，但thrust_applied=False
+1.236 s：进入FLIGHT，尚未完成有效蹬伸输出
+1.237 s：因陈旧估计接触进入LANDING
+1.249 s：腿长越出机械下限，进入ABORT
+1.254 s：普通监督层才进入airborne，输出置为airborne_zero
+```
+
+轮子可以先失去地面支撑，而质心仍继续下降，因此不能要求`com_vz > 0`作为离地必要条件。
+
+---
+
+## 3. 当前WBC模型的实际能力
+
+### 3.1 当前求解链
+
+当前WBC主要处理：
+
+1. 接触约束；
+2. 闭链约束；
+3. 欠驱动动力学约束；
+4. pitch、roll、腿角和其他运动任务；
+5. 执行器限幅。
+
+V4移除了`length_R/length_L`，但没有增加质心竖直任务。因此WBC没有被告知“需要下压多少”或“需要产生怎样的质心竖直加速度”。
+
+### 3.2 当前WBC接触力不是独立传感器
+
+当前流程是：
+
+```text
+contact_estimator
+    -> feedback.decision.contact
+    -> contact_blocks
+    -> WBC求解
+    -> predicted_normal
+```
+
+所以WBC接触力不能独立决定接触拓扑，否则会形成循环：
+
+```text
+假设接触存在
+    -> 解出接触力
+    -> 用该接触力证明接触存在
+```
+
+WBC接触力适合做接触卸载预警、支撑可行性监控和任务冲突监控，不适合单独做最终离地真值。
+
+### 3.3 external_force的正确使用边界
+
+现有求解器使用：
+
+```text
+h_effective = h - external_force
+```
+
+这适用于已知外部推力、已知扰动力或不由当前执行器产生的外部广义力。不适用于表达“我希望电机产生一份跳跃力矩，请WBC不要抵消它”。同一组电机产生的跳跃作用，应作为WBC任务目标统一求解。
+
+---
+
+## 4. V5：WBC统一跳跃控制方案
+
+### 4.1 新的控制权分配
+
+```text
+JumpPlanner
+    -> 相位管理
+    -> 生成质心竖直目标
+    -> 提供pitch、腿角和安全状态参考
+
+WBC
+    -> 接触/闭链/欠驱动约束
+    -> 姿态任务
+    -> 腿角任务
+    -> 质心竖直任务
+    -> 统一求解所有执行器总力矩
+
+MPC
+    -> 跳跃期间只保留shadow记录
+    -> 不向WBC提供跳跃期间的腿长、pitch或加速度参考
+```
+
+跳跃期间禁止再次执行：
+
+```text
+tau_wbc + tau_jump
+leg_length_target -> WBC length PD
+```
+
+### 4.2 新增真实质心竖直任务
+
+当前WBC任务接口是加速度任务，建议增加：
+
+```text
+J_com_z @ qacc + bias_com_z = desired_com_acceleration_z
+```
+
+要求：
+
+- `J_com_z`由整机质量加权质心Jacobian构造；
+- `bias_com_z`是对应的`Jdot*qvel`；
+- 质心定义与当前`robot_com()`使用的机器人子树一致；
+- 不得用base原点、腿长Jacobian或MPC降阶模型替代整机质心行。
+
+如果JumpPlanner以总竖直支撑力为接口：
+
+```text
+desired_com_acceleration_z = F_normal_total / robot_mass - g
+```
+
+重力只计入一次。WBC根据该任务、接触约束和执行器约束，统一决定左右腿和髋关节总力矩。
+
+### 4.3 压缩阶段不能使用负接触力
+
+压缩的正确物理含义不是给地面一个负法向力，而是降低正向支撑力，让质心在接触约束下向下运动：
+
+```text
+下压加速：0 < F_normal_total < robot_mass * g
+下压制动：F_normal_total > robot_mass * g
+```
+
+不能继续使用`leg_force = -config.leg_force()`作为压缩主控制输入，因为轮地接触不能稳定提供拉力。已有符号测试也显示负力会导致轮隙增加、质心向下加速。
+
+### 4.4 压缩、制动、释放阶段
+
+建议将原COMPRESS细分为：
+
+```text
+COMPRESS_ACCEL
+    目标：质心向下运动，轮子保持支撑
+
+COMPRESS_BRAKE
+    目标：压缩终点前降低腿长下降速度
+
+THRUST_ARMED
+    目标：确认仍可接触、参考已写入、WBC可执行
+
+THRUST
+    目标：生成正向质心竖直加速度，达到目标离地速度
+```
+
+压缩终点只能作为阶段事件，不能直接作为腿长PD目标。
+
+### 4.5 V5输出契约
+
+```text
+WBC qacc/task/contact solution
+    -> total actuator torque
+    -> data.ctrl
+```
+
+禁止：
+
+- 再次调用`thrust_torque()`叠加到WBC输出；
+- 同一跳跃力同时放进`external_force`和执行器前馈；
+- WBC输出后由跳跃模块覆盖髋关节力矩；
+- 用非零`tau_jump`作为V5执行确认条件。
+
+---
+
+## 5. WBC参与离地检测的正确方式
+
+### 5.1 三类证据
+
+#### A. WBC预测支撑证据
+
+每个WBC周期记录：
+
+```text
+predicted_normal_R/L
+wbc_result.feasible
+wbc_result.scaling
+wbc_result.dynamics_residual_norm
+当前接触模型
+```
+
+作用是发现支撑力下降、任务与接触约束冲突、WBC无法维持当前接触模型。预测异常只能生成`UNLOAD_CANDIDATE`，不能单独进入FLIGHT。
+
+#### B. 物理步后实际接触力
+
+使用`data.qacc`、`data.ctrl`、实际接触几何块和动力学反解，再经过`off_force/on_force`双阈值和持续时间确认实际支撑力消失或恢复。
+
+#### C. 几何接触证据
+
+左右轮必须独立记录：
+
+```text
+contact_geometry_R/L
+right_gap/left_gap
+right_hub_z/left_hub_z
+right_lowest_z/left_lowest_z
+```
+
+不能只记录两个gap的最小值。
+
+### 5.2 推荐状态流
+
+```text
+GROUND_SUPPORT
+    -> UNLOAD_CANDIDATE
+    -> LIFTOFF_PENDING
+    -> FLIGHT
+
+FLIGHT
+    -> TOUCHDOWN_CANDIDATE
+    -> LANDING
+    -> RECOVER
+    -> GROUND_SUPPORT
+```
+
+每次状态转移必须检查：
+
+```text
+previous_phase合法
+and当前条件满足
+and必要控制动作已经实际执行
+```
+
+### 5.3 离地确认
+
+`UNLOAD_CANDIDATE`可以由WBC预测法向力下降、任务缩放下降或动力学残差增加触发，但此时不能立即关闭WBC。
+
+进入`LIFTOFF_PENDING`后，要求：
+
+```text
+当前相位允许离地
+WBC已经求解并写入当前跳跃参考
+至少完成一个物理步
+两轮几何接触持续消失或两轮gap持续为正
+实际法向力通过off_force/off_duration
+```
+
+`com_vz > 0`不能作为离地必要条件。
+
+进入`FLIGHT`后：
+
+- 不再使用旧双轮接触块建立接地硬约束；
+- 不使用陈旧`contact_estimator=True`立即切换LANDING；
+- 飞行段输出策略必须独立审批；
+- 记录进入FLIGHT的全部原因和证据。
+
+### 5.4 着地确认
+
+`FLIGHT -> TOUCHDOWN_CANDIDATE`可以使用任一轮几何接触恢复；随后要求：
+
+```text
+几何接触持续
+actual_normal通过on_force/on_duration
+```
+
+不能用陈旧接触估计的单帧`any(contact)`直接进入LANDING。
+
+---
+
+## 6. 当前接触检测代码的重点排查项
+
+### 6.1 预测力与实际力分开记录
+
+必须同时给出：
+
+```text
+predicted_normal_R/L
+normal_forces_R/L
+contact_geometry_R/L
+contact_estimator_R/L
+```
+
+`control.py`中的`predicted_normal`是WBC预测结果；`sampling.py`中的`normal_forces`是物理推进后的实际反解结果，不能混用。
+
+### 6.2 相位提示接线要验证输入契约
+
+当前`loop.py`已经把`THRUST/FLIGHT/LANDING`映射为`JumpPhaseHint`并传入采样器，但接触估计器的THRUST门控还依赖髋角输入。测试agent必须确认：
+
+- `hip_angle`是否实际传入；
+- 没有传入时是否导致THRUST期间接触状态被强制保持；
+- 该髋角是否代表当前模型真正的释放事件；
+- 不得通过硬编码髋角或随意调阈值掩盖接线问题。
+
+### 6.3 释放上限不能直接判飞行
+
+`leg_length >= release_end`只能表示腿部运动达到几何阶段，不能单独证明轮子离地。它最多生成`RELEASE_LIMIT_REACHED`事件，仍需等待几何和实际法向力确认。
+
+---
+
+## 7. 测试agent执行计划
+
+测试agent不得直接部署完整V5跳跃，必须按顺序执行。
+
+### E0：已有证据复核
+
+不重复完整3秒仿真，只核对：
+
+- V4结果身份和工作树；
+- `tau_jump`是否进入最终`data.ctrl`；
+- WBC任务是否缺少质心竖直目标；
+- `predicted_normal`和`normal_forces`是否分开记录。
+
+### E1：质心Jacobian接口自检
+
+仅验证新增质心行的计算，不改变控制参数：
+
+1. 质心位置与`robot_com()`一致；
+2. `J_com_z @ qvel`与质心竖直速度一致；
+3. `J_com_z @ qacc + bias_com_z`与有限差分加速度一致；
+4. 字段、单位、符号和关节维度正确；
+5. 同输入重复结果一致。
+
+### E2：静态WBC目标响应
+
+在固定接触、固定初始位形下比较“关闭质心竖直任务”和“开启质心竖直任务”。记录：
+
+- 期望/实际质心加速度；
+- qacc；
+- 总执行器力矩；
+- 逐轮预测法向力；
+- 接触残差和动力学残差；
+- WBC任务残差、scaling和限幅。
+
+判定重点是新增任务是否真正改变闭环运动目标，而不是某个中间力矩是否变大。
+
+### E3：只测试压缩与制动
+
+先不测试完整飞行和落地，确认：
+
+- 质心是否按目标下降；
+- 轮毂是否保持支撑；
+- gap是否保持接触范围；
+- 腿长是否按目标变化；
+- WBC预测支撑力与实际反解法向力是否一致；
+- 是否出现前向位移和pitch发散。
+
+### E4：释放交接
+
+仅在E2、E3通过后执行，核对：
+
+- WBC是否生成统一释放总力矩；
+- 释放参考是否实际写入`data.ctrl`；
+- 释放后质心竖直速度是否符合目标；
+- 几何离地、实际法向力和WBC预测支撑状态的先后顺序；
+- 是否出现THRUST尚未执行就进入FLIGHT；
+- 是否出现FLIGHT 1 ms后因陈旧接触状态进入LANDING。
+
+### E5：着地和MPC恢复
+
+只在释放和飞行证据明确后执行：
+
+- 几何接触恢复；
+- 实际法向力通过接地滞回；
+- 单轮和双轮接触时序；
+- WBC恢复调用；
+- MPC重新锚定；
+- 是否恢复GROUND而不是卡在airborne_zero或ABORT。
+
+---
+
+## 8. 禁止事项
+
+- 不重新加入`tau_wbc + tau_jump`来弥补WBC任务不足。
+- 不用负法向力实现压缩。
+- 不用腿长终点PD替代跳跃运动任务。
+- 不只用WBC预测接触力判定离地。
+- 不只用质心上升判定离地。
+- 不用`leg_length >= release_end`直接判飞行。
+- 不同时切换WLS/QP、修改接触阈值和修改跳跃目标。
+- 不调大力、增益、权重或放宽机械限位来掩盖任务不可行。
+- 不修改或回退MPC腿长拟合参数。
+
+---
+
+## 9. 测试结果反馈格式
+
+测试agent每次反馈必须以以下格式追加：
+
+```markdown
+# 测试agent：E阶段名称（日期）
+
+## 修改边界
+
+## 自检结果
+
+## 测试配置
+
+## 关键时序
+
+## WBC预测接触力
+
+## 物理步后实际接触力
+
+## 几何接触与质心/轮毂轨迹
+
+## 判定
+
+## 失败证据或通过依据
+
+## 下一步请求
+```
+
+结果必须区分：
+
+```text
+接口接线正确
+任务确实生效
+动力学约束可行
+控制输出正确写入
+压缩功能成功
+释放功能成功
+完整跳跃成功
+```
+
+不能把其中任意一项直接等同于完整跳跃成功。
+
+---
+
+## 10. 当前状态
+
+- 新Markdown文档已重建。
+- 本轮未修改控制代码、模型、参数、旧文档或测试结果。
+- 当前推荐架构是“JumpPlanner生成质心竖直目标，WBC统一求解总力矩，WBC接触力只作为预测监控，几何和物理步后实际力共同确认离地”。
+- 在用户批准V5方案、明确新增质心任务的参考口径和测试边界前，测试agent暂停部署完整跳跃控制重构。
+
+============================================================
+
+问题排查agent复查：E3之后的压缩失败定位（2026-10-09）
+
+一、当前结论
+
+本轮E3没有发生COMPRESS提前切换THRUST或FLIGHT。状态时序是：
+
+IDLE（1000帧） -> COMPRESS（425帧） -> ABORT（575帧）。
+
+ABORT发生在t=1.425 s，原因是腿长0.4305 m超过机械上限0.430 m。ABORT之后仿真仍继续推进，后续airborne_frames=188属于ABORT后的失控结果，不能作为“压缩阶段误触发离地”的证据。
+
+二、事实证据与推理链
+
+1. COMPRESS开始时腿长约0.2800 m，质心z约0.2639 m，双轮几何接触有效，法向力约[71.4,71.3] N。
+2. t=1.10 s时腿长约0.2731 m，质心z约0.2590 m，腿长率仍出现负值，说明压缩起初确实生效。
+3. t=1.15 s以后腿长率转正；t=1.20 s腿长约0.2787 m、质心z约0.2629 m；t=1.40 s腿长约0.4089 m、质心z约0.3563 m。压缩方向已经反转为伸长。
+4. 同期WBC任务记录中com_vertical目标始终为-4.905 m/s^2，但实际值从-2.185变为+0.884、+2.897、+3.115 m/s^2，残差最高约8.02 m/s^2。scaling=1和feasible=true只说明该加权求解返回了动力学自洽解，不表示com_vertical目标被满足。
+5. E3的MPC sample_raw在t=1.20 s仍包含pitch加速度+4.148 m/s^2，在t=1.30 s为+5.183 m/s^2；当前代码仅清零MPC腿角分量，pitch任务仍消费MPC参考。这证明跳跃期间MPC没有完全与WBC解耦。
+6. E3中ctrl与wbc_raw_torque差为0，tau_jump全程为0。因此本轮没有证据表明输出级把WBC力矩接错电机；首要问题在跳跃期任务输入与WBC任务竞争。
+
+三、已确认的代码缺陷
+
+1. control.py的跳跃处理只把sample的腿角位置、腿角速度和腿角加速度清零，没有清除MPC对pitch任务的state[2:4]和acceleration[1]影响。跳跃目标要求pitch保持0，当前路径却继续把MPC规划的俯仰加速度交给WBC。
+2. com_vertical只是WLS加权任务，当前权重25低于pitch=100和angle_R/angle_L=60。E3的实际任务结果已经证明它不能保证压缩方向，甚至在t=1.20 s以后给出正的质心加速度。
+3. jump.py的COMPRESS只在停止距离接近压缩终点时进入COMPRESS_BRAKE。如果腿长率已经转正但仍未到压缩终点，代码不会报告压缩方向丢失，会继续执行COMPRESS直到越过机械上限。这使真正的WBC失败被延迟成一个误导性的机械限位ABORT。
+4. loop.py在jump.phase=ABORT后没有立即结束压缩诊断，普通控制和物理仿真继续运行，导致测试报告把ABORT后的离地混入本轮结果。
+
+四、压缩阶段的修复边界
+
+当前只处理：IDLE -> COMPRESS -> COMPRESS_BRAKE -> 压缩完成即停。禁止本轮进入THRUST、FLIGHT、LANDING，也不修改MPC腿长拟合参数、接触阈值和机械模型。
+
+修复顺序必须是：
+
+1. 跳跃期保留MPC原始sample_raw仅用于日志，WBC默认不得消费MPC sample。WBC应使用固定的零pitch、零yaw、零前向目标，并由JumpCommand.desired_com_acceleration_z提供压缩/制动目标。
+2. 压缩阶段继续使用WBC的com_vertical动力学任务，不恢复leg_length_target，不叠加tau_jump，不通过VMC/Jacobian旁路写力矩。
+3. 在确认MPC解耦后的com_vertical实际值仍不能保持负值时，再单独复查WBC任务优先级和wheel actuator selection。不能同时修改MPC解耦、WBC权重和wheel selection，否则无法定位原因。
+4. COMPRESS中一旦腿长率转正且腿长仍大于压缩终点，必须记录compression_direction_lost并停止本轮；不能继续跑到机械上限。
+5. ABORT必须立即停止本轮诊断；ABORT后的帧不得计入压缩、离地或飞行统计。
+
+============================================================
+
+十一、算法代码修改方案（待用户批准，不是当前已执行代码）
+
+本节要求测试agent-ds和后续实现agent按文件、函数和数据流理解，不允许只按“增加一个跳跃任务”这种概括执行。
+
+A. JumpPlanner接口修改：wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+
+A1. JumpCommand新增字段
+
+建议新增以下字段：
+
+- desired_com_acceleration_z：本拍WBC质心竖直加速度目标，单位m/s^2。
+- reference_valid：本拍跳跃参考是否有效。
+- control_owner：当前相位由WBC统一求解，还是飞行/恢复专用逻辑。
+- liftoff_candidate：是否已经产生离地候选事件。
+- release_reference_applied_required：是否必须等待释放参考实际写入后再判断离地。
+
+不要再把leg_length_target作为COMPRESS和THRUST的主控制输入。腿长只保留为：
+
+- 压缩进度观测；
+- 阶段退出条件；
+- 机械范围保护；
+- 落地恢复参考。
+
+A2. JumpConfig新增参考配置接口
+
+不要在代码中直接写入未经批准的压缩力、加速度、持续时间或增益数值。应增加可验证的JumpProfile接口，由调用方提供经过批准的阶段参考：
+
+- compress_acceleration_profile；
+- brake_acceleration_profile；
+- thrust_acceleration_profile；
+- 参考的压缩行程、释放行程和目标离地速度。
+
+每个profile必须返回明确单位的质心竖直加速度，不允许同时返回一份tau_jump。
+
+如果仍然以总支撑力为上层输入，必须在JumpPlanner内部统一转换：
+
+    a_z = F_normal_total / robot_mass - gravity
+
+同一阶段只能保留一种权威输入，禁止一部分代码使用Fz、另一部分代码使用a_z而没有明确转换。
+
+A3. 状态机修改
+
+将当前直接的COMPRESS/THRUST/FLIGHT链路改为至少以下合法状态：
+
+    IDLE
+      -> COMPRESS_ACCEL
+      -> COMPRESS_BRAKE
+      -> THRUST_ARMED
+      -> THRUST
+      -> LIFTOFF_PENDING
+      -> FLIGHT
+      -> TOUCHDOWN_PENDING
+      -> LANDING
+      -> RECOVER
+      -> IDLE
+
+ABORT可以从任意活动状态进入，但ABORT后不得因为接触恢复自动跳回LANDING或IDLE。
+
+每个转移必须检查：
+
+    previous_phase == 合法前态
+    当前观测条件满足
+    必要执行锁存量已经成立
+
+必须新增或等价实现以下锁存量：
+
+- command_built：本相位参考已经装配；
+- wbc_output_written：WBC总力矩已经写入data.ctrl；
+- physics_step_completed：写入后至少完成一个物理步；
+- thrust_applied：释放相位参考已经真正执行；
+- liftoff_geometry_confirmed：双轮几何离地确认；
+- liftoff_force_confirmed：双轮实际法向力通过离地滞回；
+- touchdown_geometry_confirmed；
+- touchdown_force_confirmed。
+
+THRUST不得因为腿长达到release_end就直接进入FLIGHT。release_end只能产生RELEASE_LIMIT_REACHED事件；最终FLIGHT仍需满足合法前态、释放已执行、几何证据和实际力证据。
+
+B. 真实质心任务：wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+
+B1. 新增质心Jacobian函数
+
+建议新增：
+
+    com_vertical_row() -> tuple[np.ndarray, float, float, float]
+
+返回：
+
+- row：1 x nv的质心竖直Jacobian；
+- bias：Jdot*qvel对应的竖直加速度偏置；
+- com_z：当前质心世界z；
+- com_vz：当前质心竖直速度。
+
+实现要求：
+
+1. 质心定义必须和robot_com()一致，使用base子树质心。
+2. 优先使用MuJoCo提供的subtree COM Jacobian接口；如果当前MuJoCo版本不支持，再按同一质量子树手动累加body COM Jacobian。
+3. 不得用腿长Jacobian代替质心Jacobian。
+4. bias必须和现有rowset()的偏置口径一致，使用相同的有限差分/运动学刷新规则。
+5. 需要增加有限差分自检：J_com_z*qvel与com_vz一致，J_com_z*qacc+bias与质心加速度一致。
+
+B2. 新增接触力和实际力的区分接口
+
+WBC预测法向力继续由控制级记录，但命名必须区分：
+
+- predicted_normal：当前接触假设下WBC预测的接触力；
+- measured_normal：物理推进后由data.qacc和data.ctrl反解的实际法向力。
+
+不得把两者写入同名字段或在状态机中混用。
+
+C. WBC任务层：wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+
+C1. Gbc486Tasks.tasks增加可选跳跃质心目标
+
+将tasks.tasks接口扩展为类似：
+
+    tasks(state, rows, sample=None,
+          desired_com_acceleration_z=None,
+          jump_phase=None)
+
+默认参数必须保持None，保证普通GROUND路径行为不变。
+
+当desired_com_acceleration_z为None时，不添加质心任务。
+当其有效时，使用dynamics.com_vertical_row()创建：
+
+    TaskLevel(
+        jacobian=com_row[None, :],
+        desired_acceleration=np.array([desired_com_acceleration_z]),
+        bias_acceleration=np.array([com_bias]),
+        name="com_vertical"
+    )
+
+任务名称必须加入任务轨迹、结果日志和反馈字段。
+
+C2. 任务权限按相位控制
+
+不能继续用jump.active一刀切移除所有length任务。建议按相位处理：
+
+- COMPRESS_ACCEL/COMPRESS_BRAKE：不使用腿长PD主任务，使用com_vertical任务；
+- THRUST_ARMED/THRUST：不使用腿长终点PD主任务，使用com_vertical任务；
+- LANDING：允许恢复腿长任务，但目标应来自当前落地观测和恢复策略；
+- RECOVER：恢复普通姿态、腿长和MPC交接任务；
+- IDLE：完全走原GROUND路径。
+
+C3. MPC参考隔离
+
+跳跃active期间：
+
+- MPC可以继续求解并记录shadow；
+- sample_raw不能直接覆盖JumpReference；
+- pitch、腿长、腿角和加速度参考必须由跳跃参考接口明确提供；
+- 禁止通过sample=None隐式改变WBC任务分支。
+
+D. 控制求解层：wheel_leg_mujoco/gbc_mpc_wbc/control.py
+
+D1. 删除在线tau_jump叠加链
+
+wbc_stage中以下逻辑必须被移除或仅保留在独立的诊断分支，不能进入正式V5输出：
+
+    tau_jump = dynamics.thrust_torque(...)
+    external = dynamics.selection.T @ tau_jump
+    torque = torque + tau_jump
+
+正式V5应变为：
+
+    balance, motion = tasks.tasks(..., desired_com_acceleration_z=...)
+    torque, result = control.solve_wbc(..., external_force=real_external_force)
+    data.ctrl = torque
+
+real_external_force只允许表示不由当前执行器产生的外部扰动。
+
+D2. WBC执行确认
+
+wbc_stage需要返回或记录：
+
+- command_built；
+- wbc_called；
+- result_feasible；
+- result_scaling；
+- raw_wbc_torque；
+- final_total_torque；
+- wbc_output_written；
+- physics_step_completed由loop在推进后锁存。
+
+不能再用tau_jump是否非零判断释放是否执行。
+
+D3. 轮执行器权限
+
+不能在跳跃期间无说明地把wheel_actuators行从selection清零。该操作会改变WBC动力学可实现空间。
+
+应明确写成一种经过批准的策略：
+
+- WBC拥有轮执行器，但移除forward_velocity/yaw等轮运动任务；或
+- 轮执行器受显式零输出/约束控制，但必须记录这是改变后的执行器权限。
+
+第一轮诊断不得同时改变轮权限和质心任务，否则无法判断失败来源。
+
+E. 采样层：wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+
+## E0/E1审批与E2前代码缺陷复查（2026-10-09）
+
+### 审批结论
+
+- E0通过。已有V4/Q1-B数据完成字段、时序、输出链和重复读取复核；结论是旧路径确实把 `tau_jump` 叠加到WBC原始力矩，但没有形成有效压缩运动目标。
+- E1通过，范围仅限WP1。`com_vertical_row()` 的质心位置、速度Jacobian、bias有限差分和重复性检查通过；这证明观测接口可用，不证明WBC已经执行跳跃任务。
+- 当前不批准完整压缩/释放测试，先执行E2/WP2。测试agent只按部署文档实施，不自行添加保护、调参或扩展测试范围。
+
+### 当前源码中已确认的缺陷
+
+1. `wheel_leg_mujoco/gbc_mpc_wbc/wbc.py` 的 `tasks()` 没有 `com_vertical` 任务。E1接口虽然存在，但没有进入WBC的任务层，因此WBC没有被告知压缩或蹬伸所需的质心竖直加速度。
+2. `wheel_leg_mujoco/gbc_mpc_wbc/control.py` 仍然通过 `dynamics.thrust_torque()` 生成 `tau_jump`，并在WBC求解后执行 `torque = torque + tau_jump`。V4的 `wbc_raw_torque` 与 `tau_jump` 大幅反向抵消、最终力矩接近站立力矩，已经是该路径失效的直接证据。
+3. `wheel_leg_mujoco/gbc_mpc_wbc/loop.py` 仍在 `jump.disconnect` 时跳过WBC。若跳跃目标交给WBC统一求解，跳跃阶段必须保持WBC调用；否则即使参考目标正确，也没有控制器把它转换为执行器力矩。
+
+### E2/WP2的实现目标
+
+E2只把已通过的质心竖直观测接口接入WBC，不处理状态机、离地阈值、MPC腿长拟合或参数优化。实现后应形成：
+
+```text
+JumpPlanner显式质心竖直目标
+    -> control.py传给wbc.tasks()
+    -> wbc.py构造com_vertical TaskLevel
+    -> WBC统一求解总力矩
+```
+
+具体接口要求：
+
+- `wbc.py::tasks()` 增加可选 `desired_com_acceleration_z=None`；为空时保持普通GROUND任务列表和输出不变。
+- 非空时调用 `dynamics.com_vertical_row()`，使用其 `J_com_z`、`bias_com_z` 构造 `TaskLevel(name="com_vertical")`，目标只能来自显式JumpPlanner/测试参考，不能从MPC sample隐式推导。
+- `control.py` 负责传递目标并记录 `desired`、`bias`、`achieved`、`residual`；不得在E2凭空填写新的profile、增益或权重。
+- `loop.py` 在跳跃阶段不能用 `jump.disconnect` 跳过WBC。E2先验证WBC调用、任务出现和力矩写出链路，旧 `tau_jump` 叠加暂留到WP3单独处理。
+
+### E2的判定边界
+
+E2通过条件是：无NaN/Inf；接口字段和维度一致；B组仅开启显式 `com_vertical` 后，任务确实进入WBC，目标值与输入一致，实际加速度和残差可记录；A组普通GROUND路径与E2前保持一致；重复运行结果一致。E2不以跳跃高度、离地或姿态最终表现作为结论。
+
+E2通过后由问题排查agent复查源码和反馈，才决定是否进入WP3。WP3单独移除 `tau_jump` 在线叠加和跳跃外部力通道；在WP3通过前不得进行正式压缩/释放测试。
+
+## 按跳跃阶段推进的近期目标（2026-10-09）
+
+当前不追求一次完成整跳，先验证最短可见闭环：
+
+```text
+COMPRESS（压缩） -> THRUST（释放） -> LIFTOFF（确认离地后立即停止）
+```
+
+代码中的 `THRUST` 在文档中称为“释放”，保持现有枚举，避免新增状态名造成接口分裂。`FLIGHT` 和 `LANDING` 暂时只保留数据记录，不作为本轮修复目标。
+
+### 阶段目标一：压缩但不离地
+
+- 压缩阶段由WBC的 `com_vertical` 目标产生质心向下运动，不能用 `leg_length_target` 作为主驱动，也不能用负法向力伪造压缩。
+- 两个轮的几何接触和实际法向力必须在压缩阶段持续有效；压缩过程中不允许进入FLIGHT。
+- 每拍记录质心高度/速度、两轮间隙、两轮实际法向力、WBC预测法向力、腿长/腿速、pitch/pitch_rate、当前phase和输出力矩。
+
+### 阶段目标二：切换释放并离地
+
+- 只有在COMPRESS完成且释放目标已写入WBC后，才允许 `COMPRESS -> THRUST`。
+- THRUST阶段继续由WBC统一求解释放目标，不能再叠加 `tau_jump`。
+- 以几何间隙和实际接触力确认离地；确认LIFTOFF后立即结束本轮仿真，禁止继续执行未修复的FLIGHT WBC路径。
+
+### 本轮必须修复的源码问题
+
+1. `JumpCommand`增加显式质心竖直目标，并由COMPRESS/THRUST分别提供目标来源；当前loop的 `getattr(..., None)` 使真实跳跃没有启用 `com_vertical`。
+2. `com_vertical`必须使用具名的跳跃阶段优先级/权重。E2中目标 `+1.0` 只实现 `+0.00984`，说明默认权重1.0不足以证明释放能力；不允许测试agent自行试数。
+3. 删除 `tau_jump`作为WBC外部力和 `torque + tau_jump`在线叠加，确保释放力只通过WBC任务进入总力矩。
+4. 在离地确认后停止调用接触WBC，避免当前FLIGHT无接触调用触发 `Supported mode requires its contact Jacobian blocks`。本轮不修复飞行姿态控制，只确保测试在离地边界安全结束。
+
+### 本轮验收
+
+通过条件只有三项：压缩阶段不离地；状态合法地从COMPRESS切到THRUST；THRUST后出现真实离地且没有WBC异常。任一项失败，保留时序和原始数据，先定位，不进入FLIGHT/LANDING优化。
+
+## WP3失败复查：不是机体被固定，而是压缩目标违反接触物理（2026-10-09）
+
+### 已确认的模型与API事实
+
+- `wheel_leg_mujoco/MJCF/robot.xml` 的 `base` 包含 `base_free` 自由关节，根部平移不是固定基座。
+- 物理推进由 `mujoco.mj_step(model, data)` 完成；输出级先执行 `data.ctrl[:] = torque`，没有在控制循环中把机体位置写死。
+- WP3结果中根部 `qpos[2]` 从 `0.220239 m`（t=1.000）降到 `0.164718 m`（t=1.253），根部竖直速度达到 `-2.139 m/s`；质心 `z` 从 `0.263881 m` 降到 `0.243734 m`，因此机体确实下降。
+- 同期腿长从 `0.2800 m` 降到 `0.13245 m`，相对腿部运动远大于机体下降，所以画面会呈现“机体不动、轮毂上抬”。
+
+### 直接根因
+
+WP3把COMPRESS目标设置为：
+
+```text
+a_com_z = -JumpConfig.com_acceleration() = -11.8004 m/s²
+```
+
+接触支撑下法向力满足：
+
+```text
+F_normal_total = m * (g + a_com_z)
+```
+
+当 `a_com_z < -g` 时，所需法向力为负值。轮地接触只能提供推力，不能提供把机体向下拉住的负法向力，因此WBC的预测法向力转为负，物理接触力归零，轮毂离地。之后WBC继续输出腿部力矩，腿长继续缩短，形成“腿塌下去、轮毂上抬、机体自由下落”的表现。
+
+数据链已经对应上：t=1.225 s仍在COMPRESS时gap已为 `1.485/1.478 mm`；随后最大gap达到 `0.06909 m`，实际法向力归零；t=1.248 s腿长约 `0.167 m`，最终最小腿长 `0.13245 m`。这不是MuJoCo把机体固定，也不是首先由电机接线错造成。
+
+### 次要但必须记录的问题
+
+几何gap已经为正、实际法向力已经归零时，`contact_estimator`仍保持 `[true, true]`。这是接触估计滞后，不能作为本次提前离地的首因，但会使WBC继续按接触模型求解并放大后续异常，后续需要单独修复。
+
+### 修复方向
+
+1. COMPRESS目标必须来自显式压缩profile，并满足接触可行域 `-g < a_com_z < 0`；不能再复用并取负THRUST加速度。
+2. 压缩终点前必须有制动阶段，降低腿长/质心下降速度，再切换THRUST。仅把压缩终点作为状态条件而不制动，会重复本次越过 `0.160 m` 的现象。
+3. THRUST使用正向质心加速度目标；`tau_jump`已移除，保持WBC单一总力矩输出。
+4. 本轮下一测试只验证：COMPRESS保持双轮接触，切换THRUST后再离地；离地确认后立即停止，不进入FLIGHT/LANDING。
+
+E1. 实际法向力链
+
+采样顺序保持：
+
+    mj_forward
+    -> geometry contact
+    -> data.qacc/data.ctrl反解actual normal force
+    -> ContactEstimator滞回
+    -> Supervisor
+
+必须记录左右轮独立数据，不使用min gap代替双轮状态。
+
+E2. 相位提示完整接线
+
+FeedbackSampler.update应接收当前JumpPhaseHint以及真正需要的hip_angle或等价释放观测。禁止调用接触估计器时phase正确但hip_angle永远None，导致THRUST门控永久维持接触。
+
+E3. 接触拓扑与力滞回分离
+
+几何接触消失不应被陈旧contact_estimator永远覆盖；但几何单帧抖动也不能直接切FLIGHT。建议分别记录：
+
+- geometry_candidate；
+- measured_force_candidate；
+- estimator_confirmed；
+- final_contact_topology。
+
+F. 运行循环：wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+
+F1. 控制时序修改
+
+每个物理步应明确以下顺序：
+
+1. 读取上一物理步后的真实状态；
+2. 采样几何接触和实际法向力；
+3. 用当前phase和上一阶段锁存量更新JumpPlanner；
+4. WBC到期时求解当前JumpReference；
+5. 写入唯一总力矩data.ctrl；
+6. 设置wbc_output_written；
+7. 推进一个物理步；
+8. 设置physics_step_completed；
+9. 下一物理步才允许依据执行锁存量判断THRUST/FLIGHT。
+
+不能在THRUST刚生成的同一逻辑段中，用尚未执行的结果判断已经离地。
+
+F2. airborne_active与JumpPhase解耦
+
+普通airborne_active不能在jump.active期间直接覆盖跳跃控制输出。跳跃FLIGHT应由跳跃状态机和接触交接共同决定；普通意外离地应单独记录。
+
+F3. 输出来源日志
+
+每一帧至少记录：
+
+- phase和previous_phase；
+- decision.mode；
+- wbc_called；
+- wbc_output_written；
+- output_source；
+- airborne_active；
+- final data.ctrl；
+- geometry contact；
+- measured normal；
+- predicted normal。
+
+G. 接触检测层：Algorithm/contact_state.py
+
+G1. WBC预测力只能作为候选事件
+
+不能添加：
+
+    predicted_normal <= threshold -> FLIGHT
+
+应添加候选事件：
+
+    predicted_unload -> UNLOAD_CANDIDATE
+
+最终离地必须由合法前态、执行锁存量、几何持续证据和实际法向力滞回共同确认。
+
+G2. 着地不能使用陈旧接触单帧恢复
+
+FLIGHT到LANDING至少要求几何接触恢复和实际法向力通过on_force/on_duration。单轮接触应先进入TOUCHDOWN_PENDING或单支撑恢复，不得直接宣称双轮GROUND。
+
+H. 当前不允许直接修改的部分
+
+在用户批准V5详细实现之前，不得：
+
+- 修改增益、任务权重、力矩限幅或接触阈值；
+- 继续调大负压缩力；
+- 继续叠加tau_jump；
+- 回退或删除MPC腿长拟合；
+- 用release_end强制切FLIGHT；
+- 将WBC预测法向力直接作为离地真值。
+
+============================================================
+
+十二、实现后的最小验收条件
+
+1. 普通GROUND路径在无跳跃时逐帧结果不变。
+2. 跳跃期间最终输出只有WBC总力矩，没有tau_jump二次叠加。
+3. 质心任务的Jacobian、bias、单位和有限差分自检通过。
+4. 压缩阶段质心按目标下降，轮毂仍保持支撑，腿长发生可解释变化。
+5. WBC预测法向力、物理步后实际法向力和几何接触分别记录。
+6. THRUST没有完成实际写入和物理步推进前，不得进入FLIGHT。
+7. FLIGHT不能因陈旧contact_estimator单帧值立即进入LANDING。
+8. 任何失败都能通过日志定位到任务、约束、输出、接触或状态机层。
+
+当前状态：以上是待批准的详细代码修改设计，未修改实际算法代码。
+============================================================
+问题排查agent：WP5代码复查结论（2026-10-09，覆盖旧WP6方案）
+
+一、当前结论
+
+WP5已经证明跳跃COMPRESS阶段的质心竖直任务没有实现：
+
+1. MPC sample已经从跳跃期WBC输入断开，sample=None，不能再把当前失败归因于MPC轨迹直接下发。
+2. 双轮在异常帧仍有几何接触和正法向力，airborne_active=False，不能把该次失败归因于离地检查误触发。
+3. WBC result.feasible=True只表示动力学约束、接触约束和执行器限幅求解可行，不表示每个软任务都达到目标。
+4. t=1.096 s时com_vertical目标为-4.905 m/s^2，实际值为+0.0254 m/s^2，残差为+4.9304 m/s^2；这证明WBC任务目标未被实现。
+5. 同一帧angle_R/angle_L任务目标约为+0.532 m/s^2，pitch任务目标也不是零。这说明跳跃压缩期间姿态和腿角任务仍在主动请求加速度，并且通过同一个受约束的qacc/执行器空间与com_vertical共同优化。
+
+因此当前证据支持“WBC任务分配/任务目标发生竞争或竖直任务不可实现”，但还不能仅凭WP5断言具体由angle任务、pitch任务或接触模型中的某一个单独造成。旧测试方案中直接删除angle_R/angle_L的WP6作废，不得执行。
+
+二、代码缺陷
+
+1. wheel_leg_mujoco/gbc_mpc_wbc/control.py::wbc_stage()当前通过任务名过滤删除length_R和length_L。该做法破坏任务接口，不能作为跳跃控制设计。
+2. wheel_leg_mujoco/gbc_mpc_wbc/wbc.py::Gbc486Tasks.tasks()已经为左右腿分别创建length_R、length_L，并且Algorithm/wbc/projection.py::TaskLevel提供activation=0释放本级权限的接口。正确的关闭方式是保留TaskLevel对象、保持左右腿各自的Jacobian/bias/desired字段，只将跳跃压缩和释放阶段的腿长任务activation设置为0；不能从tuple中删除。
+3. 当前JumpCommand在COMPRESS/COMPRESS_BRAKE/THRUST阶段leg_length_target=None，所以现有代码的腿长目标重建分支没有生效。跳跃力实际通过desired_com_acceleration_z进入com_vertical任务，JumpCommand.leg_force只作为诊断字段，并没有直接转换为关节力矩。
+4. wbc.py中的WLS后端对任务做加权同时最小二乘，不是严格优先级。com_vertical权重25低于pitch权重100和两条angle权重60；因此即使feasible=True，com_vertical也可能有很大残差。
+5. wbc_stage()当前只把com_vertical的achieved/residual写入task_trace，没有把pitch、roll、angle_R、angle_L、length_R、length_L各自的achieved/residual完整写出，导致无法用现有日志确定哪个任务具体抢占了竖直任务。
+6. loop.py构造JumpObservation时使用两腿腿长均值和两腿腿长率均值；wheel_gap还使用np.min，丢失左右身份。该逻辑不符合每条腿独立判断的要求，可能把一侧异常掩盖在均值中。
+7. wbc.py中虽然逐腿创建腿长和腿角任务，但仍计算未使用的common/diff均值变量；这不是当前失败的直接证据，但应清理或明确其用途，避免后续误把均值用于跳跃判定。
+8. Gbc486Tasks.contact_blocks()把两侧轮子的lateral接触行取均值。该行属于共享横向接触约束，不等同于腿长任务均值；但必须在后续验证中分别记录每侧接触Jacobian、法向力和接触状态，不能用单个聚合值代替两侧证据。
+
+三、正确的控制语义
+
+1. COMPRESS/COMPRESS_BRAKE/THRUST的主输入是JumpPlanner产生的desired_com_acceleration_z，由WBC通过动力学和接触约束求解关节力矩。不能把leg_length_target作为压缩/释放主控制输入，也不能另行叠加VMC/Jacobian力矩。
+2. length_R/length_L仍然保留在WBC任务集合中；跳跃压缩和释放阶段关闭其输出权限（activation=0），而不是删除任务。关闭后仍需在trace中看到两条任务，且两条任务的activation分别为0。
+3. 如果落地恢复阶段需要腿长跟踪，只能在LANDING/RECOVER重新打开两条腿各自的length任务，并将nominal leg length作为恢复参考。该参考只服务于恢复，不得参与COMPRESS、COMPRESS_BRAKE、THRUST的状态切换。
+4. pitch、roll、angle_R、angle_L是否在压缩期间保留，必须按任务贡献证据决定。保留时应冻结跳跃开始时的姿态/腿角参考，使无外部扰动时目标误差为零；不能让任务持续追逐普通站立标称值。任何要关闭的任务也必须用activation=0保留接口。
+5. WBC是全身耦合求解器，即使左右腿任务分别建模，也不能推断任务必然无冲突。左右腿Jacobian必须独立，状态判断也必须独立；共享的base姿态、接触和动力学约束仍会产生耦合，必须用每任务achieved/residual和每侧输出力矩验证。
+
+四、下一步排查顺序
+
+暂不修改MPC参数、接触阈值、执行器selection或WBC权重，也不执行旧WP6。先完成以下代码复查和最小诊断部署：
+
+1. 在wbc_stage中保留完整原始任务列表，跳跃阶段只通过TaskLevel.activation关闭length_R/length_L；同时保留任务的desired、bias、Jacobian、activation。
+2. 为每个WBC任务写出desired、achieved、residual、activation、scaling、exhausted；特别记录pitch、roll、angle_R、angle_L、length_R、length_L、com_vertical。
+3. 将JumpObservation拆成leg_length_R、leg_length_rate_R、leg_length_L、leg_length_rate_L，并分别记录右轮/左轮gap、geometry_contact、contact_estimator、normal_force。所有COMPRESS方向、压缩终点和状态切换判断都按左右腿分别判断；禁止用均值或np.min后的单值替代。
+4. 仅做静态/单步接口检查，确认COMPRESS期间两条length任务仍存在且activation=0，com_vertical仍存在且目标为-4.905 m/s^2；不得以压缩成功作为本轮验收条件。
+5. 在上述诊断完整后，再做一个单变量对比：保持MPC、selection、接触判断、WBC权重和jump加速度不变，只比较姿态/腿角任务冻结参考前后的每任务残差和左右腿力矩。测试agent-ds不能自行删任务、调权重或增加保护逻辑。
+
+============================================================
+
+问题排查agent：压缩失败根因与方案1设计（2026-10-09，WP7后复查）
+
+一、结论
+
+WP7 的 compression_direction_lost 不是保护误触发。腿长变化率在压缩过半前由负转正，是真实运动反转。
+
+直接原因：WBC 求出的质心竖直加速度反号（支撑力大于体重），机体下坠被刹住并转为上升，腿长随之由缩短转为伸长。
+实测：com_vertical achieved = -2.190 (t=1.000) -> +0.025 (t=1.096) -> +2.314 (t=1.184)；
+腿长率 R = -0.175 (t=1.090) -> -0.019 (t=1.180) -> +0.072 (t=1.210)；腿长最小 0.2587 m (t=1.185) 后回升到约 0.262 m。
+
+根本原因：WLS 任务竞争。不是目标数值错、不是离地误判、不是输出映射错。
+离线重建 WP7 每个 WBC 帧（用记录的 qpos/qvel 重建硬约束与任务，重建 qacc 与日志 qacc 逐元素一致，最大误差 0），
+将质心竖直加速度变化按任务分解：
+
+  t=1.000：pitch -0.012，angle_R +0.001，angle_L +0.001，com_vertical -2.180，合计 -2.190
+  t=1.096：pitch +3.003，angle_R -0.189，angle_L -0.189，com_vertical -2.622，合计 +0.005
+  t=1.184：pitch +7.126，angle_R -0.493，angle_L -0.493，com_vertical -3.959，合计 +2.194
+
+各任务贡献之和与实测质心加速度变化严格相等。
+
+消融（同一帧，离线）：关 pitch -> -4.892 / -4.887 / -4.882；关 angle -> -4.884 / -4.871 / -4.885；只留 com_vertical -> -4.905。
+目标物理可行：只留 com_vertical 时两轮法向力 [35.6, 35.7] N（合计 71.3 N 约 0.5*m*g），max|tau|=2.83 N*m。
+
+二、机制
+
+WLS 中每个任务的有效影响约等于“权重 × 零空间投影²”，零空间为硬约束（接触 + 闭链 + 欠驱动动力学）的零空间。
+各任务投影占比 ||J·null|| / ||J||：
+
+  angle_R/L      0.35   权重  60   有效影响 约 7.4
+  pitch          0.25   权重 100   有效影响 约 6.25
+  roll           0.26   权重  10   有效影响 约 0.68
+  com_vertical   0.043  权重  25   有效影响 约 0.047
+  forward_vel    0.033  权重  40   有效影响 约 0.044
+
+com_vertical 的有效影响比 angle 小约 150 倍。姿态/腿角一旦有非零误差，质心竖直方向就会被压成反向。
+该低投影不是轮执行器被清零造成的：清零与不清零时 com 投影分别为 0.043 与 0.046，量级相同。
+A/B 冻结参考不改善，是因为跟踪误差来自实际状态漂移，不是参考在变。
+
+三、方案1（用户 2026-10-09 选定）：压缩相位让质心竖直任务占主导
+
+目标：COMPRESS / COMPRESS_BRAKE（以及 THRUST）期间让 com_vertical 在 WLS 中占主导，使实际质心竖直加速度跟踪 -4.905；
+pitch/angle 保留在任务列表，但不得压过 com_vertical。
+
+权重依据：要让 com_vertical 的有效影响不小于最强任务（pitch 约 6.25），需要 w_com 约等于 6.25 / 0.043² 约 3400。
+离线扫描（同一批帧，其余权重不变）：
+
+  w_com=25（现状）：com = -2.190 / +0.025 / +2.314，max|tau| 至 9.99，法向 55~88 N/轮
+  w_com=2000    ：com = -4.830 / -4.790 / -4.791，max|tau| 约 2.6，法向 约 36.4 N/轮
+  w_com=5000    ：com = -4.875 / -4.859 / -4.859，max|tau| 约 2.6，法向 约 36.0 N/轮
+  w_com=12000   ：com = -4.892 / -4.886 / -4.886，max|tau| 约 2.7，法向 约 35.8 N/轮
+  w_com=40000   ：com = -4.901 / -4.899 / -4.899，max|tau| 约 2.6，法向 约 35.7 N/轮
+
+推荐具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0（约为目标的 99%，且高于 3400 阈值有余量，待用户批准）。
+离线扫描同时显示：提高该权重后 pitch achieved 为 -2.3 ~ -4.0 m/s²、angle 为 -1.3 ~ -2.5 m/s²（相对现状只是略大），
+竖直方向反号消失，执行器力矩反而下降。这说明压缩期姿态会失配，必须实测。
+
+四、修复边界
+
+允许改（仅与跳跃相位相关的权重/优先级）：
+  wheel_leg_mujoco/gbc_mpc_wbc/control.py（跳跃分支对 com_vertical 施加相位权重）
+  必要的具名常量与 trace 字段
+
+实现方式（不改 Algorithm 共享层）：WLS 中任务权重 = TASK_WEIGHTS[name] × task.activation，
+因此在 COMPRESS / COMPRESS_BRAKE / THRUST 对 com_vertical 用 replace(task, activation=JUMP_COM_VERTICAL_ACTIVATION)，
+其中 JUMP_COM_VERTICAL_ACTIVATION = JUMP_COM_VERTICAL_WEIGHT / TASK_WEIGHTS["com_vertical"] = 5000 / 25 = 200。
+trace 必须记录该 activation 与有效权重。若实现者选择显式 weight override 而非 activation 倍率，需在反馈中说明。
+
+禁止改：
+  MPC 参数、腿长网格、A/B 矩阵；接触/离地阈值；机械限位；MJCF；backend/model_variant/preset；
+  wheel actuator selection；com_vertical 目标数值（-4.905）；tau_jump；删除任何任务；
+  其他任务权重（pitch/angle/roll/yaw/forward/length 保持原值）。
+
+五、验收（交给测试agent执行一次）
+
+配置：backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动；compression_only=True；其他参数不改。
+
+通过条件（本轮只看压缩）：
+  两侧腿长从约 0.28 m 持续减小到 compression_end=0.16 m，不进入 FLIGHT/LANDING；
+  压缩期 com_vertical achieved 保持为负（不反号），residual 不持续增大；
+  两侧 geometry_contact 与 normal_force 持续有效，wheel_gap 不持续张开；
+  不出现 compression_direction_lost、joint_limit、nonfinite_state、ABORT；
+  ctrl 与 wbc_raw_torque 一致，tau_jump 为零。
+
+必须报告的风险项：压缩期 pitch / pitch_rate 的实际漂移、最大关节力矩、最小实际法向力、是否触及关节限位。
+若 pitch 漂移不可接受或出现限位，停止并回传，不得自行调权重或额外加保护。
+
+六、与 WP7 临时隔离的关系
+
+jump.py 中 WP7 的“compression_direction_lost 不立即 ABORT”是临时诊断隔离，不是最终修复。
+方案1测试保留该隔离以便观察压缩全过程，但反馈中必须明确标注；方案1通过后再由问题排查agent决定是否恢复该中止条件。
+
+============================================================
