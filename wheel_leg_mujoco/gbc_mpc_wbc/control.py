@@ -89,7 +89,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               limit_warned: bool = False, jump=None, sample_override=None,
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
-              jump_config=None) -> WbcOutcome:
+              jump_config=None, leg_length_compression: bool = False) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -112,7 +112,11 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     # 这两个相位不创建 com_vertical 任务，由等效力前馈接管竖向目标。
     vmc_phase = bool(vmc_feedforward and jump is not None and jump.active
                      and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE"))
-    com_target = None if vmc_phase else desired_com_acceleration_z
+    # VL1（2026-10-09）：腿长空间加速度驱动。COMPRESS/COMPRESS_BRAKE 把加速度目标挂到
+    # length_R/length_L 行，不创建 com_vertical；开关默认关时行为与当前完全一致。
+    leg_length_phase = bool(leg_length_compression and jump is not None and jump.active
+                            and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE"))
+    com_target = None if (vmc_phase or leg_length_phase) else desired_com_acceleration_z
     balance, motion = tasks.tasks(feedback.state, feedback.rows, sample,
                                   desired_com_acceleration_z=com_target,
                                   pitch_reference=holds.get("pitch"),
@@ -140,10 +144,15 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     #     ① 摘掉依赖轮的任务（位移/偏航）；② 轮执行器行从选择矩阵里清零——求解器因此把轮子
     #     当作**自由滚动**（角加速度由接触摩擦决定），从根上切断"用地面对抗竖直蹬伸"的通道。
     if jump is not None and jump.active:
-        # 新部署（2026-10-09）：不再过滤任何任务，保留 tasks.tasks() 返回的全部任务对象与原顺序。
-        # 只在 COMPRESS/COMPRESS_BRAKE/THRUST 用 activation=0 关闭两条腿长任务的输出权限，
-        # 不改变它们的 Jacobian、bias、desired；LANDING/RECOVER 恢复原有腿长任务权限。
-        if jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE", "THRUST"):
+        # VL1（2026-10-09）：leg_length_compression 打开且相位为 COMPRESS/COMPRESS_BRAKE 时，
+        # 不对 length_R/L 置 activation=0，而是把加速度目标换成 a_L（=jump.desired_com_acceleration_z）；
+        # 其余相位与默认路径保持 activation=0（新部署 2026-10-09）。
+        if leg_length_phase:
+            a_L = float(jump.desired_com_acceleration_z)
+            motion = tuple(replace(task, desired_acceleration=np.array([a_L]))
+                           if task.name in ("length_R", "length_L") else task
+                           for task in motion)
+        elif jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE", "THRUST"):
             motion = tuple(replace(task, activation=0.0)
                            if task.name in ("length_R", "length_L") else task
                            for task in motion)

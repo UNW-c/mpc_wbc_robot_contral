@@ -161,7 +161,7 @@ def _disturbance(case):
 
 def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              explicit_jump_reference=False, compression_only=False, freeze_jump_reference=False,
-             vmc_feedforward=False):
+             vmc_feedforward=False, leg_length_compression=False):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
@@ -172,7 +172,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
     frames = []
     sim.run(default_command(), duration, disturbances=_disturbance(case), trace_sink=frames.append,
             explicit_jump_reference=explicit_jump_reference, compression_only=compression_only,
-            freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward)
+            freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
+            leg_length_compression=leg_length_compression)
     release_end = float(sim.jump.config.release_end) if sim.jump is not None else float(config.nominal_length)
     document = {
         "metadata": {
@@ -196,6 +197,7 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             "disturbance": _plain(_disturbance(case)),
             "explicit_jump_reference": bool(explicit_jump_reference),
             "vmc_feedforward": bool(vmc_feedforward),
+            "leg_length_compression": bool(leg_length_compression),
             "viewer_xfrc_applied_executed": False,
             "viewer_xfrc_applied_note": "GUI viewer path is not executed by this headless tool; xfrc_applied remains separately recorded.",
             "units": {
@@ -237,13 +239,16 @@ def main():
                         help="B组实验：压缩期 pitch/roll/angle_R/angle_L 用跳跃开始时的冻结参考")
     parser.add_argument("--vmc-feedforward", action="store_true",
                         help="VP1：COMPRESS/COMPRESS_BRAKE 用等效力前馈替代 com_vertical 任务")
+    parser.add_argument("--leg-length-compression", action="store_true",
+                        help="VL1：COMPRESS/COMPRESS_BRAKE 用腿长行加速度驱动，不创建 com_vertical")
     args = parser.parse_args()
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
              args.jump_time, explicit_jump_reference=args.explicit_jump_reference,
              compression_only=args.compression_only,
              freeze_jump_reference=args.freeze_jump_reference,
-             vmc_feedforward=args.vmc_feedforward)
+             vmc_feedforward=args.vmc_feedforward,
+             leg_length_compression=args.leg_length_compression)
 
 
 if __name__ == "__main__":

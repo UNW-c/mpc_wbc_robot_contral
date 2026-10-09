@@ -41,7 +41,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              explicit_jump_reference: bool = False,
              compression_only: bool = False,
              freeze_jump_reference: bool = False,
-             vmc_feedforward: bool = False) -> None:
+             vmc_feedforward: bool = False,
+             leg_length_compression: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -243,6 +244,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                                             else jump_command.desired_com_acceleration_z),
                 jump_holds=jump_holds,
                 vmc_feedforward=vmc_feedforward,
+                leg_length_compression=leg_length_compression,
                 jump_config=(None if sim.jump is None else sim.jump.config),
                 sample_override=(jump_reference if explicit_jump_reference
                                  and jump_command is not None and jump_command.active
@@ -498,6 +500,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 },
                 "wheel_selection_cleared": bool(outcome is not None
                                                 and outcome.wheel_selection_cleared),
+                "leg_length_compression": bool(leg_length_compression),
                 "wbc_task_trace": None if outcome is None else outcome.task_trace,
                 "wbc_result": None if result is None else {
                     "feasible": bool(result.feasible),

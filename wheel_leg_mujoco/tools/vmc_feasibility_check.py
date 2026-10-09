@@ -103,6 +103,8 @@ def _linear_targets(state):
     return {
         "com": (row(state["row_com"]), float(state["bias_com"])),
         "pitch": (row(task_jacobian[2]), float(task_bias[2])),
+        "len_R": (row(leg_rows[0]), float(leg_bias[0])),
+        "len_L": (row(leg_rows[2]), float(leg_bias[2])),
         "phi_R": (row(leg_rows[1]), float(leg_bias[1])),
         "phi_L": (row(leg_rows[3]), float(leg_bias[3])),
     }
@@ -266,6 +268,9 @@ def _analyse_frame(model, data, frame, mu_model):
                           soft_value=com_target)
         pitch_best = _solve(state, enabled, mu_model, {"com": com_target}, soft="pitch")
         exact = _solve(state, enabled, mu_model, com_pitch_angle)
+        leg_space = {"len_R": com_target, "len_L": com_target,
+                     "pitch": 0.0, "phi_R": 0.0, "phi_L": 0.0}
+        leg_exact = _solve(state, enabled, mu_model, leg_space)
         report[label] = dict(
             com_pitch_feasible=_feasible(state, enabled, mu_model, com_pitch),
             com_pitch_angle_feasible=exact is not None,
@@ -274,6 +279,9 @@ def _analyse_frame(model, data, frame, mu_model):
             pitch_best_achieved=None if pitch_best is None else pitch_best["achieved"]["pitch"],
             mu_req=_min_mu(state, enabled, com_pitch_angle),
             com_pitch_angle_max_abs_tau=None if exact is None else exact["max_abs_tau"],
+            leg_space_feasible=leg_exact is not None,
+            leg_space_mu_req=_min_mu(state, enabled, leg_space),
+            leg_space_max_abs_tau=None if leg_exact is None else leg_exact["max_abs_tau"],
         )
     return report
 
@@ -309,16 +317,15 @@ def main() -> int:
         on, off = report.get("wheels_on", {}), report.get("wheels_off", {})
         _LOGGER.info(
             "t=%.3f %s target=%s | 自检 dFn=%.2e dFt=%.2e | "
-            "ON com+pitch=%s com+pitch+angle=%s com_err=%s pitch_best=%s mu_req=%s tau=%s | "
-            "OFF com+pitch=%s com+pitch+angle=%s com_err=%s pitch_best=%s mu_req=%s tau=%s",
+            "ON com+pitch=%s com+pitch+angle=%s leg_space=%s leg_mu=%s leg_tau=%s mu_req=%s | "
+            "OFF com+pitch=%s com+pitch+angle=%s leg_space=%s",
             report["t"], report["phase"], report["com_target"],
             report["self_check"]["max_normal_error"], report["self_check"]["max_tangent_error"],
             on.get("com_pitch_feasible"), on.get("com_pitch_angle_feasible"),
-            _fmt(on.get("com_best_error")), _fmt(on.get("pitch_best_achieved")), _fmt(on.get("mu_req")),
-            _fmt(on.get("com_pitch_angle_max_abs_tau")),
+            on.get("leg_space_feasible"), _fmt(on.get("leg_space_mu_req")),
+            _fmt(on.get("leg_space_max_abs_tau")), _fmt(on.get("mu_req")),
             off.get("com_pitch_feasible"), off.get("com_pitch_angle_feasible"),
-            _fmt(off.get("com_best_error")), _fmt(off.get("pitch_best_achieved")), _fmt(off.get("mu_req")),
-            _fmt(off.get("com_pitch_angle_max_abs_tau")),
+            off.get("leg_space_feasible"),
         )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")

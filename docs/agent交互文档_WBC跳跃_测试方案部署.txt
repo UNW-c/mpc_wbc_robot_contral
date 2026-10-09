@@ -1465,3 +1465,117 @@ feasible/scaling/dynamics_residual：
 是否允许进入下一轮：
 
 ============================================================
+
+VL1：腿长空间加速度驱动（方案 b）部署（问题排查agent，2026-10-09）
+
+一、背景（已确认，不需重测）
+
+VP1 的等效力矩前馈被 WBC 精确抵消（tau(h)-(tau(h_eff)+tau_ff)=4.4e-15，W·Sᵀ=1.98e-16，
+rank(Q_uᵀSᵀ)=6），是空操作；R2 实测支撑力全重、腿长 1 s 只压 2.47 mm。
+R1（com 驱动）com 精确跟踪、max|pitch|=0.00148，腿长到 0.17899（差 0.019 m）后过冲失接触。
+腿长空间可行性自检（tools/vmc_feasibility_check.py，WP8 位形）：
+  轮启用：目标 {L_R 加速度=a_L, L_L 加速度=a_L, pitch=0, phi_R=0, phi_L=0} 全部帧可行，
+  mu_req=0.030~0.167（模型 1.0），max|tau|=10.2~19.7 N*m（腿限 40）；轮清零不可行。
+详见 docs/agent交互文档_WBC跳跃重规划.txt。
+
+二、本轮目标
+
+在 COMPRESS/COMPRESS_BRAKE 把加速度目标挂到腿长行（不用 com_vertical、不用力矩前馈），
+验证能否在压住 pitch/摆角的同时把两侧腿长压到 compression_end=0.16 m 并停住。
+
+三、允许修改（全部在开关后，默认关）
+
+- control.py：
+  1. 新增布尔参数 leg_length_compression（默认 False），由 loop.py / simulation.py /
+     jump_diagnostic.py 透传。
+  2. leg_length_compression 为 True 且相位为 COMPRESS/COMPRESS_BRAKE 时：
+     - 不再对 length_R/length_L 置 activation=0；
+     - replace(length_R/length_L task, desired_acceleration=np.array([a_L]))，
+       其中 a_L = jump.desired_com_acceleration_z（COMPRESS=-0.5g，BRAKE=+0.5g，
+       来源=用户 2026-10-09 批准）；
+     - 向 tasks.tasks 传 desired_com_acceleration_z=None（不创建 com_vertical）。
+  3. leg_length_compression 为 False 时行为与当前完全一致（含 vmc_feedforward 与 com_vertical 路径）。
+  4. 轮 selection 保持 VP1 的“离地才清零”。
+- jump.py：不改（相位机、BRAKE 触发、机械范围中止、compress/brake_acceleration 全部不动）。
+- loop.py / simulation.py / jump_diagnostic.py：新增 --leg-length-compression 透传开关。
+
+禁止修改：MPC 参数与腿长网格、接触/离地阈值、机械限位、MJCF、backend/model_variant/preset、
+TASK_WEIGHTS、jump.py 状态机与触发判据、thrust_torque、WbcGains（kp_h/kd_h/attitude 等）。
+
+四、保险与回退（本轮重点）
+
+1. 开关默认关：不改开关就是当前行为。回退 = 关开关；或 git revert 到提交 5bfb8aa。
+2. 先跑腿长空间可行性自检（本次已通过）；若后续改工况，重跑：
+   ../.venv/Scripts/python.exe tools/vmc_feasibility_check.py --input <baseline> --frames ...
+3. 单步自检：落地静止态给 a_L，验证腿长速率方向（应为负=压缩）、接触保持、
+   |tau| 在限幅内、dynamics_residual 约 0、com_vertical 不存在、length 任务 activation=1。不过就停。
+4. 目标限幅：a_L 幅值不超过 |compress_acceleration|/|brake_acceleration|；腿长参考夹在
+   [max(compression_end, leg_length_min), nominal]（由调用方 clamp，禁止命令进入机械下限）。
+5. 保留既有中止：leg_length_out_of_range、compression_contact_lost、compression_direction_lost、
+   compression_only 在 THRUST 前停止，全部不动。
+6. A/B 对照：同一工况跑 VL1（腿长驱动），对照 R1（com 驱动，已有）与 WP8。
+7. 回退判据（出现任一即停并回报，不得自行调参/加保护）：
+   - joint_limit / nonfinite_state / ABORT；
+   - 双轮接触丢失；
+   - |pitch| 超过 config.pitch_limit；
+   - BRAKE 前某侧腿长越过 compression_end。
+
+五、固定输入
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动；compression_only=True。
+
+命令：
+VL1：
+  tools/jump_diagnostic.py --stage VL1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --compression-only --leg-length-compression
+参考：R1 results/VP1_R1_baseline_run01.json.gz；WP8 results/WP8_baseline_run01.json.gz。
+
+六、执行顺序
+
+1. 语法/导入检查。
+2. 单步自检（第四节第 3 条）。
+3. 跑 VL1 一次。
+4. 原样记录。
+
+七、每帧必须记录
+
+phase / previous_phase / transition_reason；两侧 leg_length_R/L、leg_length_rate_R/L；
+length_R/length_L 的 desired/achieved/residual/activation；com_vertical 是否存在（应为不存在）；
+pitch/roll/angle_R/angle_L 的 desired/achieved/residual/activation/scaling；
+两侧 normal_force/tangent_force/wheel_gap/geometry_contact/contact_estimator；
+torque/raw_torque/ctrl/tau_jump；feasible/scaling/dynamics_residual_norm；
+轮 selection 是否清零；pitch/pitch_rate；前进/横移位移。
+
+八、通过条件
+
+1. 两侧腿长从约 0.28 m 持续减小到 compression_end=0.16 m（不越过），进入 COMPRESS_BRAKE，
+   compression_only 在写 THRUST 前停止；
+2. 压缩期 pitch 不单调发散，|pitch| 在 config.pitch_limit 内，pitch/摆角 residual 不持续增大；
+3. 双轮几何接触保持，wheel_gap 不持续张开；无 compression_contact_lost/joint_limit/ABORT；
+4. ctrl 与 wbc_raw_torque 完全一致，tau_jump=0。
+
+九、必须报告
+
+VL1 / R1 / WP8 三方对照：到达的最短腿长、停止原因、pitch 与 pitch_rate、接触保持、
+length 任务 residual、轮 selection 模式、横移/前进位移。若失败，明确是
+“未到终点 / 越过终点 / pitch 发散 / 接触丢失”哪一类，原样回传。
+
+十、反馈格式
+
+VP编号：VL1
+修改文件与函数：
+单步自检（方向、量级、残差、com_vertical 是否存在、length activation）：
+语法/导入检查：
+状态时间线（COMPRESS/BRAKE 起始、两侧 compression_end 到达、停止）：
+两侧 leg_length/leg_rate 关键值：
+length_R/length_L 的 desired/achieved/residual：
+com_vertical 是否存在：
+pitch/angle 全程 desired/achieved/residual：
+两侧 normal/tangent/wheel_gap/geometry：
+ctrl 与 raw 一致性、tau_jump：
+feasible/scaling/dynamics_residual：
+横移/前进位移：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
