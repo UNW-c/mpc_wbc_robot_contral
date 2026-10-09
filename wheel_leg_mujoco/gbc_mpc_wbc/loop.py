@@ -40,7 +40,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              frame_callback=None, frame_interval: float = 0.0, trace_sink=None,
              explicit_jump_reference: bool = False,
              compression_only: bool = False,
-             freeze_jump_reference: bool = False) -> None:
+             freeze_jump_reference: bool = False,
+             vmc_feedforward: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -241,6 +242,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 desired_com_acceleration_z=(None if jump_command is None
                                             else jump_command.desired_com_acceleration_z),
                 jump_holds=jump_holds,
+                vmc_feedforward=vmc_feedforward,
+                jump_config=(None if sim.jump is None else sim.jump.config),
                 sample_override=(jump_reference if explicit_jump_reference
                                  and jump_command is not None and jump_command.active
                                  else None))
@@ -485,6 +488,16 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "wbc_called": bool(wbc_called),
                 "wbc_raw_torque": None if outcome is None else np.asarray(outcome.raw_torque, dtype=float).copy(),
                 "tau_jump": None if outcome is None else np.asarray(outcome.tau_jump, dtype=float).copy(),
+                "tau_ff": None if outcome is None else np.asarray(outcome.tau_ff, dtype=float).copy(),
+                "vmc_feedforward": None if outcome is None else {
+                    "applied": bool(outcome.feedforward_applied),
+                    "force_per_leg": float(outcome.feedforward_force),
+                    "a_z": (None if jump_command is None
+                            else jump_command.desired_com_acceleration_z),
+                    "tau_ff": np.asarray(outcome.tau_ff, dtype=float).copy(),
+                },
+                "wheel_selection_cleared": bool(outcome is not None
+                                                and outcome.wheel_selection_cleared),
                 "wbc_task_trace": None if outcome is None else outcome.task_trace,
                 "wbc_result": None if result is None else {
                     "feasible": bool(result.feasible),

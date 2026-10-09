@@ -1115,20 +1115,27 @@ pitch/angle 保留在任务列表，但不得压过 com_vertical。
   w_com=12000   ：com = -4.892 / -4.886 / -4.886，max|tau| 约 2.7，法向 约 35.8 N/轮
   w_com=40000   ：com = -4.901 / -4.899 / -4.899，max|tau| 约 2.6，法向 约 35.7 N/轮
 
-推荐具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0（约为目标的 99%，且高于 3400 阈值有余量，待用户批准）。
+推荐具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0（已由用户 2026-10-09 批准取值）。
 离线扫描同时显示：提高该权重后 pitch achieved 为 -2.3 ~ -4.0 m/s²、angle 为 -1.3 ~ -2.5 m/s²（相对现状只是略大），
 竖直方向反号消失，执行器力矩反而下降。这说明压缩期姿态会失配，必须实测。
 
 四、修复边界
 
-允许改（仅与跳跃相位相关的权重/优先级）：
-  wheel_leg_mujoco/gbc_mpc_wbc/control.py（跳跃分支对 com_vertical 施加相位权重）
+允许改（仅与跳跃相位相关的权重/优先级，用户 2026-10-09 选定“可修改权重的函数接口”）：
+  wheel_leg_mujoco/gbc_mpc_wbc/control.py（跳跃分支传入相位权重）
+  wheel_leg_mujoco/gbc_mpc_wbc/wbc_limited.py（新增显式权重重载接口）
+  Algorithm/supervision.py（solve_wbc 透传可选 weight_overrides，默认 None 行为不变）
   必要的具名常量与 trace 字段
 
-实现方式（不改 Algorithm 共享层）：WLS 中任务权重 = TASK_WEIGHTS[name] × task.activation，
-因此在 COMPRESS / COMPRESS_BRAKE / THRUST 对 com_vertical 用 replace(task, activation=JUMP_COM_VERTICAL_ACTIVATION)，
-其中 JUMP_COM_VERTICAL_ACTIVATION = JUMP_COM_VERTICAL_WEIGHT / TASK_WEIGHTS["com_vertical"] = 5000 / 25 = 200。
-trace 必须记录该 activation 与有效权重。若实现者选择显式 weight override 而非 activation 倍率，需在反馈中说明。
+实现方式（可修改权重的函数接口，取值 5000.0）：
+  在 LimitedWeightedResolver 上新增显式接口 set_weight_overrides(overrides: dict)（或等价的 resolve 参数），
+  只覆盖传入的键，其余仍取 TASK_WEIGHTS；
+  SupervisedControl.solve_wbc 新增可选参数 weight_overrides，默认 None 时行为完全不变，非空时调用该接口；
+  control.py::wbc_stage 在 COMPRESS / COMPRESS_BRAKE / THRUST 相位传
+  weight_overrides={"com_vertical": JUMP_COM_VERTICAL_WEIGHT}，具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0。
+  trace 必须记录 com_vertical 的有效权重（5000）与本次传入的 overrides。
+  不得用 task.activation 倍率冒充权重；activation 语义（0/1 权限）保持不变。
+  非 wls 后端若无该接口，不传 overrides 时不得报错（保持默认路径）。
 
 禁止改：
   MPC 参数、腿长网格、A/B 矩阵；接触/离地阈值；机械限位；MJCF；backend/model_variant/preset；
@@ -1154,5 +1161,53 @@ jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动；compression_only=T
 
 jump.py 中 WP7 的“compression_direction_lost 不立即 ABORT”是临时诊断隔离，不是最终修复。
 方案1测试保留该隔离以便观察压缩全过程，但反馈中必须明确标注；方案1通过后再由问题排查agent决定是否恢复该中止条件。
+
+============================================================
+
+问题排查agent：可行性自检结果与 VP1 定案（2026-10-09）
+
+一、自检工具与口径
+
+- 工具：wheel_leg_mujoco/tools/vmc_feasibility_check.py（新增）；
+  结果：wheel_leg_mujoco/results/VMC_feasibility_20261009.json。
+- 每个压缩位形解一个线性规划：变量 [qacc, f, tau]；等式为接触+闭链加速度约束、完整动力学
+  M qacc + h = S^T tau + Jc^T f、各硬目标；不等式为执行器限幅与逐轮摩擦锥
+  （f_n>=0, |f_t|<=mu f_n, 横向 |f_lat|<=2 mu f_n）。
+- 口径自检：用记录的 qacc/ctrl 反解接触力，与记录的 normal_forces/tangent_forces 比对。
+  多数帧为 0，最差 t=1.000 法向差 0.142 N（约 71 N 的 0.2%），切向差最大 3.7e-3 N。口径成立。
+- 模型摩擦 mu=1.0；执行器限幅：腿关节 ±40 N*m，轮 ±6 N*m。
+
+二、结果（WP8 压缩位形，逐帧瞬时可行性）
+
+  目标组合                    轮启用 Q1         轮清零 Q0（WP8 现状）
+  com                          可行              可行
+  com + pitch                  可行              可行
+  com + pitch + 两腿摆角        可行（全部帧）     不可行（全部帧，mu 到 2.0 仍不可行）
+
+  轮启用时：所需摩擦 mu_req = 0.045 ~ 0.154；com+pitch+两腿摆角 解的最大执行器力矩 = 6.9 ~ 26.1 N*m。
+
+三、结论
+
+1. WP7 与 WP8 是同一个原因：轮被清零后，“质心竖直 + pitch + 两腿摆角”三个目标联合不可行。
+   可行域本身为空，WLS 无论怎么配权重都只能牺牲其中一项——WP7 牺牲了质心竖直，WP8 牺牲了姿态。
+   这解释了为什么提高 com 权重会把 pitch/angle 打崩。
+2. 恢复轮权限后，三目标联合可行。用户“只要还接地就把轮交给 WBC”的决定消除了这个不可行性。
+3. 因此“VMC 等效力前馈管竖直 + WBC 高权重软任务管 pitch/摆角”在可行性上成立。
+
+四、边界（必须随结论一起引用）
+
+- LP 对内部闭链约束力不设上限（刚体反力）。所以“不可行”是硬结论（一定做不到），“可行”是必要条件
+  层面的（仍需实机验证内部力与执行器是否真能实现）。
+- 这是逐帧瞬时可行性，不证明整条压缩轨迹一定能到 0.16 m。
+
+五、VP1 定案（用户 2026-10-09 确认）
+
+- 轮权限：只有完全离地时清零 selection；任一接地即用完整 dynamics.selection，由 WBC 全权控制。
+- 竖直：COMPRESS / COMPRESS_BRAKE 用等效力前馈 tau_ff = thrust_torque(0.5 * m * (g + a_z))，
+  a_z 取自 jump.desired_com_acceleration_z。前馈进入动力学等式（不做事后叠加），
+  总量 ctrl = tau_wbc + tau_ff，限幅按总量计。
+- com_vertical：COMPRESS / COMPRESS_BRAKE 相位关闭（不创建该任务），从根上消除与 pitch/angle 的权限竞争。
+- pitch / 腿摆角：继续由 WBC 以原权重软任务控制，权重不变。
+- 先测；若 VP1 仍出问题，才考虑把 pitch/angle 升级为硬约束。
 
 ============================================================

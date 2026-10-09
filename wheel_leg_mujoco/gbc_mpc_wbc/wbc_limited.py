@@ -67,9 +67,20 @@ class LimitedWeightedResolver:
                  damping: float = 1.0e-6) -> None:
         self.elimination = elimination
         self.weights = {str(name): float(value) for name, value in weights.items()}
+        # WP8（2026-10-09）：显式权重重载。只覆盖传入的键，其余仍取构造时的 ``weights``。
+        # 由上层按相位调用，默认空字典时行为与改动前完全一致。
+        self.weight_overrides: dict[str, float] = {}
         self.damping = float(damping)
         if self.damping < 0.0:
             raise ValueError("阻尼不能为负")
+
+    def set_weight_overrides(self, overrides: dict[str, float] | None) -> None:
+        """WP8：设置本级的显式权重重载；None 表示清空重载。
+
+        只覆盖 ``overrides`` 中出现的任务名，其余任务仍使用构造时传入的 ``weights``。
+        """
+        self.weight_overrides = ({} if overrides is None else
+                                 {str(name): float(value) for name, value in overrides.items()})
 
     def resolve(self, contact_jacobian: np.ndarray, contact_bias: np.ndarray | None,
                 tasks: tuple[TaskLevel, ...] | list[TaskLevel],
@@ -106,7 +117,8 @@ class LimitedWeightedResolver:
         gradient = np.zeros(dof)
         weights: dict[str, float] = {}
         for task in tasks:
-            weight = self.weights.get(task.name, 1.0) * float(task.activation)
+            base_weight = self.weight_overrides.get(task.name, self.weights.get(task.name, 1.0))
+            weight = base_weight * float(task.activation)
             weights[task.name] = weight
             if weight <= 0.0:
                 continue

@@ -1274,15 +1274,21 @@ WP7 已证明 compression_direction_lost 不是保护误触发，而是真实运
 三、允许修改
 
 只允许修改：
-  wheel_leg_mujoco/gbc_mpc_wbc/control.py：跳跃分支对 com_vertical 施加相位权重；
+  wheel_leg_mujoco/gbc_mpc_wbc/control.py：跳跃分支传入相位权重；
+  wheel_leg_mujoco/gbc_mpc_wbc/wbc_limited.py：新增显式权重重载接口；
+  Algorithm/supervision.py：solve_wbc 透传可选 weight_overrides，默认 None 行为不变；
   必要的具名常量与 trace 字段（记录有效权重）。
 
 必须实现：
-  具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0（待用户批准后生效）；
-  WLS 权重 = TASK_WEIGHTS[name] × task.activation，故在跳跃压缩/制动/释放相位对 com_vertical 用
-  replace(task, activation=JUMP_COM_VERTICAL_ACTIVATION)，其中 JUMP_COM_VERTICAL_ACTIVATION = 5000.0 / 25.0 = 200.0；
+  具名常量 JUMP_COM_VERTICAL_WEIGHT = 5000.0（用户 2026-10-09 已批准）；
+  在 LimitedWeightedResolver 上新增显式接口 set_weight_overrides(overrides: dict)（或等价的 resolve 参数），
+  只覆盖传入的键，其余仍取 TASK_WEIGHTS；
+  SupervisedControl.solve_wbc 新增可选参数 weight_overrides，默认 None 时行为完全不变，非空时调用该接口；
+  control.py::wbc_stage 在 COMPRESS / COMPRESS_BRAKE / THRUST 相位传
+  weight_overrides={"com_vertical": JUMP_COM_VERTICAL_WEIGHT}；
   其他任务权重、任务列表、顺序、Jacobian、bias、desired 不变；
-  trace 记录 com_vertical 的 activation 与有效权重。
+  trace 记录 com_vertical 的有效权重（5000）与传入的 overrides；
+  不得用 task.activation 倍率冒充权重，activation 语义保持不变；非 wls 后端不传 overrides 时不得报错。
 
 禁止修改：
   MPC 参数与腿长网格；接触/离地阈值；机械限位；MJCF；backend/model_variant/preset；
@@ -1341,6 +1347,120 @@ pitch/angle 全程 desired/achieved/residual：
 ctrl 与 wbc_raw 一致性、tau_jump：
 feasible/scaling/dynamics_residual：
 风险项（pitch 漂移、最大力矩、限位）：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+VP1：压缩/制动相位的等效力前馈（VMC）部署（问题排查agent，2026-10-09）
+
+一、背景（问题排查agent已确认，不需重测）
+
+WP7/WP8 失败同因：轮在跳跃期被从 selection 清零（control.py 当前第 153-156 行），
+导致“质心竖直 + pitch + 两腿摆角”三目标联合不可行。离线 LP 自检（tools/vmc_feasibility_check.py）：
+
+  目标组合                    轮启用        轮清零（WP8）
+  com                          可行          可行
+  com + pitch                  可行          可行
+  com + pitch + 两腿摆角        可行（全部帧）  不可行（全部帧，mu 到 2.0 也不行）
+
+轮启用时 mu_req=0.045~0.154，max|tau|=6.9~26.1 N*m。详见 docs/agent交互文档_WBC跳跃重规划.txt。
+
+二、本轮目标
+
+在 COMPRESS / COMPRESS_BRAKE 用等效力前馈替代 com_vertical 任务，并把接地轮权限交回 WBC，
+验证能否在压住 pitch 与腿摆角的同时把腿长压到 compression_end=0.16 m。
+
+三、允许修改
+
+只允许改 control.py，以及 jump_diagnostic.py / loop.py 的开关透传：
+
+1. 轮 selection（control.py::wbc_stage）：
+   仅当“无任何轮几何接触”时清零；任一接地就用完整 dynamics.selection。
+   即：jump.active 且 not any(feedback.decision.contact) 才 selection[wheel_actuators]=0。
+
+2. 等效力前馈（control.py::wbc_stage，仅在 vmc_feedforward 打开且相位为 COMPRESS/COMPRESS_BRAKE）：
+   m = jump.config.total_mass；a_z = jump.desired_com_acceleration_z；
+   F_leg = 0.5 * m * (GRAVITY + a_z)（GRAVITY 复用 jump.GRAVITY）；
+   tau_ff, _ = dynamics.thrust_torque(np.full(2, F_leg))；
+   dynamics_bias_eff = dynamics.dynamics_bias() - selection.T @ tau_ff；
+   limits_eff = ActuatorLimits(limits.lower - tau_ff, limits.upper - tau_ff)；
+   torque, result = control.solve_wbc(..., dynamics_bias=dynamics_bias_eff, limits=limits_eff, ...)；
+   torque = torque + tau_ff；随后再写 raw_torque（保证 ctrl == wbc_raw_torque）。
+   记录 tau_ff 逐执行器、F_leg、a_z。
+
+3. com_vertical：vmc_feedforward 打开且相位为 COMPRESS/COMPRESS_BRAKE 时，
+   向 tasks.tasks 传 desired_com_acceleration_z=None（不创建 com_vertical 任务）。
+
+4. 开关：control.py 的 wbc_stage 与 loop.py::run_loop 新增布尔参数 vmc_feedforward（默认 False）；
+   jump_diagnostic.py 新增 --vmc-feedforward 透传。
+   vmc_feedforward=False 时保持 WP8 现有行为（含 com 权重 5000 覆盖、轮权限恢复），用于单变量对照。
+
+禁止修改：MPC 参数与腿长网格、接触/离地阈值、机械限位、MJCF、backend/model_variant/preset、
+TASK_WEIGHTS、com_vertical 目标数值、tau_jump、jump.py 状态机与相位逻辑、thrust_torque 的公式。
+禁止把 tau_ff 在 solve_wbc 之后直接叠加而不折进 dynamics_bias/limits（会产生限幅不自洽）。
+
+四、固定输入
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动；compression_only=True。
+
+命令：
+R1（对照：恢复轮权限，无前馈，保留 WP8 的 com 权重 5000）：
+  tools/jump_diagnostic.py --stage VP1_R1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --compression-only
+R2（VMC：恢复轮权限 + 等效力前馈 + 关闭 com_vertical）：
+  tools/jump_diagnostic.py --stage VP1_R2 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --compression-only --vmc-feedforward
+参考基线：WP8（轮清零 + com 5000）results/WP8_baseline_run01.json.gz。
+
+五、执行顺序
+
+1. 语法/导入检查，记录退出码。
+2. 落地静止单步自检：给 a_z=-0.5g，检查 tau_ff 的符号与量级（应与“减小支撑、让机体下坠”一致）、
+   |tau_ff| 是否在限幅内、dynamics_bias_eff 下的动力学残差是否约 0。这一条不过，停止，不跑正式。
+3. 依次跑 R1、R2，各一次。
+4. 原样记录，不改中止条件、不改阈值。
+
+六、每帧必须记录
+
+phase / previous_phase / transition_reason；
+两侧 leg_length_R/L、leg_length_rate_R/L；
+com_vertical 任务是否存在（R2 压缩期应为不存在）；
+pitch、roll、angle_R、angle_L 的 desired/achieved/residual/activation/scaling；
+tau_ff 逐执行器、F_leg、a_z；torque、raw_torque、ctrl、tau_jump；
+feasible、scaling、dynamics_residual_norm、clip_applied、fallback_used；
+两侧 normal_force、tangent_force、wheel_gap、geometry_contact、contact_estimator；
+轮 selection 在本拍是否清零（记录模式）；pitch、pitch_rate；前进与横移位移。
+
+七、通过条件
+
+1. 两侧腿长从约 0.28 m 持续减小，到达 compression_end=0.16 m，进入 COMPRESS_BRAKE，
+   compression_only 在写 THRUST 前停止；
+2. 压缩期 pitch 不单调发散，|pitch| 在 config.pitch_limit 内，pitch residual 不持续增大；
+3. 双轮几何接触保持，wheel_gap 不持续张开；无 compression_direction_lost、contact_lost、
+   joint_limit、nonfinite_state、ABORT；
+4. ctrl 与 wbc_raw_torque 完全一致，tau_jump=0；tau_ff 与总量都在执行器限幅内。
+
+八、必须报告
+
+R1 / R2 / WP8 三方对照：到达的最短腿长、停止原因、pitch 与 pitch_rate 曲线、接触保持情况、
+tau_ff 量级与是否顶限、横移与前进位移。若 R2 仍失败，明确是“未到终点 / pitch 发散 /
+接触丢失”中的哪一类，原样回传，不得自行调权重、调阈值或加保护。
+
+九、反馈格式
+
+VP编号：VP1_R1 / VP1_R2
+修改文件与函数：
+单步自检（符号、量级、残差）：
+语法/导入检查：
+状态时间线：
+两侧 leg_length/leg_rate 关键值：
+tau_ff 逐执行器与限幅余量：
+com_vertical 是否存在：
+pitch/angle 全程 desired/achieved/residual：
+两侧 normal/tangent/wheel_gap/geometry：
+ctrl 与 raw 一致性、tau_jump：
+feasible/scaling/dynamics_residual：
+横移/前进位移：
 结论（只写数据支持的现象）：
 是否允许进入下一轮：
 

@@ -254,7 +254,8 @@ class SupervisedControl:
                   balance_tasks: tuple[TaskLevel, ...], motion_tasks: tuple[TaskLevel, ...],
                   limits: ActuatorLimits, decision: ControlDecision, dt: float,
                   estimate: DisturbanceEstimate | None = None,
-                  external_force: np.ndarray | None = None):
+                  external_force: np.ndarray | None = None,
+                  weight_overrides: dict | None = None):
         if not decision.balance_enabled:
             if self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
                 self.compensation.reset()
@@ -286,6 +287,12 @@ class SupervisedControl:
                                                context=decision.context, enabled=decision.motion_enabled)
         elimination = ContactElimination.from_matrices(jacobian, selection, mass)
         resolver = self._wbc_resolver_factory(mass, elimination)
+        # WP8（2026-10-09）：按相位传入的显式权重重载；None 时行为完全不变。
+        # 不要求所有后端都实现该接口：不支持的求解器直接跳过，不报错。
+        if weight_overrides:
+            setter = getattr(resolver, "set_weight_overrides", None)
+            if setter is not None:
+                setter(weight_overrides)
         result = resolver.resolve(
             jacobian, bias, tasks, limits, dynamics_bias=dynamics_bias, external_force=external)
         return result.torque.copy(), result

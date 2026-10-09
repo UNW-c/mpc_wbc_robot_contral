@@ -27,8 +27,14 @@ import numpy as np
 
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
+from .jump import GRAVITY  # noqa: E402
+from Algorithm.wbc import ActuatorLimits  # noqa: E402
 
 _LOGGER = get_logger(__name__)
+
+# WP8（2026-10-09）：压缩/制动/释放相位让质心竖直任务在 WLS 中占主导的具名权重。
+# 来源：用户 2026-10-09 批准（WP8 部署文档第三节）。只在跳跃相位覆盖，GROUND 不生效。
+JUMP_COM_VERTICAL_WEIGHT = 5000.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,12 @@ class WbcOutcome:
     raw_torque: np.ndarray
     tau_jump: np.ndarray
     task_trace: tuple[dict, ...]
+    # VP1（2026-10-09）：压缩/制动相位的等效力前馈（VMC）诊断字段。
+    # feedforward_applied=False 时 tau_ff 全零、feedforward_force=0，表示本拍未启用前馈。
+    tau_ff: np.ndarray | None = None
+    feedforward_force: float = 0.0
+    feedforward_applied: bool = False
+    wheel_selection_cleared: bool = False
 
 
 def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
@@ -76,7 +88,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               infeasible_active: bool, normal_warned: bool = False,
               limit_warned: bool = False, jump=None, sample_override=None,
               desired_com_acceleration_z: float | None = None,
-              jump_holds: dict | None = None) -> WbcOutcome:
+              jump_holds: dict | None = None, vmc_feedforward: bool = False,
+              jump_config=None) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -95,8 +108,13 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     # E2/WP2：显式质心竖直目标直接进入 WBC 任务，None 时普通路径不变。
     # 新部署（2026-10-09）：jump_holds 为非空时，pitch/roll/angle_R/angle_L 改用冻结参考。
     holds = {} if jump_holds is None else jump_holds
+    # VP1（2026-10-09）：VMC 前馈仅在 COMPRESS/COMPRESS_BRAKE 且开关打开时生效；
+    # 这两个相位不创建 com_vertical 任务，由等效力前馈接管竖向目标。
+    vmc_phase = bool(vmc_feedforward and jump is not None and jump.active
+                     and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE"))
+    com_target = None if vmc_phase else desired_com_acceleration_z
     balance, motion = tasks.tasks(feedback.state, feedback.rows, sample,
-                                  desired_com_acceleration_z=desired_com_acceleration_z,
+                                  desired_com_acceleration_z=com_target,
                                   pitch_reference=holds.get("pitch"),
                                   roll_reference=holds.get("roll"),
                                   angle_R_reference=holds.get("angle_R"),
@@ -146,14 +164,41 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
             entry["jacobian"] = np.asarray(task.jacobian, dtype=float).copy()
         task_trace.append(entry)
     start = time.perf_counter()
+    # VP1（2026-10-09）：轮 selection 只在“无任何轮几何接触”时清零；任一接地就用完整 selection。
     selection = dynamics.selection
-    if jump is not None and jump.active:
+    wheel_selection_cleared = False
+    if jump is not None and jump.active and not any(feedback.decision.contact):
         selection = np.array(dynamics.selection, dtype=float, copy=True)
         selection[list(dynamics.wheel_actuators), :] = 0.0
+        wheel_selection_cleared = True
+    # WP8（2026-10-09）：COMPRESS/COMPRESS_BRAKE/THRUST 期间给 com_vertical 传显式权重重载，
+    # 其余任务权重不变；GROUND（jump 不活动）不传，行为与改动前一致。
+    jump_weight_overrides = None
+    if (jump is not None and jump.active
+            and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE", "THRUST")):
+        jump_weight_overrides = {"com_vertical": JUMP_COM_VERTICAL_WEIGHT}
+    # VP1（2026-10-09）：等效力前馈。把 tau_ff 折进 dynamics_bias 与执行器限幅，
+    # 而不是在 solve_wbc 之后直接叠加（否则限幅不自洽）。
+    tau_ff = np.zeros(dynamics.model.nu)
+    feedforward_force = 0.0
+    dynamics_bias_solve = dynamics.dynamics_bias()
+    limits_solve = dynamics.limits
+    if vmc_phase:
+        mass_total = (float(np.sum(dynamics.model.body_mass)) if jump_config is None
+                      else float(jump_config.total_mass))
+        a_z = float(jump.desired_com_acceleration_z)
+        feedforward_force = 0.5 * mass_total * (GRAVITY + a_z)
+        tau_ff, _peak = dynamics.thrust_torque(np.full(2, feedforward_force))
+        tau_ff = np.asarray(tau_ff, dtype=float)
+        dynamics_bias_solve = dynamics_bias_solve - np.asarray(selection, dtype=float).T @ tau_ff
+        limits_solve = ActuatorLimits(dynamics.limits.lower - tau_ff, dynamics.limits.upper - tau_ff)
     torque, result = control.solve_wbc(
-        mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics.dynamics_bias(),
-        contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=dynamics.limits,
-        decision=feedback.decision, dt=timing.wbc_dt, external_force=external)
+        mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics_bias_solve,
+        contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=limits_solve,
+        decision=feedback.decision, dt=timing.wbc_dt, external_force=external,
+        weight_overrides=jump_weight_overrides)
+    if vmc_phase:
+        torque = np.asarray(torque, dtype=float) + tau_ff
     raw_torque = np.asarray(torque, dtype=float).copy()
     timings["wbc"].append(time.perf_counter() - start)
     # 新部署（2026-10-09）：逐任务写出 name/desired/bias/activation/achieved/residual/
@@ -168,6 +213,10 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
             entry["residual"] = np.asarray(item.residual, dtype=float).copy()
             entry["scaling"] = float(result.scaling.get(entry["name"], float("nan")))
             entry["exhausted"] = bool(item.exhausted)
+            # WP8：记录 com_vertical 的有效权重与传入的 overrides，便于核对 5000.0 是否生效。
+            if jump_weight_overrides and entry["name"] == "com_vertical":
+                entry["effective_weight"] = float(jump_weight_overrides["com_vertical"])
+                entry["weight_overrides"] = dict(jump_weight_overrides)
     task_trace = tuple(task_trace)
     # WP3：tau_jump 只保留为诊断字段（恒为0），不再参与求和；data.ctrl 就是 WBC 总力矩。
     tau_jump_trace = np.zeros_like(raw_torque)
@@ -234,4 +283,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
                       infeasible_active=infeasible_active,
                       normal_warned=normal_active, limit_warned=limit_active,
                       raw_torque=raw_torque, tau_jump=tau_jump_trace,
-                      task_trace=task_trace)
+                      task_trace=task_trace,
+                      tau_ff=tau_ff, feedforward_force=float(feedforward_force),
+                      feedforward_applied=bool(vmc_phase),
+                      wheel_selection_cleared=bool(wheel_selection_cleared))
