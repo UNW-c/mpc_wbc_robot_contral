@@ -162,7 +162,7 @@ def _disturbance(case):
 def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              explicit_jump_reference=False, compression_only=False, freeze_jump_reference=False,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
-             thrust_only=False):
+             thrust_only=False, flight_zero_torque=False, flight_leg_retract=False):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
@@ -175,7 +175,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             explicit_jump_reference=explicit_jump_reference, compression_only=compression_only,
             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
             leg_length_compression=leg_length_compression, leg_length_thrust=leg_length_thrust,
-            thrust_only=thrust_only)
+            thrust_only=thrust_only, flight_zero_torque=flight_zero_torque,
+            flight_leg_retract=flight_leg_retract)
     release_end = float(sim.jump.config.release_end) if sim.jump is not None else float(config.nominal_length)
     document = {
         "metadata": {
@@ -202,6 +203,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             "leg_length_compression": bool(leg_length_compression),
             "leg_length_thrust": bool(leg_length_thrust),
             "thrust_only": bool(thrust_only),
+            "flight_zero_torque": bool(flight_zero_torque),
+            "flight_leg_retract": bool(flight_leg_retract),
             "viewer_xfrc_applied_executed": False,
             "viewer_xfrc_applied_note": "GUI viewer path is not executed by this headless tool; xfrc_applied remains separately recorded.",
             "units": {
@@ -249,6 +252,10 @@ def main():
                         help="TR1：THRUST 用腿长行加速度驱动，不创建 com_vertical")
     parser.add_argument("--thrust-only", action="store_true",
                         help="TR1：相位将进入 FLIGHT 时停止，不执行 FLIGHT/LANDING 控制")
+    parser.add_argument("--flight-zero-torque", action="store_true",
+                        help="FL1：FLIGHT 或真离地时输出显式零力矩，不保持地面力矩")
+    parser.add_argument("--flight-leg-retract", action="store_true",
+                        help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
     args = parser.parse_args()
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
@@ -258,7 +265,9 @@ def main():
              vmc_feedforward=args.vmc_feedforward,
              leg_length_compression=args.leg_length_compression,
              leg_length_thrust=args.leg_length_thrust,
-             thrust_only=args.thrust_only)
+             thrust_only=args.thrust_only,
+             flight_zero_torque=args.flight_zero_torque,
+             flight_leg_retract=args.flight_leg_retract)
 
 
 if __name__ == "__main__":

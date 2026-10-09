@@ -2142,3 +2142,177 @@ if jump_phase_now == "FLIGHT" and sim.stop_reason is None:
 是否允许进入下一轮：否，等待问题排查agent确认。
 
 署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL1 滞空段真断开 + 落地缓冲（2026-10-09）
+
+VP编号：FL1
+
+一、修改文件与函数
+
+1. wheel_leg_mujoco/gbc_mpc_wbc/loop.py::run_loop
+   - 新增参数 `flight_zero_torque`（默认 False）；
+   - 新增 `geometrically_airborne = (min wheel_gap > LIFTOFF_GAP)`；
+   - `flight_zero = flight_zero_torque and jump_command is not None and (phase==FLIGHT or geometrically_airborne)`；为真时 `torque=0` 且 `output_source="flight_zero_torque"`，默认 False 时行为与当前完全一致；
+   - 新增参数 `flight_zero_torque` 的 trace 字段与 `geometrically_airborne` 字段；
+   - FLIGHT 相位转移增加日志/字段区分触发判据：`flight_by_geometry`、`flight_max_wheel_gap`。
+   - 说明：部署原文写“相位为 FLIGHT 时置零”，但 TR2-a 已证实真实滞空期相位是 IDLE（陈旧接触使相位提前回 IDLE），仅按相位无法覆盖真离地。为满足通过条件 1“真离地后 output_source 为显式零力矩”，同时把 `min wheel_gap > LIFTOFF_GAP` 纳入置零条件（是原文的严格超集，且默认关闭）。此处如实标注为对原文的解释。
+2. wheel_leg_mujoco/gbc_mpc_wbc/simulation.py、tools/jump_diagnostic.py、tools/video.py：新增 `--flight-zero-torque` 透传。
+
+未修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP）、机械限位、MJCF、backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains、压缩/释放（leg_length_compression/leg_length_thrust）路径。
+
+二、静态自检（FLIGHT 输出是否置零）
+
+- 短跑（duration=1.465）：FLIGHT 帧 t=1.4610，output_source=flight_zero_torque，ctrl=[0,0,0,0,0,0]，max|ctrl|=0；该帧 airborne_active=False，geometrically_airborne=False（由 phase==FLIGHT 触发）。
+- FLIGHT 转移判据字段：flight_by_geometry=False、flight_max_wheel_gap=-0.000273 m（release_end_fallback）。
+
+三、语法/导入检查
+
+- PYTHONPYCACHEPREFIX 临时目录；py_compile `loop.py simulation.py jump_diagnostic.py video.py`，退出码 0。
+
+四、FL1 运行
+
+命令：`tools/jump_diagnostic.py --stage FL1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque`；退出码 0。
+
+状态时间线：
+- COMPRESS t=1.0000（157）；COMPRESS_BRAKE t=1.1570（159）；THRUST t=1.3160（145）；FLIGHT t=1.4610（1）；LANDING t=1.4620（1）；RECOVER t=1.4630（1）；其余 IDLE。
+- 几何离地（gap>1mm）出现两个窗口：窗口1 t=1.4740~1.5130；窗口2 t=1.6260~1.7010（即离地-落地-再离地）。
+- output_source 切换点：t=1.4740 进入 flight_zero_torque（窗口1），t=1.5140 回到 zero_order_hold；t=1.6260 再次 flight_zero_torque（窗口2），t=1.7020 回到 zero_order_hold。
+- 落地（窗口2 后首帧）t=1.7030。
+
+五、滞空段 pitch/pitch_rate 与 max|pitch|
+
+- 全跑 max|pitch|=0.02711 rad；窗口 max|pitch|=0.01607 rad；滞空段 max|pitch_rate|=0.12795 rad/s。
+- 对照 TR2-a：全跑 max|pitch|=0.2526 rad、pitch_rate=3.97 rad/s → FL1 显著减小。
+
+六、落地 pitch、落地腿长、base z 曲线
+
+- 落地首帧 t=1.7030：gap=[0.000389,0.000376] m（尚<1mm），base z=0.37358 m，vz=-0.4281 m/s，leg=[0.43066,0.43065] m（已到机械上限 0.430），normal=[0,0]，pitch=-0.00668 rad。
+- 落地后 150 帧：leg 最小=0.32412 m（压缩缓冲生效），base z 最小=0.26687 m，vz 最小=-0.8019 m/s，腿侧 max|ctrl|=9.888 N·m。
+- 两个窗口：窗口1 max gap=0.002862 m，base z 峰值=0.29214 m，vz 峰值=1.4615；窗口2 max gap=0.007359 m，base z 峰值=0.38313 m，vz 峰值=0.3808。
+
+七、output_source 统计
+
+- flight_zero_torque=117、airborne_zero=14、wbc_update=468、zero_order_hold=1401。
+
+八、两侧 leg_length/wheel_gap/normal
+
+- 全跑 max leg=0.43536 m（t=1.6350，phase=IDLE，output=flight_zero_torque），大于 leg_length_max=0.43000 m，超出 5.36 mm。这命中部署第四节回退判据“腿长超 leg_length_max”。
+- 全程无 joint_limit/nonfinite_state/ABORT/attitude_guard/speed_guard 事件；几何 gap 在离地窗口内两侧一致。
+
+九、ctrl 与 raw、tau_jump
+
+- 非 flight_zero 帧（raw 非空，n=468）：max|ctrl-raw|=0.000e+00。
+- flight_zero 帧（raw 非空，n=29）：max|ctrl-raw|=6.669e+00 N·m（按设计：ctrl 置零但 WBC raw 非零）。
+- max|tau_jump|=0.000e+00；feasible 全 True；dyn_res max=1.398e-12；无 clip/fallback。
+
+十、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：真离地窗口内 output_source 为 flight_zero_torque（共 117 帧），不再 zero_order_hold。
+2. 通过条件 2 满足：max|pitch| 由 TR2-a 的 0.2526 降到 0.02711（滞空段 0.01607），不发散。
+3. 通过条件 3 基本满足：落地后腿从 0.4307 压缩到 0.3241 m，base z 最小 0.26687 m，腿侧峰值力矩 9.888 N·m（限 40），未出现明显硬砸指标异常。
+4. 通过条件 4 部分不满足：`ctrl==raw` 在 29 个 flight_zero 帧上不成立（差 6.669 N·m），这是置零特性的必然结果；此外 max leg=0.43536 m 超过 leg_length_max=0.43000 m，命中回退判据（未触发 ABORT/护栏）。
+5. 数据事实：出现两次几何离地窗口（1.4740~1.5130 与 1.6260~1.7010），中间落地。只记录，不判断根因。
+
+十一、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL1_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL1_baseline_run01.log
+- 自检：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL1_selfcheck_baseline_run01.json.gz
+- 对照：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run02.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL2 滞空段主动收腿抬轮（2026-10-09）
+
+VP编号：FL2
+
+一、修改文件与函数（含 kp/kd、收腿下限、速率）
+
+1. wheel_leg_mujoco/gbc_mpc_wbc/control.py
+   - 新增具名常量 `FLIGHT_RETRACT_KP=3000.0` N/m、`FLIGHT_RETRACT_KD=150.0` N*s/m、`FLIGHT_RETRACT_MARGIN=0.005` m（用户 2026-10-09 批准）；
+   - 新增 `flight_leg_retract_torque(dynamics, leg_position, leg_velocity, leg_length_min, leg_length_max)`：`L_ref = clamp(leg_length_min+margin, min, max)`（本工况=0.119 m），`F_L = kp*(L_ref-L) - kd*Ldot`，`tau = J^T @ [F_L, 0]`（逐腿），输出力矩 clamp 到执行器限幅。
+   - 说明：为保持与 `thrust_torque` 同一力雅可比口径，内部访问了 `dynamics._leg_kinematics`（私有），未修改 dynamics.py。
+2. wheel_leg_mujoco/gbc_mpc_wbc/loop.py：新增 `flight_leg_retract`；几何离地（`min wheel_gap > LIFTOFF_GAP`）时用 `flight_leg_retract_torque` 代替零力矩，`output_source="flight_leg_retract"`；其它路径与开关关闭时行为不变；trace 新增该字段。保留 FL1 的 `--flight-zero-torque`。
+3. wheel_leg_mujoco/gbc_mpc_wbc/simulation.py、tools/jump_diagnostic.py、tools/video.py：新增 `--flight-leg-retract` 透传。
+
+未修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP）、机械限位、MJCF、backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains、压缩/释放路径。
+
+二、静态自检（收腿方向、限幅、clamp）
+
+- 取 FL1 离地帧 t=1.4740（leg=[0.30083,0.30084]，rate=[+1.280,+1.280]）：
+  - l_ref=0.11900（=leg_length_min 0.114+0.005，clamp 生效）；
+  - tau=[40.0, -40.0, -40.0, 40.0, 0, 0] N·m（腿侧顶限，在限幅内）；
+  - 由 tau 在自由空间反算的腿长加速度：R=-171.04、L=-170.80 m/s^2（均为负=收腿方向）。
+- 自检结论：方向正确，力矩在限幅内（但已顶限）。
+
+三、语法/导入检查
+
+- PYTHONPYCACHEPREFIX 临时目录；py_compile `control.py loop.py simulation.py jump_diagnostic.py video.py`，退出码 0。
+
+四、FL2 运行
+
+命令：`tools/jump_diagnostic.py --stage FL2 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract`；退出码 0。
+
+状态时间线：
+- COMPRESS t=1.0000（157）；COMPRESS_BRAKE t=1.1570（159）；THRUST t=1.3160（145）；
+- 几何离地窗口：单次连续 t=1.4740~1.7980（325 帧）；收腿（output=flight_leg_retract）t=1.4740~1.7980；
+- 落地（gap 回 0）t≈1.7990~1.8000；之后 IDLE 至 2.0 s；stop_reason=null。
+- output_source 统计：flight_leg_retract=325、flight_zero_torque=1、airborne_zero=11、wbc_update=416、zero_order_hold=1247。
+
+五、轮最大离地间隙与时刻
+
+- 最大 wheel_gap=0.196285 m = **196.3 mm**，t=1.6180 s；双轮 [0.196285, 0.195984] m。
+- 达 100 mm 目标（接近后续 200 mm 目标）。
+
+六、收腿：离地腿长→最收腿长
+
+- 离地 t=1.4740：leg=[0.30083,0.30084] m；
+- 收腿窗口内最小腿长 0.11971 m（≈l_ref 0.119）；收腿速率 R 达 -2.927 m/s；
+- 全跑最小腿长=0.10943 m（t=1.8390，post-flight，output=zero_order_hold）：**低于 leg_length_min=0.1140 m（越出 4.57 mm）**。
+
+七、base/COM 高度曲线与 vz 峰值
+
+- base z 峰值=0.26599 m（t≈1.570）；COM z 峰值=0.34117 m（t≈1.570）；vz 峰值=1.7011 m/s。
+
+八、滞空段 pitch/pitch_rate 与 max|pitch|
+
+- 滞空段 max|pitch|=0.23603 rad（FL1 为 0.027）；max|pitch_rate|=4.510 rad/s。
+- 轨迹：t=1.474 近 0 → t=1.570 -0.0204 → t=1.698 -0.0955 → t=1.798 -0.1947（单调增大，末期 pitch_rate 约 -1.7 rad/s）。
+
+九、峰值腿力矩与限幅余量
+
+- 峰值腿力矩=40.0 N·m（=限幅，腿 ctrl 顶限帧 14）；max|ctrl|=[40,40,40,40,6,6] N·m。
+
+十、两侧 wheel_gap/normal/geometry
+
+- 离地段双轮 gap 一致（最大 [0.196285,0.195984] m）；离地段 geometry 全 False、normal 全 0。
+
+十一、ctrl 与 raw、tau_jump
+
+- retract 帧（raw 非空 n=11）：max|ctrl-raw|=6.256e+01 N·m（按设计：收腿力矩覆盖 WBC raw）；其它帧 max=0。
+- max|tau_jump|=0；feasible 全 True；dyn_res max=1.398e-12；无 clip/fallback。
+- 无 joint_limit/nonfinite_state/ABORT/attitude_guard/speed_guard 事件。
+
+十二、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：单次连续几何离地窗口 t=1.4740~1.7980（不再“离地-落地-再离地”）。
+2. 通过条件 2 满足：轮最大离地间隙 196.3 mm ≥ 100 mm。
+3. 通过条件 3：滞空段 |pitch| 0.23603 rad，是 FL1（0.027）的约 8.7 倍，单调增大但未见无界发散；是否判“发散”请问题排查agent按口径定。
+4. 通过条件 4 不满足：全跑最小腿长 0.10943 m < leg_length_min 0.1140 m（越出 4.57 mm），命中部署第四节回退判据（腿长越出 [min,max]）。出现位置为收腿结束后的 post-flight（t=1.8390），非收腿窗口内。
+5. 本轮只记录数据，不判断根因，不做修复与调参。
+
+十三、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL2_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL2_baseline_run01.log
+- 对照：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL1_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds

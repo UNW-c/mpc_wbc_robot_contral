@@ -36,6 +36,40 @@ _LOGGER = get_logger(__name__)
 # 来源：用户 2026-10-09 批准（WP8 部署文档第三节）。只在跳跃相位覆盖，GROUND 不生效。
 JUMP_COM_VERTICAL_WEIGHT = 5000.0
 
+# FL2（2026-10-09）：飞行段主动收腿的 PD 参数与收腿下限余量。
+# 来源：用户 2026-10-09 批准（FL2 部署文档第三节）：kp=3000 N/m、kd=150 N*s/m、
+# 收腿下限 = leg_length_min + 0.005 m。
+FLIGHT_RETRACT_KP = 3000.0        # [N/m]
+FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
+FLIGHT_RETRACT_MARGIN = 0.005     # [m]
+
+
+def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
+                              leg_length_min, leg_length_max) -> np.ndarray:
+    """FL2 飞行段主动收腿力矩：``tau = J^T @ [F_L, 0]``，``F_L = kp*(L_ref-L) - kd*Ldot``。
+
+    ``L_ref = leg_length_min + FLIGHT_RETRACT_MARGIN``，并 clamp 到
+    ``[leg_length_min, leg_length_max]``；输出力矩 clamp 到执行器限幅。
+    腿长顺序与 ``leg_state()`` 一致：[L_R, phi_R, L_L, phi_L]。
+    """
+    from . import robot as R  # 延迟导入，避免模块级循环依赖
+    l_ref = min(max(float(leg_length_min) + FLIGHT_RETRACT_MARGIN,
+                    float(leg_length_min)), float(leg_length_max))
+    dynamics.leg_state()  # 惰性建立解析运动学
+    torque = np.zeros(dynamics.model.nu)
+    for side, leg in enumerate(R.LEGS):
+        index = 2 * side
+        length = float(leg_position[index])
+        rate = float(leg_velocity[index])
+        force = FLIGHT_RETRACT_KP * (l_ref - length) - FLIGHT_RETRACT_KD * rate
+        kin = dynamics._leg_kinematics[leg.name]
+        angles = {name: float(dynamics.data.qpos[dynamics.model.joint(name).qposadr[0]])
+                  for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+        tau = kin.jacobian(angles).T @ np.array([force, 0.0])
+        for offset, actuator in enumerate(dynamics.leg_actuators[2 * side:2 * side + 2]):
+            torque[actuator] = tau[offset]
+    return np.clip(torque, dynamics.limits.lower, dynamics.limits.upper)
+
 
 @dataclass(frozen=True)
 class WbcOutcome:

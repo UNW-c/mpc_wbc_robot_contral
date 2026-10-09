@@ -44,7 +44,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              vmc_feedforward: bool = False,
              leg_length_compression: bool = False,
              leg_length_thrust: bool = False,
-             thrust_only: bool = False) -> None:
+             thrust_only: bool = False,
+             flight_zero_torque: bool = False,
+             flight_leg_retract: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -53,8 +55,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     """
     m, d = sim.model, sim.data
     from .sampling import FeedbackSampler
-    from .control import mpc_stage, wbc_stage
-    from .jump import JumpObservation
+    from .control import mpc_stage, wbc_stage, flight_leg_retract_torque
+    from .jump import JumpObservation, LIFTOFF_GAP
     from Algorithm.contact_state import JumpPhaseHint
     from Algorithm.mpc.trajectory import MotionSample
     from . import robot as R
@@ -136,16 +138,18 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             solution = None
         # ---------------- 跳跃级：每物理步推进一次（纯计算，只用测量量）----------------
         previous_jump_phase = None if jump_command is None else jump_command.phase.value
+        jump_wheel_gap = None
         if sim.jump is not None:
             leg = sim.dyn.leg_state()
             leg_rows = feedback.rows.leg[0]
+            jump_wheel_gap = float(np.min(R.wheel_contact_points(m, d)[:, 2]))
             jump_command = sim.jump.update(JumpObservation(
                 time=float(d.time),
                 leg_length=0.5 * (float(leg[0]) + float(leg[2])),
                 leg_length_rate=0.5 * (float(leg_rows[0] @ d.qvel) + float(leg_rows[2] @ d.qvel)),
                 leg_length_R=float(leg[0]), leg_length_rate_R=float(leg_rows[0] @ d.qvel),
                 leg_length_L=float(leg[2]), leg_length_rate_L=float(leg_rows[2] @ d.qvel),
-                wheel_gap=float(np.min(R.wheel_contact_points(m, d)[:, 2])),
+                wheel_gap=jump_wheel_gap,
                 geometry_contact=tuple(bool(v) for v in sim.dyn.contact_geometry()[0]),
                 contact=feedback.decision.contact, pitch=float(feedback.state.pitch),
                 pitch_rate=float(feedback.state.pitch_rate),
@@ -279,7 +283,24 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 sim.counters[key] = sim.counters.get(key, 0) + 1
 
         # -------------------------------------------- 输出级（每物理步）+ 物理推进
-        if airborne_active:
+        # FL1（2026-10-09）：flight_zero_torque 打开时，相位为 FLIGHT 或“真几何离地”
+        # （min wheel_gap > LIFTOFF_GAP）则输出显式零力矩，不再 zero_order_hold 保持地面力矩。
+        # 默认 False 时行为与当前完全一致。
+        geometrically_airborne = bool(jump_wheel_gap is not None and jump_wheel_gap > LIFTOFF_GAP)
+        flight_zero = bool(flight_zero_torque and jump_command is not None
+                           and (jump_command.phase.value == "FLIGHT" or geometrically_airborne))
+        # FL2（2026-10-09）：几何离地时用主动收腿力矩代替零力矩（腿收短、把轮抬高）。
+        flight_retract = bool(flight_leg_retract and geometrically_airborne
+                              and sim.jump is not None)
+        if flight_retract:
+            leg_now = sim.dyn.leg_state()
+            leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+            torque = flight_leg_retract_torque(sim.dyn, leg_now, leg_rate_now,
+                                               sim.jump.config.leg_length_min,
+                                               sim.jump.config.leg_length_max)
+        elif flight_zero:
+            torque = np.zeros_like(torque)
+        elif airborne_active:
             # 飞行段（用户 D4）：跳跃规划器接管时**保持上一拍力矩**（零阶保持，力矩连续）；
             # 非跳跃的意外离地仍按原逻辑置零。
             if jump_command is not None and jump_command.hold_torque:
@@ -287,7 +308,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             else:
                 torque = np.zeros_like(torque)
         write_actuator_output(d, torque)
-        if airborne_active:
+        if flight_retract:
+            output_source = "flight_leg_retract"
+        elif flight_zero:
+            output_source = "flight_zero_torque"
+        elif airborne_active:
             output_source = "jump_hold" if jump_command is not None and jump_command.hold_torque else "airborne_zero"
         else:
             output_source = "wbc_update" if wbc_called else "zero_order_hold"
@@ -419,6 +444,13 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     "normal_force_positive": normal_force_positive,
                 }
                 trace_transition_reason = None if planner is None else planner.transition_reason
+                if current_phase == "FLIGHT":
+                    gap_now = float(np.max(np.asarray(wheel_points, dtype=float)[:, 2]))
+                    phase_transition["flight_by_geometry"] = bool(gap_now > LIFTOFF_GAP)
+                    phase_transition["flight_max_wheel_gap"] = gap_now
+                    _LOGGER.info("THRUST->FLIGHT 触发判据：%s（max wheel_gap=%.6f m，阈值 %.6f）",
+                                 "geometry" if gap_now > LIFTOFF_GAP else "release_end_fallback",
+                                 gap_now, LIFTOFF_GAP)
                 previous_phase = current_phase
             last_thrust_applied = thrust_applied_now
             trace_sink({
@@ -469,6 +501,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     "context": int(feedback.decision.context),
                 },
                 "airborne_active": bool(airborne_active),
+                "geometrically_airborne": bool(geometrically_airborne),
+                "flight_zero_torque": bool(flight_zero_torque),
+                "flight_leg_retract": bool(flight_leg_retract),
                 "mpc_called": bool(mpc_called),
                 "wbc_due": bool(sim.timing.wbc_due(step)),
                 "mpc_solution": None if solution is None else {

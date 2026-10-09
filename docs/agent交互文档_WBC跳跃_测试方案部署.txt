@@ -1766,3 +1766,202 @@ ctrl 与 raw、tau_jump：
 是否允许进入下一轮：
 
 ============================================================
+
+FL1：滞空段真断开（不再保持地面力矩）+ 落地缓冲部署（问题排查agent，2026-10-09）
+
+一、背景（TR2-a 实测 + 代码定位）
+
+- TR2-a：真离地 t=1.4740（wheel_gap>1mm，双轮），但跳跃相位在 t=1.4610 就
+  THRUST→FLIGHT→LANDING→RECOVER→IDLE（由陈旧接触触发，均早于真离地）；
+  真滞空期（t=1.4740~1.5850）相位是 **IDLE**。
+- loop.py 第 228-230 行：`airborne = (not any(decision.contact)) and (not jump_active_now)`，
+  即**跳跃期 airborne 被强制 False**；FLIGHT 段 WBC 不调用（第 242 行
+  `jump_phase_now != "FLIGHT"`），输出落到 `zero_order_hold` = **保持上一拍地面力矩**。
+- 结果：真滞空期在施加地面 WBC 的力矩（±16 → ±3.6 N·m 并保持），把机体转起来：
+  pitch 0 → 0.2526 rad、pitch_rate 0 → -2.87 rad/s。而系统总角动量 L_y 在
+  t=1.460 已为 -0.2599 且在飞行段守恒（-0.2514）。
+- 离线自由飞行积分（临时脚本，从 t=1.4740 初始状态，腿自由或刹住保持）：
+  机体 pitch 全程 ≤ 0.0005 rad、落地 pitch ≈ -0.0005 rad。
+  → **说明 TR2-a 的 pitch 发散是“离地后还在施加地面力矩”的控制伪影，不是必然物理。**
+
+二、本轮目标
+
+让跳跃期真离地后**真正不再施加地面控制力矩**（不再 `zero_order_hold` 保持地面力矩），
+并验证：
+1. 滞空段机体 |pitch| 保持小（记录完整轨迹）；
+2. 落地时腿长可用（能做缓冲），落地后腿压缩、base z 平滑减速（不是硬砸）。
+离地后姿态不要求精确控制，只需不发散。
+
+三、允许修改（全部在开关后，默认关）
+
+- loop.py：
+  1. 跳跃期输出：当相位为 FLIGHT 时，输出**显式零力矩**（不再 `zero_order_hold` 保持上一拍）；
+     由新开关 `flight_zero_torque` 控制，默认 False 时行为与当前完全一致。
+  2. 离地/相位时序：THRUST→FLIGHT 以几何离地（wheel_gap>LIFTOFF_GAP）为主；
+     release_end 兜底单独标注（不改名字，仅在日志区分）。
+- jump.py：不改状态机与判据（如实现者认为必要，只允许改 FLIGHT 命令的
+  `hold_torque` 字段语义，需在反馈中说明）。
+- loop.py / simulation.py / jump_diagnostic.py / video.py：新增 `--flight-zero-torque` 透传。
+
+禁止修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP 等）、机械限位、MJCF、
+backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains、
+压缩/释放（leg_length_compression / leg_length_thrust）路径。
+
+四、保险与回退
+
+1. 开关默认关；回退 = 关开关，或 git revert 到提交 93a950b。
+2. 单步/静态自检：在真离地帧上确认 FLIGHT+开关打开时输出为全 0；关时与当前一致（保持上一拍）。
+3. 保留既有中止与保护（leg_length_out_of_range、joint_limit、contact 判定）。
+4. 回退判据（出现任一即停并回报）：joint_limit / nonfinite_state / ABORT；
+   滞空段 |pitch| 超过 config.pitch_limit；腿长超 leg_length_max。
+
+五、固定输入与命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动。
+
+命令：
+  tools/jump_diagnostic.py --stage FL1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque
+对照：TR2-a（无 --flight-zero-torque）results/TR2a_baseline_run02.json.gz。
+
+六、执行顺序
+
+1. 语法/导入检查。
+2. 静态自检（第四节第 2 条）。
+3. 跑 FL1 一次（全流程，不限制时）。
+4. 原样记录。
+
+七、每帧必须记录
+
+phase/previous_phase/transition_reason；output_source；
+两侧 leg_length/leg_rate；wheel_gap/geometry_contact/normal_force/tangent_force；
+base 位置与速度三分量 (x,y,z; vx,vy,vz)；pitch/roll/yaw 及 rate；
+torque/raw_torque/ctrl/tau_jump；feasible/scaling/dynamics_residual；airborne_active。
+
+八、通过条件
+
+1. 真离地后 output_source 为显式零力矩（不再是 zero_order_hold 保持地面力矩）；
+2. 滞空段 max|pitch| 显著小于 TR2-a 的 0.2526 rad，并给出具体值（不发散）；
+3. 落地时腿长在可用范围（能做缓冲），落地后腿压缩、base z 平滑减速（无硬砸）；
+4. 无 joint_limit/nonfinite_state/ABORT；ctrl==raw。
+
+九、必须报告
+
+FL1 / TR2-a 对照：滞空段 pitch/ pitch_rate 曲线、max|pitch|、落地 pitch；
+output_source 时间线（何时从 wbc 转为零力矩）；落地时刻与腿长、base z 曲线；
+是否出现硬砸（落地加速度/峰值力矩）；若仍发散，明确是“仍未断开”还是“断开后仍发散”。
+
+十、反馈格式
+
+VP编号：FL1
+修改文件与函数：
+静态自检（FLIGHT 输出是否置零）：
+语法/导入检查：
+状态时间线（离地帧、输出源切换、落地帧）：
+滞空段 pitch/pitch_rate 与 max|pitch|：
+落地 pitch、落地腿长、base z 曲线：
+output_source 统计：
+两侧 leg_length/wheel_gap/normal：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL2：滞空段主动收腿抬轮（高度指标=轮毂离地间隙）部署（问题排查agent，2026-10-09）
+
+一、背景与目标
+
+- FL1 姿态达标（全跑 max|pitch|=0.027 rad），但**轮最大离地间隙只有 7.4 mm**；
+  质心净升 0.1014 m、base 升 0.14 m、vz 峰值 1.70 → 起跳本身不弱，
+  是**腿在飞行中自由伸展 0.13 m**（离地 0.3008 → 0.4335，超过机械上限 0.43）把轮又压回地面。
+- 本轮高度口径改为：**轮最低点的最大离地间隙（`wheel_gap` 峰值）**。
+  目标：先测 100 mm；达不到就退到 20 mm；最终目标 200 mm（后续迭代）。
+- 用户指示：收腿深度尽量多；落地腿长不做缓冲（最低也行）。
+
+二、机制
+
+- 飞行段（几何离地）主动收腿：把腿长目标从离地值向短收，收到下限附近。
+- 无接触时 WBC 不可用，腿力矩直接算（与 `thrust_torque` 同一力雅可比口径）：
+  `F_L = kp*(L_ref - L) + kd*(Ldot_ref - Ldot)`，`tau_leg = J^T @ [F_L, 0]`（每条腿）。
+- 收腿下限 clamp 到 `leg_length_min + 余量`；腿矩 clamp 到执行器限幅；
+  腿长硬 clamp 在 [leg_length_min, leg_length_max]。
+- 落地：不要求缓冲，腿可保持收起或按最简处理。
+
+三、允许修改（全部在开关后，默认关）
+
+- control.py / loop.py / simulation.py / jump_diagnostic.py / video.py：
+  新增 `--flight-leg-retract`；飞行段按上述腿力矩命令；其它路径与开关关闭时行为与当前完全一致。
+- jump.py：不改状态机与判据。若需在 JumpCommand 里补一个“飞行收腿目标/力”字段，需在反馈中说明。
+- 参数（用户 2026-10-09 已批准）：kp=3000 N/m、kd=150 N·s/m；收腿下限 = leg_length_min + 0.005 m；
+  收腿速率不另限（由 PD 决定，反馈中给出实际速率与峰值力矩）。
+
+禁止修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP）、机械限位、MJCF、
+backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains、
+压缩/释放（leg_length_compression / leg_length_thrust）路径。
+
+四、保险与回退
+
+1. 开关默认关；回退 = 关开关，或 git revert 到 93a950b（FL1 之前）。
+2. 腿长硬 clamp 在 [leg_length_min, leg_length_max]（FL1 出现过 0.435>0.43）；力矩硬 clamp。
+3. 保留既有中止与保护；保留 FL1 的 `--flight-zero-torque`。
+4. 回退判据（出现任一即停并回报）：joint_limit / nonfinite_state / ABORT；
+   腿长越出 [leg_length_min, leg_length_max]；滞空段 |pitch| 超 config.pitch_limit。
+
+五、固定输入与命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动。
+
+命令：
+  tools/jump_diagnostic.py --stage FL2 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract
+对照：FL1（无 --flight-leg-retract）results/FL1_baseline_run01.json.gz。
+
+六、执行顺序
+
+1. 语法/导入检查。
+2. 静态自检：在离地帧上确认腿力矩符号为“收腿”（L 减小）、|tau| 在限幅内、腿长 clamp 生效。
+3. 跑 FL2 一次（全流程）。
+4. 原样记录。
+
+七、每帧必须记录
+
+phase/previous_phase/transition_reason；output_source；
+两侧 leg_length、leg_length_rate、leg_length_target；腿执行器力矩；
+wheel_gap（逐轮）、geometry_contact、normal_force；
+base z / COM z / 速度三分量；pitch/pitch_rate；torque/raw/ctrl/tau_jump；
+feasible/scaling/dynamics_residual；airborne_active。
+
+八、通过条件
+
+1. 出现**单次连续**几何离地窗口（不再“离地-落地-再离地”）；
+2. 轮最大离地间隙 ≥ **100 mm**（先测；达不到则如实报实际值，并退到 20 mm 口径再报一次）；
+3. 滞空段 |pitch| 不发散（参考 FL1 的 0.027 rad）；
+4. 腿长全程在 [leg_length_min, leg_length_max] 内；无 joint_limit/nonfinite_state/ABORT。
+
+九、必须报告
+
+- 轮最大离地间隙（mm）与出现时刻；
+- 收腿：离地腿长 → 最收腿长、收腿速率、是否顶限；
+- base z / COM z 曲线；滞空段 pitch 曲线；
+- 峰值腿力矩；
+- 若 <100 mm，明确差多少、卡在哪（收腿深度 / 速率 / 力矩 / 时间）。
+
+十、反馈格式
+
+VP编号：FL2
+修改文件与函数（含 kp/kd、收腿下限、速率）：
+静态自检（收腿方向、限幅、clamp）：
+语法/导入检查：
+状态时间线（离地帧、收腿起止、落地帧）：
+轮最大离地间隙（mm）与时刻：
+收腿：离地腿长→最收腿长：
+base/COM 高度曲线与 vz 峰值：
+滞空段 pitch/pitch_rate 与 max|pitch|：
+峰值腿力矩与限幅余量：
+两侧 wheel_gap/normal/geometry：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
