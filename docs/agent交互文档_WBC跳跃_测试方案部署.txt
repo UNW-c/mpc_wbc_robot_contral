@@ -1579,3 +1579,190 @@ feasible/scaling/dynamics_residual：
 是否允许进入下一轮：
 
 ============================================================
+
+TR1：释放（THRUST）腿长空间加速度驱动部署（问题排查agent，2026-10-09）
+
+一、背景
+
+- 压缩已由 VL1（腿长加速度驱动）通过：leg 0.280 → 0.15642 m，stop_reason=compression_complete；
+  max|pitch|=0.0011 rad，双轮接触保持，ctrl==raw。
+- 释放可行性自检（以 VL1 终点态 t=1.315 为释放起始位形，目标 a_z=+11.80 m/s²）：
+  轮启用：com+pitch 可行、com+pitch+两腿摆角 可行、leg_space 可行；
+  mu_req=0.006（com+pitch+angle）/0.020（leg_space），max|tau|=18.8 N·m（腿限 40，轮限 6）。
+  轮清零：com+pitch 可行，com+pitch+angle 与 leg_space 不可行。
+- 本轮用户选定 T2：THRUST 也用腿长行加速度驱动，与压缩对称。
+
+二、本轮目标
+
+在 COMPRESS/COMPRESS_BRAKE（VL1）之后，THRUST 用腿长加速度把腿从约 0.156 m 伸到 liftoff，
+验证机器人能**正常竖直离地**：双轮同时离地、base 竖直速度为主、pitch 在包线内。
+**离地悬空之后的姿态本轮不评价**。
+
+三、允许修改（全部在开关后，默认关）
+
+- control.py：
+  1. 新增布尔参数 leg_length_thrust（默认 False），由 loop.py / simulation.py /
+     jump_diagnostic.py / video.py 透传。
+  2. leg_length_thrust=True 且相位为 THRUST 时（与现有 leg_length_compression 并列）：
+     - 不对 length_R/length_L 置 activation=0；
+     - replace(length_R/length_L task, desired_acceleration=np.array([a_L]))，
+       其中 a_L = jump.desired_com_acceleration_z（THRUST 时 = config.com_acceleration() ≈ +11.80，
+       来源=JumpConfig 闭环反解；沿用用户 2026-10-09 批准的“同值”选择）；
+     - 向 tasks.tasks 传 desired_com_acceleration_z=None（不创建 com_vertical）。
+  3. leg_length_thrust=False 时 THRUST 行为与当前完全一致（com_vertical 权重 5000 路径）。
+  4. 轮 selection 保持 VP1 的“离地才清零”；压缩/制动路径不动。
+- loop.py：新增 thrust_only 停止条件（相位将进入 FLIGHT 时停止，与 compression_only 并列）。
+- jump.py：不改（THRUST 仍返回 desired_com_acceleration_z=com_acceleration()、release_end、
+  wheel_gap 离地判据全部不动）。
+- loop.py / simulation.py / jump_diagnostic.py / video.py：新增 --leg-length-thrust 与 --thrust-only 透传。
+
+禁止修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP 等）、机械限位、MJCF、
+backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains。
+
+四、保险与回退
+
+1. 开关默认关；回退 = 关开关，或 git revert 到 8d852a8。
+2. 单步自检：压缩终点态给 a_L=+com_acceleration()，验证 leg 加速度为正（伸展）、
+   contact 保持、|tau| 在限幅内、dynamics_residual 约 0、com_vertical 不存在、length activation=1。
+3. 目标限幅：a_L 幅值不超过 |com_acceleration()|；腿长目标夹在 [leg_length_min, leg_length_max]。
+4. 保留既有中止：leg_length_out_of_range、THRUST 的 wheel_gap 离地判据、joint_limit、
+   压缩段 compression_direction_lost。
+5. 回退判据（出现任一即停并回报）：joint_limit / nonfinite_state / ABORT；
+   liftoff 前双轮接触丢失；|pitch| 超 config.pitch_limit；腿长在 liftoff 前超过 leg_length_max。
+
+五、固定输入
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动。
+
+命令：
+  tools/jump_diagnostic.py --stage TR1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --thrust-only
+
+六、执行顺序
+
+1. 语法/导入检查。
+2. 单步自检（第四节第 2 条）。
+3. 跑 TR1 一次。
+4. 原样记录。
+
+七、每帧必须记录
+
+phase / previous_phase / transition_reason；两侧 leg_length_R/L、leg_length_rate_R/L；
+length_R/length_L 的 desired/achieved/residual/activation（THRUST 期 activation 应为 1）；
+com_vertical 是否存在（THRUST 期应为不存在）；pitch/roll/yaw 及 rate；angle_R/angle_L；
+base 位置与速度向量 (x,y,z; vx,vy,vz)；两侧 wheel_gap/geometry_contact/normal_force/tangent_force；
+torque/raw_torque/ctrl/tau_jump；feasible/scaling/dynamics_residual_norm；轮 selection 是否清零。
+
+八、通过条件
+
+1. 压缩段按 VL1 正常到达终点并进入 COMPRESS_BRAKE，再进入 THRUST；
+2. THRUST 段两侧腿长从约 0.156 m 单调伸展；liftoff 前不丢失接触；
+3. THRUST→FLIGHT 转移时：双轮 wheel_gap 同时 > LIFTOFF_GAP（同一帧或相邻一帧内）、
+   base 竖直速度 vz > 0；记录 launch 偏角 = atan2(sqrt(vx^2+vy^2), vz) 与 horiz/vz 比值，
+   是否算“竖直”由数据判定；
+4. |pitch| 在 config.pitch_limit 内，roll/yaw 无异常；无 joint_limit/nonfinite_state/ABORT；
+5. ctrl 与 wbc_raw_torque 一致，tau_jump=0。
+
+九、必须报告
+
+- 压缩段：最短腿长、转移时间；释放段：THRUST 起止时间、腿长伸展轨迹；
+- liftoff 瞬间：两侧 wheel_gap、base 速度三分量、launch 偏角、pitch/roll/yaw；
+- 离地高度（base z 相对释放起始的最大增量）与竖直速度峰值；
+- length 任务 residual（a_L 跟踪误差）；
+- 是否提前离地、是否单轮先离地；
+- 出问题原样回传，不得自行调参或加保护。
+
+十、反馈格式
+
+VP编号：TR1
+修改文件与函数：
+单步自检（方向、接触、限幅、残差、com_vertical 是否存在、length activation）：
+语法/导入检查：
+状态时间线（COMPRESS/BRAKE/THRUST 起始、LIFTOFF 帧、停止）：
+两侧 leg_length/leg_rate 关键值：
+length_R/length_L 的 desired/achieved/residual：
+com_vertical 是否存在：
+pitch/roll/yaw 及 rate（含 liftoff 瞬间）：
+base 速度三分量与 launch 偏角（liftoff 瞬间）：
+离地高度与竖直速度峰值：
+两侧 wheel_gap/geometry_contact/normal_force：
+ctrl 与 raw 一致性、tau_jump：
+feasible/scaling/dynamics_residual：
+是否提前/单轮离地：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+TR2-a：释放后是否真正离地（全流程运行）部署（问题排查agent，2026-10-09）
+
+一、背景（TR1 结果，已核验）
+
+- 释放驱动与姿态正常：THRUST 段两侧腿长 0.15642→0.27975 m 单调伸展；
+  max|pitch|=0.00209 rad、max|pitch_rate|=0.00779 rad/s、roll/yaw≈0；angle residual ≤0.02。
+- 但没有几何离地：THRUST 全程 wheel_gap 始终为负（max -0.000287 m），geometry 全 True，
+  最小法向力 95.76 N；THRUST→FLIGHT 由 release_end=0.28 m 兜底判据触发，不是 wheel_gap。
+- 起飞动量已具备：base z 升高 0.1228 m，vz 峰值 +1.6894 m/s（设计起飞速度 1.401），
+  vx=-0.2046 m/s，偏角 6.9°。
+- 结论：TR1 只证明“腿把机体顶回标称”，未证明“离开地面”。本轮去掉 --thrust-only，
+  让兜底转移之后继续跑，观察轮子是否真的离地。
+
+二、本轮目标
+
+观察 release_end 兜底转移之后机器人是否真的离开地面（wheel_gap 转正、base z 继续上升）；
+记录离地时刻、离地时速度三分量与姿态、离地高度与滞空时长。**离地后的姿态姿势不评价**。
+
+三、允许修改
+
+无代码改动。与 TR1 相同代码，只去掉 --thrust-only。
+
+四、固定输入
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28；jump_height=0.10；
+jump_stroke=0.12；jump_time=1.0；duration=2.0；无扰动。
+
+命令：
+  tools/jump_diagnostic.py --stage TR2a --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust
+
+五、执行顺序
+
+1. 跑 TR2a 一次（与前一轮唯一差别：无 --thrust-only）。
+2. 原样记录。
+
+六、每帧必须记录
+
+phase/previous_phase/transition_reason；两侧 leg_length/leg_rate；
+wheel_gap/geometry_contact/normal_force/tangent_force；
+base 位置与速度三分量 (x,y,z; vx,vy,vz)；pitch/roll/yaw 及 rate；
+torque/raw_torque/ctrl/tau_jump；feasible/scaling/dynamics_residual；轮 selection 是否清零；airborne_active。
+
+七、通过条件
+
+1. 出现 wheel_gap > LIFTOFF_GAP（1 mm）至少一帧，即真正离地；
+2. 离地后 base z 继续上升、vz>0；水平速率记录（是否竖直由数据判定）；
+3. 无 joint_limit/nonfinite_state/ABORT；ctrl==raw。
+若全程 wheel_gap 未转正、从未离地，如实报告“未离地”，不得改判据。
+
+八、必须报告
+
+- 是否离地；离地时刻；离地时 wheel_gap（逐轮）、速度三分量、偏角、pitch/roll/yaw；
+- 离地高度（base z 峰值相对释放起始）、滞空时长；
+- FLIGHT 段行为（控制器断开后机体与腿的动态）、是否触发 LANDING/RECOVER；
+- 若未离地，报告兜底转移后机体与轮的动态（base z、vz、wheel_gap 曲线），原样回传。
+
+九、反馈格式
+
+VP编号：TR2a
+修改文件与函数（应为无）：
+wheel_gap 是否转正、何时：
+是否离地、离地时刻：
+离地时速度三分量与偏角：
+离地时 pitch/roll/yaw：
+离地高度与滞空时长：
+FLIGHT 段行为与 LANDING/RECOVER：
+phase 时间线：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================

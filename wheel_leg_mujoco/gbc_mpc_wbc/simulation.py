@@ -419,7 +419,8 @@ class Gbc486MpcWbcSimulation:
             frame_callback=None, frame_interval: float = 0.0, trace_sink=None,
             explicit_jump_reference: bool = False, compression_only: bool = False,
             freeze_jump_reference: bool = False, vmc_feedforward: bool = False,
-            leg_length_compression: bool = False):
+            leg_length_compression: bool = False, leg_length_thrust: bool = False,
+            thrust_only: bool = False):
         """积分情景；四段时序在 ``loop.run_loop``（采样 / MPC / WBC / 输出 + 推进）。
 
         本方法只做委托：装配在 ``__init__``，时序在 ``loop.py``，控制算法在
@@ -432,7 +433,9 @@ class Gbc486MpcWbcSimulation:
                         compression_only=compression_only,
                         freeze_jump_reference=freeze_jump_reference,
                         vmc_feedforward=vmc_feedforward,
-                        leg_length_compression=leg_length_compression)
+                        leg_length_compression=leg_length_compression,
+                        leg_length_thrust=leg_length_thrust,
+                        thrust_only=thrust_only)
 
     def _precheck_jump(self) -> None:
         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。

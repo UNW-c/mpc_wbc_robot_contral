@@ -42,7 +42,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              compression_only: bool = False,
              freeze_jump_reference: bool = False,
              vmc_feedforward: bool = False,
-             leg_length_compression: bool = False) -> None:
+             leg_length_compression: bool = False,
+             leg_length_thrust: bool = False,
+             thrust_only: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -200,6 +202,13 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                                     float(d.time))
                     break
 
+        # TR1（thrust_only）：相位将进入 FLIGHT 时停止，不执行 FLIGHT/LANDING 控制。
+        if thrust_only and jump_command is not None and jump_command.phase.value == "FLIGHT":
+            sim.stop_reason = "liftoff_confirmed"
+            _LOGGER.info("thrust_only：确认离地（FLIGHT），在写入 FLIGHT 控制前停止本轮（t=%.3f s）",
+                         float(d.time))
+            break
+
         # ---------------------------- 控制级 A：MPC（自己的节拍，与 WBC 异步）
         if sim.timing.mpc_due(step):
             mpc_called = True
@@ -245,6 +254,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 jump_holds=jump_holds,
                 vmc_feedforward=vmc_feedforward,
                 leg_length_compression=leg_length_compression,
+                leg_length_thrust=leg_length_thrust,
                 jump_config=(None if sim.jump is None else sim.jump.config),
                 sample_override=(jump_reference if explicit_jump_reference
                                  and jump_command is not None and jump_command.active
@@ -501,6 +511,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "wheel_selection_cleared": bool(outcome is not None
                                                 and outcome.wheel_selection_cleared),
                 "leg_length_compression": bool(leg_length_compression),
+                "leg_length_thrust": bool(leg_length_thrust),
                 "wbc_task_trace": None if outcome is None else outcome.task_trace,
                 "wbc_result": None if result is None else {
                     "feasible": bool(result.feasible),
@@ -527,12 +538,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "mpc_model_A": np.asarray(sim.mpc.model.A, dtype=float).copy(),
                 "mpc_model_B": np.asarray(sim.mpc.model.B, dtype=float).copy(),
             })
-        if jump_phase_now == "FLIGHT" and sim.stop_reason is None:
-            # WP3 阶段目标（部署文档八）：确认真实离地（状态机进入 FLIGHT）后立即结束本轮测试，
-            # 不进入未修复的 FLIGHT/LANDING 控制调试。
-            sim.stop_reason = "liftoff_confirmed"
-            _LOGGER.info("已确认离地（phase=FLIGHT），本轮测试在此停止：t=%.3f s", float(d.time))
-            break
         if frame_callback is not None and (frame_interval <= 0.0
                                            or float(d.time) - last_frame_time >= frame_interval - 1e-12):
             frame_callback(d)

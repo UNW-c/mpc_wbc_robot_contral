@@ -89,7 +89,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               limit_warned: bool = False, jump=None, sample_override=None,
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
-              jump_config=None, leg_length_compression: bool = False) -> WbcOutcome:
+              jump_config=None, leg_length_compression: bool = False,
+              leg_length_thrust: bool = False) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -116,7 +117,12 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     # length_R/length_L 行，不创建 com_vertical；开关默认关时行为与当前完全一致。
     leg_length_phase = bool(leg_length_compression and jump is not None and jump.active
                             and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE"))
-    com_target = None if (vmc_phase or leg_length_phase) else desired_com_acceleration_z
+    # TR1（2026-10-09）：THRUST 也用腿长行加速度驱动（与压缩对称）；开关默认关时 THRUST
+    # 行为与当前完全一致（com_vertical 权重 5000 路径）。
+    leg_length_thrust_phase = bool(leg_length_thrust and jump is not None and jump.active
+                                   and jump.phase.value == "THRUST")
+    com_target = (None if (vmc_phase or leg_length_phase or leg_length_thrust_phase)
+                  else desired_com_acceleration_z)
     balance, motion = tasks.tasks(feedback.state, feedback.rows, sample,
                                   desired_com_acceleration_z=com_target,
                                   pitch_reference=holds.get("pitch"),
@@ -147,7 +153,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         # VL1（2026-10-09）：leg_length_compression 打开且相位为 COMPRESS/COMPRESS_BRAKE 时，
         # 不对 length_R/L 置 activation=0，而是把加速度目标换成 a_L（=jump.desired_com_acceleration_z）；
         # 其余相位与默认路径保持 activation=0（新部署 2026-10-09）。
-        if leg_length_phase:
+        if leg_length_phase or leg_length_thrust_phase:
             a_L = float(jump.desired_com_acceleration_z)
             motion = tuple(replace(task, desired_acceleration=np.array([a_L]))
                            if task.name in ("length_R", "length_L") else task

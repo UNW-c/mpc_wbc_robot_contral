@@ -1883,3 +1883,262 @@ feasible/scaling/dynamics_residual：feasible 全 True；dyn_res max=8.76e-13；
 是否允许进入下一轮：否，等待问题排查agent确认。
 
 署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：TR1 释放（THRUST）腿长空间加速度驱动（2026-10-09）
+
+VP编号：TR1
+
+一、修改文件与函数
+
+1. wheel_leg_mujoco/gbc_mpc_wbc/control.py
+   - `wbc_stage` 新增可选参数 `leg_length_thrust`（默认 False）；
+   - `leg_length_thrust=True` 且相位 THRUST 时：不对 length_R/length_L 置 activation=0，而是 `replace(task, desired_acceleration=np.array([a_L]))`，`a_L=float(jump.desired_com_acceleration_z)`；向 `tasks.tasks` 传 `desired_com_acceleration_z=None`（不创建 com_vertical）；
+   - `leg_length_thrust=False` 时 THRUST 行为不变（com_vertical 权重 5000 路径）；
+   - 轮 selection 保持 VP1 的“离地才清零”；压缩/制动路径不动。
+2. wheel_leg_mujoco/gbc_mpc_wbc/loop.py：`run_loop` 新增 `leg_length_thrust` 与 `thrust_only`；`thrust_only=True` 时相位将进入 FLIGHT 则在写 FLIGHT 控制前停止（stop_reason=liftoff_confirmed）；trace 记录 `leg_length_thrust`。
+3. wheel_leg_mujoco/gbc_mpc_wbc/simulation.py：`run()` 新增两开关透传。
+4. wheel_leg_mujoco/tools/jump_diagnostic.py：新增 `--leg-length-thrust`、`--thrust-only` 并写入 metadata。
+5. wheel_leg_mujoco/tools/video.py：新增两开关透传（未使用于本次数据）。
+
+未修改：MPC 参数与腿长网格、接触/离地阈值（LIFTOFF_GAP）、机械限位、MJCF、backend/model_variant/preset、TASK_WEIGHTS、jump.py 状态机与释放判据、thrust_torque、WbcGains。
+
+二、单步自检（VL1 压缩终点态 t=1.315，L=0.15642，相位 THRUST，a_L=+com_acceleration()，leg_length_thrust=True）
+
+- a_L=+11.8004；com_vertical_present=False；
+- length_R/length_L：activation=1.00，desired=+11.8004，achieved=+11.9045（正=伸展），residual=+0.1041，scaling=1.0；
+- contact=[True,True]；wheel_selection_cleared=False；
+- feasible=True，dynamics_residual=8.45e-13，无 clip；ctrl=[-11.482, +11.543, +11.466, -11.532, -0.217, -0.217]，全在限幅内。
+- 六项规定条件（伸展方向、接触、限幅、残余≈0、com_vertical 不存在、length activation=1）均通过。
+
+三、语法/导入检查
+
+- PYTHONPYCACHEPREFIX 临时目录；py_compile `control.py loop.py simulation.py jump_diagnostic.py video.py`，退出码 0。
+
+四、TR1 运行
+
+命令：`tools/jump_diagnostic.py --stage TR1 --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --thrust-only`；退出码 0。
+
+状态时间线：
+- t=1.0000 IDLE→COMPRESS；
+- t=1.1570 COMPRESS→COMPRESS_BRAKE（L=0.21901，rate=-0.76892）；
+- t=1.3160 COMPRESS_BRAKE→THRUST（L=0.15642，rate=+0.0021）；
+- t=1.461 s THRUST→FLIGHT（日志原因：到达释放上限 0.2800 m，接触仍在，按兜底判据转飞行）；thrust_only 在写 FLIGHT 控制前停止，stop_reason=liftoff_confirmed；
+- 未进入 LANDING；无 ABORT。phase_frame_counts：IDLE=1000、COMPRESS=157、COMPRESS_BRAKE=159、THRUST=145。
+
+两侧 leg_length/leg_rate 关键值（THRUST）：
+- t=1.3160：0.15642/+0.0021；
+- t=1.3560：0.16635/+0.4775；
+- t=1.3960：0.19505/+0.9451；
+- t=1.4360：0.24242/+1.4092；
+- t=1.4600：0.27975/+1.6851（最后记录帧，仍 < release_end=0.28）；
+- THRUST 段两侧腿长单调伸展，无反向；压缩段最短 0.15642 m。
+
+length_R/length_L desired/achieved/residual（THRUST）：
+- desired 恒 +11.8004；achieved 范围 [+11.8712, +11.9061]；residual 范围 [+0.0709, +0.1057]；activation=1.0、scaling=1.0 全程。
+
+com_vertical 是否存在：THRUST 段所有 WBC 帧均不存在（present=0）。
+
+pitch/roll/yaw 及 rate：
+- THRUST 段 pitch 从 -0.00111 到 -0.00209 rad；roll=0.00000；yaw=0.00000；
+- 全程 max|pitch|=0.00209 rad，max|pitch_rate|=0.00779 rad/s（远小于 config.pitch_limit）。
+
+base 速度三分量与 launch 偏角（最后记录帧 t=1.4600）：
+- vx=-0.2046、vy=-0.0000、vz=+1.6894 m/s；水平速率=0.20465；launch 偏角=6.907°；horiz/vz=0.1211。
+
+离地高度与竖直速度峰值：
+- base z：THRUST 起 0.09761 m，最高 0.22037 m，增量 0.12276 m；
+- vz 峰值=+1.6894 m/s（t=1.4600）。
+
+两侧 wheel_gap/geometry_contact/normal_force：
+- THRUST 全程 geometry=[true,true]，wheel_gap 始终为负（最大记录 -9.996e-05 m）；
+- THRUST 最小实际法向力=95.755 N（始终为正）；airborne_active 全程 False；
+- t=1.4600：wheel_gap=[-0.000288,-0.000287] m，normal=[135.1,135.0] N。
+
+ctrl 与 raw 一致性、tau_jump：max|ctrl-wbc_raw_torque|=0.000e+00；max|tau_jump|=0.000e+00；wheel_selection_cleared 全程 False。
+feasible/scaling/dynamics_residual：feasible 全 True；dyn_res max=1.398e-12；无 clip/fallback；length scaling=1.0。
+max|ctrl|=[16.506, 16.721, 16.480, 16.703, 0.362, 0.362] N·m（腿限 40）。
+横移/前进位移：base x∈[-0.03972, 0.00091] m，y∈[-0.000003, 0.000000] m。
+
+五、是否提前/单轮离地
+
+- 无几何离地：THRUST 全程（包括转移到 FLIGHT 的那一帧）双轮 wheel_gap 均为负，未超过 LIFTOFF_GAP=1 mm；转移由 release_end 兜底判据触发，转移时接触仍在、法向力仍为正（135 N）。
+- 无单轮先离地：两侧 wheel_gap、geometry、normal 逐帧均一致。
+- 属于“到达释放上限但尚未几何离地”的转移，不是“提前离地”，也不是“单轮先离地”。
+
+六、结论（只写数据支持的现象）
+
+1. 压缩段与 VL1 一致，正常到达终点并进入 COMPRESS_BRAKE、再进入 THRUST。
+2. 通过条件 1、2 满足：压缩正常；THRUST 段两侧腿长 0.15642→0.27975 m 单调伸展，liftoff 前未丢失接触。
+3. 通过条件 3 未满足：THRUST→FLIGHT 转移时双轮 wheel_gap 均未 > LIFTOFF_GAP；实际由 release_end 兜底判据转移，接触仍在。base vz=+1.6894>0、launch 偏角 6.907°。
+4. 通过条件 4、5 满足：|pitch|≤0.00209 rad、roll/yaw≈0；无 joint_limit/nonfinite_state/ABORT；ctrl==raw，tau_jump=0。
+5. 机器人在 THRUST 段确实向上运动（base z 增量 0.12276 m，vz 峰值 1.6894 m/s），但本轮数据未记录到几何离地。
+6. 本轮只记录数据，不判断根因，不做修复与调参。
+
+七、结果文件
+
+- C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR1_baseline_run01.json.gz
+- C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR1_baseline_run01.log
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：TR2-a 释放后是否真正离地（2026-10-09）
+
+VP编号：TR2a
+
+一、修改文件与函数
+
+- 无代码改动。与 TR1 同一部署版本，仅去掉 `--thrust-only`。
+
+命令：`tools/jump_diagnostic.py --stage TR2a --case baseline --run-id run01 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust`；退出码 0。
+
+二、wheel_gap 是否转正、何时
+
+- 全程（含 FLIGHT 首帧）均未转正：max_positive_wheel_gap=-9.996e-05 m，小于 LIFTOFF_GAP=1.0e-03 m。
+- 全程无任何一帧 wheel_gap>1 mm。
+
+三、是否离地、离地时刻
+
+- 未离地。FLIGHT 相位只有 1 个记录帧（t=1.4610 s），该帧 wheel_gap=[-0.000273,-0.000273] m，geometry=[True,True]，normal=[135.29,135.16] N，airborne_active=False。
+
+四、离地时速度三分量与偏角
+
+- 不适用（未离地）。FLIGHT 首帧 base 速度=[vx=-0.2055, vy=-0.0000, vz=+1.7011] m/s；水平速率=0.2055；偏角=atan2(0.2055,1.7011)=6.89°。
+
+五、离地时 pitch/roll/yaw
+
+- 不适用（未离地）。FLIGHT 首帧 pitch=-0.002099 rad，pitch_rate=-0.006634 rad/s；roll/yaw：全程约 0（max|roll|、|yaw| 未超过记录噪声量级）。
+- 全跑 max|pitch|=0.002099 rad，max|pitch_rate|=0.007789 rad/s。
+
+六、离地高度与滞空时长
+
+- 未离地，滞空时长=0（FLIGHT 仅 1 帧，该帧后立即停止，无离地后的物理推进）。
+- base z：THRUST 起 0.09761 m，FLIGHT 首帧 0.22207 m，增量 0.12446 m；vz 峰值=+1.7011 m/s。
+
+七、FLIGHT 段行为与 LANDING/RECOVER
+
+- FLIGHT 段只有 1 帧（t=1.4610），无后续物理推进，未触发 LANDING/RECOVER。
+- 停止发生在 FLIGHT 首帧：`loop.py` 存在与 `--thrust-only` 无关的无条件“进入 FLIGHT 即停”（stop_reason=liftoff_confirmed）。因此在 TR2-a 中去掉 `--thrust-only` 仍然不能继续运行；与 TR1 的唯一差别是多记录了 1 帧 FLIGHT。
+
+八、phase 时间线
+
+- IDLE=1000 帧（t=0..0.999）；
+- t=1.0000 IDLE→COMPRESS；
+- t=1.1570 COMPRESS→COMPRESS_BRAKE；
+- t=1.3160 COMPRESS_BRAKE→THRUST；
+- t=1.4610 THRUST→FLIGHT（release_end=0.28 m 兜底判据，接触仍在）；
+- t=1.461 立即停止，stop_reason=liftoff_confirmed；phase_frame_counts：COMPRESS=157、COMPRESS_BRAKE=159、THRUST=145、FLIGHT=1。
+- 无 ABORT、无 LANDING/RECOVER。
+
+九、ctrl 与 raw、tau_jump
+
+- max|ctrl-wbc_raw_torque|=0.000e+00；max|tau_jump|=0.000e+00；feasible 全 True；dyn_res max=1.398e-12；无 clip/fallback。
+- 未出现 joint_limit/nonfinite_state/ABORT。
+
+十、结论（只写数据支持的现象）
+
+1. TR2-a 未观察到真实离地：全程 wheel_gap 未转正（最大 -9.996e-05 m），FLIGHT 首帧双轮仍为几何接触、法向力仍为正（135 N）。
+2. 去掉 `--thrust-only` 未能让仿真继续：当前 `loop.py` 有无条件“进入 FLIGHT 即停”（与 `--thrust-only` 并列但独立存在），本次运行在 FLIGHT 首帧被它终止。因此本命令无法回答“兜底转移后是否离地”。
+3. 若需观察兜底转移后过程，必须绕过该无条件停止（属于代码改动，不在 TR2-a 允许范围）；我不自行修改。
+4. 其他硬指标与 TR1 一致：THRUST 腿长单调伸展到 0.27975/0.28145 m，pitch/roll/yaw 正常，ctrl==raw，tau_jump=0。
+
+十一、结果文件
+
+- C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run01.json.gz
+- C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run01.log
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：TR2-a 重跑（run02，含用户批准的 loop.py 修改）（2026-10-09）
+
+VP编号：TR2a（run02）
+
+一、修改文件与函数
+
+- 用户 2026-10-09 明确指示删除 `wheel_leg_mujoco/gbc_mpc_wbc/loop.py::run_loop` 中“进入 FLIGHT 即停”的整段判断。删除的原文：
+```
+if jump_phase_now == "FLIGHT" and sim.stop_reason is None:
+    # WP3 阶段目标（部署文档八）：确认真实离地（状态机进入 FLIGHT）后立即结束本轮测试，
+    # 不进入未修复的 FLIGHT/LANDING 控制调试。
+    sim.stop_reason = "liftoff_confirmed"
+    _LOGGER.info("已确认离地（phase=FLIGHT），本轮测试在此停止：t=%.3f s", float(d.time))
+    break
+```
+- 其余无代码改动；`leg_length_compression` / `leg_length_thrust` 透传保持。
+- py_compile `loop.py` 退出码 0。
+- 重要：该删除超出 TR2-a 部署原文“无代码改动”的范围，但属于用户本次明确指示；run01（未删除时）保留作对照。
+
+命令：`tools/jump_diagnostic.py --stage TR2a --case baseline --run-id run02 --duration 2.0 --jump-height 0.10 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust`；退出码 0。
+
+二、wheel_gap 是否转正、何时
+
+- 是。首次 t=1.4740 s，双轮 gap 同时 = [0.001068, 0.001068] m，大于 LIFTOFF_GAP=1e-03 m；该帧 geometry=[False,False]、normal=[0.0,0.0]。
+- 全程 max wheel_gap=0.013075 m。
+
+三、是否离地、离地时刻
+
+- 几何离地：t=1.4740 s，双轮同时。
+- 需同时报告：JumpPlanner 相位在 t=1.4640 已因陈旧接触从 FLIGHT 回到 IDLE（早于真实离地 10 ms），真实滞空期间无 FLIGHT 相位控制。
+
+四、离地时速度三分量与偏角（t=1.4740）
+
+- base 速度 = [vx=-0.2272, vy=-0.0000, vz=+1.5295] m/s；
+- 水平速率=0.2272 m/s；launch 偏角=8.448°；horiz/vz=0.1485。
+
+五、离地时 pitch/roll/yaw（t=1.4740，roll/yaw 由 qpos 四元数反算）
+
+- pitch=-0.002186 rad，pitch_rate=-0.002917 rad/s；roll=+0.000008 rad；yaw=+0.000042 rad。
+- 全跑 max|roll|=0.00016、max|yaw|=0.00189；几何滞空段 max|roll|=|max|yaw=0.00006。
+
+六、离地高度与滞空时长
+
+- 几何滞空（gap>1mm）：t=1.4740~1.5850，112 帧，时长 0.111 s；max wheel_gap=0.013075 m。
+- base z：离地帧 0.24343 m，峰值 0.35243 m（增 0.10900 m）；相对 THRUST 起 0.09761 m 增 0.25482 m。
+- vz 峰值：几何滞空段 1.5295 m/s；全跑 1.7363 m/s。
+- 几何滞空段 max|pitch|=0.24691 rad（离地瞬间仅 -0.002186）；max leg=0.39807 m。
+
+七、FLIGHT 段行为与 LANDING/RECOVER
+
+- 状态机相位段：THRUST t=1.4610→FLIGHT（1 帧）→LANDING t=1.4620（1 帧）→RECOVER t=1.4630（1 帧）→IDLE t=1.4640，由陈旧接触触发，均早于真实离地。
+- 真实几何滞空段 output_source：airborne_zero=69、zero_order_hold=32、wbc_update=11。
+- 未出现针对真实落地的 LANDING/RECOVER（状态机已回 IDLE）。
+
+八、phase 时间线（run02）
+
+- IDLE=1536 帧；COMPRESS t=1.0000（157）；COMPRESS_BRAKE t=1.1570（159）；THRUST t=1.3160（145）；FLIGHT t=1.4610（1）；LANDING t=1.4620（1）；RECOVER t=1.4630（1）；其余至 2.0 s 为 IDLE；stop_reason=null。
+- 无 ABORT；phase_transition_assertion_failures=0。
+
+九、ctrl 与 raw、tau_jump；可行性与护栏
+
+- max|ctrl-wbc_raw_torque|=0.000e+00；max|tau_jump|=0.000e+00；
+- feasible 全 True；dyn_res max=1.398e-12；无 clip/fallback；
+- 无 joint_limit/nonfinite_state/ABORT/attitude_guard/speed_guard 事件；
+- max|ctrl|=[16.506, 16.721, 16.480, 16.703, 5.989, 6.000] N·m。
+
+十、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：出现 wheel_gap>1 mm（t=1.4740，双轮同时，geometry 同时变 False）。
+2. 通过条件 2 满足：离地后 base z 继续上升（+0.10900 m）；离地瞬间 vz=+1.5295 m/s>0；水平速率 0.2272 m/s、偏角 8.448°。
+3. 通过条件 3 满足：无 joint_limit/nonfinite_state/ABORT；ctrl==raw。
+4. 数据事实：真实几何离地（t=1.4740）晚于 JumpPlanner 回 IDLE（t=1.4640）10 ms；真实滞空期间无 FLIGHT 相位控制。本轮只记录，不判断根因。
+5. 视频（用户要求）：C:\Users\20060\Desktop\circleg-robot\videos\TR2a_full_2.0s_50fps.mp4（100 帧，completed=True，stop_reason=None，distance=-0.2967 m）。
+
+十一、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run02.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run02.log
+- 视频：C:\Users\20060\Desktop\circleg-robot\videos\TR2a_full_2.0s_50fps.mp4
+- run01（删除前对照）：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\TR2a_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds

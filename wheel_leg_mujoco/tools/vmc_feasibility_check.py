@@ -251,12 +251,14 @@ def _min_mu(state, wheels_enabled, hard):
     return float(high)
 
 
-def _analyse_frame(model, data, frame, mu_model):
+def _analyse_frame(model, data, frame, mu_model, com_override=None):
     state = _state_matrices(model, data, frame)
     report = dict(t=float(frame["t"]), phase=frame["jump"]["phase"],
                   com_target=None, self_check=_self_check(state, frame),
                   wheels_on={}, wheels_off={})
     com_target = frame["jump"]["desired_com_acceleration_z"]
+    if com_override is not None:
+        com_target = float(com_override)
     if com_target is None:
         return report
     com_target = float(com_target)
@@ -292,6 +294,8 @@ def main() -> int:
     parser.add_argument("--frames", type=str,
                         default="1.000,1.030,1.060,1.090,1.096,1.121,1.150,1.184,1.220")
     parser.add_argument("--mu", type=float, default=None, help="覆盖摩擦系数；默认取模型值")
+    parser.add_argument("--com-target", type=float, default=None,
+                        help="覆盖每帧的竖向加速度目标（例如释放段用 com_acceleration）")
     parser.add_argument("--output", type=Path, default=None)
     arguments = parser.parse_args()
 
@@ -312,7 +316,8 @@ def main() -> int:
         token = token.strip()
         if not token:
             continue
-        report = _analyse_frame(model, data, _nearest_frame(payload["frames"], float(token)), mu_model)
+        report = _analyse_frame(model, data, _nearest_frame(payload["frames"], float(token)),
+                                mu_model, com_override=arguments.com_target)
         reports.append(report)
         on, off = report.get("wheels_on", {}), report.get("wheels_off", {})
         _LOGGER.info(
