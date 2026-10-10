@@ -2841,3 +2841,529 @@ VP编号：FL7
 是否允许进入下一轮：否，等待问题排查agent确认。
 
 署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL8（撤挡位 + 上升手接 + 落地重锚定）（2026-10-10）
+
+VP编号：FL8
+
+一、修改文件与函数（phi 控制器删除、上升/下落手接、重锚定）
+
+1. control.py：删除 `PHI_REFERENCE`、`KP_PHI`、`KD_PHI`、`_phi_force`；`flight_leg_profile_torque` 回到纯 `F_L`（`_leg_axis_torque`，`F_phi=0`）。
+2. control.py（上升手接）：删除“参考不得上穿入口腿长”挡位；参考自首步起按 RATE 下收（`l_ref = max(target, l_ref - RATE*dt)`，捕获帧也先减一步）；保留 `(L_ref, v_ref, L_entry, ref_accel)` 状态与 REF_ACCEL 斜坡，力公式 `F_L=KP*(L_ref-L)+KD*(v_ref-Ldot)`。
+3. loop.py（重锚定）：消费 `feedback.decision.reset_reference`（supervision 模式回 GROUND 的瞬时），为真时调 `sim.mpc.reset(feedback.state)`；仅 `flight_leg_extend` 开时生效。
+
+**未实现（已说明）：**
+- 改动 3（下落手接速率受限）：`FLIGHT_EXTEND_RATE_LIMIT` 文档未给数值（已 grep，仅出现名字），按文档“若希望先只改上升段可拆一轮”的提示**暂时延后**，未自行填数。
+- 改动 4b（`BodyStateKalman.reset`）：本工作区（`wheel_leg_mujoco/gbc_mpc_wbc`）**未实例化 `BodyStateKalman`**（全仓仅 `APP/chassis_controller.py` 使用），且无 `forward_path` 字段，故未改；只做了 loop 侧的 `mpc.reset`。
+- 改动 4c（`supervision.reset`）：未调用（会重置 supervisor 时钟/模式，风险未知），只保证 `reset_reference` 每跳只脉冲一次（实测=2 帧，其中 1 帧为启动时）。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- t=1.424/1.425 手接帧：首步 tau 峰值=0.67 N*m（不顶 36），L_ref=L_entry-1.5*dt，v_ref=Ldot_entry。
+
+四、语法/导入检查
+
+- py_compile `control.py loop.py` 退出码 0。
+
+五、手接帧专项 A（THRUST→FLIGHT）与 B（上升→下落）
+
+A）THRUST→FLIGHT（手接前一帧起）：
+```
+ t=1.4240 THRUST out=wbc_update         ctrl=[-23.68, 24.05, 23.64, -24.02, 0.24, 0.24] L=0.2807 rate=+2.252
+ t=1.4250 FLIGHT out=flight_leg_profile ctrl=[+0.67, -0.67, -0.67, +0.67, 0.0, 0.0]      L=0.2830 rate=+2.272
+ t=1.4260 FLIGHT out=flight_leg_profile ctrl=[+2.29, -2.29, -2.29, +2.29, 0.0, 0.0]      L=0.2852 rate=+2.253
+ t=1.4270 FLIGHT out=flight_leg_profile ctrl=[+3.88, -3.88, -3.88, +3.88, 0.0, 0.0]      L=0.2875 rate=+2.233
+ t=1.4280 FLIGHT out=flight_leg_profile ctrl=[+5.37, -5.37, -5.37, +5.37, 0.0, 0.0]      L=0.2897 rate=+2.210
+```
+- 首帧 max|ctrl|=0.674 N*m，不顶 clamp。
+
+B）上升→下落切换：
+```
+ t=1.5490 FLIGHT out=flight_leg_profile ctrl=[-2.68, +2.68, +2.68, -2.68, 0.0, 0.0]
+ t=1.5500 FLIGHT out=flight_leg_profile ctrl=[-40.0, +40.0, +40.0, -40.0, 0.0, 0.0]
+```
+- 单步 |Δτ_leg|=37.322 N*m（<50 量级，但仍有阶跃；因改动 3 未实现）。
+
+六、进入飞行前 50 ms max|dphi/dt|
+
+- 1.4488 rad/s（>0.8 → 通过条件 2 不满足）。对照：FL6 约 1.19、FL7 0.4385。
+
+七、重锚定专项（reset_reference/context/mpc.reference/估计器）
+
+- `reset_reference=True` 帧=2：t=0.099（context=2，mode=ground，mpc_called=False，启动阶段）与 t=1.900（context=5，mode=ground，mpc_called=True，mpc_solution present）。两次均成功调用 `mpc.reset(state)`（日志已记录）。
+- 说明：本工作区无 `BodyStateKalman`/`forward_path`，故未记录估计器字段（未改 4b）。
+
+八、状态时间线
+
+- IDLE→COMPRESS t=1.0000（157）→COMPRESS_BRAKE t=1.1570（159）→THRUST t=1.3160（109）→FLIGHT t=1.4250（364）→LANDING ≈t=1.7880（12）→RECOVER≈t=1.8010→IDLE t=1.8020；无 ABORT。
+
+九、轮最大离地间隙（mm）与时刻
+
+- 228.1 mm（0.228086 m），t=1.5990，phase=FLIGHT。低于通过条件 1 的 248 mm（也低于 FL6 的 248.7，但高于 FL7 的 131.6）。
+
+十、output_source 统计
+
+- flight_leg_profile=364、landing_buffer=12、wbc_update=656、zero_order_hold=1968。
+
+十一、落地：landing_buffer 帧数、落地腿长、最小腿长、轮穿地深度
+
+- landing_buffer=12 帧（t=1.7890~1.8000），缓冲内最小腿长=0.27216 m；
+- post-flight 120 帧最小 wheel_gap=-0.012294 m → 轮穿地 12.29 mm（仅记录）；
+- max leg=0.32875 m、min leg=0.15642 m；max|pitch|=0.1233 rad（FL6 0.6382、FL7 0.4082），max|pitch_rate|=2.863。
+
+十二、落地后 1 s 姿态与平衡、vx、qx
+
+- post-IDLE 起（t=1.802）：vx=-0.3655、qx=-0.13014；
+- 随后 1 s：|vx|max=1.5176、|vx|final=1.0223；qx 范围=[-1.0353, -0.1129]（继续后退约 0.9 m）；
+- |pitch|max=0.1233、|roll|max=0.0020、|yaw|max=0.0685；最终 base z=0.2216 m（站立）；max forward disp=1.2488 m。
+- 结论：vx 未收敛、qx 未停（通过条件 4 不满足）。
+
+十三、assertion_failures
+
+- 0。
+
+十四、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[40,40,40,40,6.00,6.00]（腿侧顶 40，为落地缓冲段）；tau_jump=0；feasible 全 True；guard/limit/nonfinite/abort 事件=[]。
+
+十五、结论（只写数据支持的现象）
+
+1. 通过条件 1 不满足：轮最大间隙 228.1 mm < 248 mm。
+2. 通过条件 2 不满足：进入飞行前 50 ms max|dphi/dt|=1.4488 > 0.8（phi 控制器已按改动 1 删除）。
+3. 通过条件 3：上升→下落单步 |Δτ_leg|=37.3 N*m（不到 50 量级，但阶跃仍存在；改动 3 未实现）。
+4. 通过条件 4 不满足：|vx| 未收敛（1 s 内 |vx|max=1.5176、final 1.0223），qx 继续后退约 0.9 m；重锚定在 t=1.900 确实调用，但未阻止继续后退。
+5. 通过条件 5 满足：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0。
+6. 数据事实：删 phi 控制器后 pitch 显著下降（max|pitch| 0.1233 vs FL6 0.6382），但 dphi/dt 反而回升到 1.4488；轮间隙 228.1 mm。只记录，不判断根因。
+
+十六、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL8_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL8_baseline_run01.log
+- 对照：FL6_baseline_run01.json.gz、FL7_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL9（下落段 phi 回复 + 下落段手接 + 重锚定修正）（2026-10-10）
+
+VP编号：FL9
+
+一、修改文件与函数（下落段 phi 回复、FLIGHT_EXTEND_RATE_LIMIT、重锚定修正）
+
+1. control.py：加回 `PHI_REFERENCE=-0.1263`、`KP_PHI=7.0`、`KD_PHI=1.1` 与 `_phi_force`；`flight_leg_profile_torque` 的 `F_phi` **仅在 vz<0（下落）生效**，上升仍 `F_phi=0`。
+2. control.py：新增 `FLIGHT_EXTEND_RATE_LIMIT=1.5` m/s；下限段伸腿改为速率受限参考（`L_ref` 以 `v_ref` 向 nominal 收敛，`v_ref` 由 ref_accel 斜坡；上升↔下落切换时保持 (L_ref,v_ref) 连续）；剖面状态改为五元组 `(mode, L_ref, v_ref, L_entry, ref_accel)`。
+3. loop.py（重锚定修正）：`BodyStateKalman` 本工作区不存在（已核）；改为 `reset_reference` 为真时调 `sim.mpc.reset(state)`（state 的 position 取 `sim.distance`）+ `contact_estimator.reset()` + `supervisor.reset()`；**每跳只触发一次**（`landing_reanchor_pending` 在首次进 FLIGHT 时置位，重置后清位，避开启动时 GROUND 脉冲）。record 新增 `distance`。
+4. vx 不收敛只记录。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- 上升手接帧（FL8 数据）首步 tau 峰值=1.04 N*m，不顶 clamp。
+- 说明：单独的上升→下落跨帧单步自检因在弹道顶点取帧使 ref_accel 失真，不作为证据；以正式运行实测为准（见六）。
+
+四、语法/导入检查
+
+- py_compile `control.py loop.py` 退出码 0。
+
+五、手接帧专项 A（THRUST→FLIGHT）
+
+```
+ t=1.4230 THRUST out=zero_order_hold    ctrl=[-23.56, 23.91, 23.52, -23.88, 0.17, 0.16] L=0.2785
+ t=1.4240 THRUST out=wbc_update         ctrl=[-23.68, 24.05, 23.64, -24.02, 0.24, 0.24] L=0.2807
+ t=1.4250 FLIGHT out=flight_leg_profile ctrl=[+1.04, -1.04, -1.04, +1.04, 0.0, 0.0]      L=0.2830
+ t=1.4260 FLIGHT out=flight_leg_profile ctrl=[+2.64, -2.64, -2.64, +2.64, 0.0, 0.0]      L=0.2852
+ t=1.4270 FLIGHT out=flight_leg_profile ctrl=[+4.22, -4.22, -4.22, +4.22, 0.0, 0.0]      L=0.2875
+```
+首帧 max|ctrl|=1.037，不顶 clamp。
+
+六、进入飞行前 50 ms max|dphi/dt|
+
+- 1.4566 rad/s（>0.8）。
+
+七、上升→下落切换单步 |Δτ|（专颉 B）
+
+```
+ t=1.5490 rising  out=flight_leg_profile ctrl=[-2.68, +2.68, +2.68, -2.68, 0.0, 0.0]
+ t=1.5500 falling out=flight_leg_profile ctrl=[-6.45, +0.41, +6.45, -0.42, 0.0, 0.0]
+```
+- 单步 |Δτ_leg|=**3.777 N*m**（不再出现 FL8 的 37.3 N*m 量级）→ 通过条件 3 满足。
+
+八、落地时 phi 与到达时刻
+
+- FLIGHT→LANDING t=1.7480：phi=[-0.0658,-0.0660]，`|phi-(-0.1263)|=0.0605 rad` ≤0.15 → 通过条件 1 满足。
+- 飞行全程 phi 范围 R=[-0.1241,+0.1724]、L=[-0.1241,+0.1721]，max|phi-ref|=0.2987（飞行中段偏离、下落段收敛）；下落段 max|dphi/dt|=3.986 rad/s。
+- 其余几何离地窗口（t≈2.2~2.29 的落点后反弹）末帧 phi≈0.20（非主落地，仅记录）。
+
+九、重锚定专项（reset_reference/context/sim.distance/mpc.reference）
+
+- `reset_reference=True` 帧=4：t=0.099(ctx2)、**t=1.859(ctx5)**、t=1.959(ctx2)、t=2.404(ctx7)；
+- 日志：`落地重锚定：reset_reference=True @ t=1.859 s，mpc/estimator/supervisor 已重锚`（**仅一次**，每跳只触发一次生效；启动脉冲被跳过）；
+- record 新增 `distance`：落地前 `sim.distance=-0.08879 m`，结束时 -0.71225 m。
+
+十、状态时间线
+
+- COMPRESS t=1.0000（157）→COMPRESS_BRAKE t=1.1570（159）→THRUST t=1.3160（109）→FLIGHT t=1.4250（323）→LANDING t=1.7480（37）→RECOVER→IDLE；无 ABORT。
+
+十一、轮最大离地间隙（mm）与时刻
+
+- 229.4 mm（0.229439 m），t=1.5990，phase=FLIGHT。低于通过条件 2 的 248 mm（与 FL8 的 228.1 同量级）。
+
+十二、output_source 统计
+
+- flight_leg_profile=595、landing_buffer=37、airborne_zero=12、wbc_update=590、zero_order_hold=1766。
+
+十三、落地：landing_buffer 帧数、落地腿长、最小腿长、轮穿地深度
+
+- landing_buffer=37 帧（t=1.7480~1.7840），缓冲内最小腿长=0.29017 m；
+- post-flight 120 帧最小 wheel_gap=-0.012242 m → 轮穿地 12.24 mm（仅记录）；
+- max leg=0.32924 m、min leg=0.15642 m。
+
+十四、落地后 1 s 姿态与平衡、vx、qx
+
+- post-IDLE 起：vx=-0.3807、qx=-0.0888、distance=-0.0888；
+- 随后 1 s：|vx|max=1.4353、|vx|final=1.3996；qx 范围=[-0.4414,-0.0583]（继续后退约 0.38 m）；
+- |pitch|max=0.5940（出现在 t=2.215，phase=IDLE，**落地后**；FLIGHT 段 max|pitch|=0.3406）、|roll|max=0.0047、|yaw|max=0.0357；最终 base z=0.2148 m。
+- 结论：vx 未收敛、qx 未停（通过条件 5 不满足）。
+
+十五、WBC 速度任务残差与轮力矩
+
+- 落地后 IDLE 帧的 `wbc_task_trace` 中 `forward_velocity` 条目**只有 desired/bias/activation，无 achieved/residual**（未能给出速度任务残差）；轮力矩记在 `ctrl[4:6]`。
+
+十六、assertion_failures
+
+- 0。
+
+十七、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[40,40,40,40,6.00,6.00]；tau_jump=0；feasible 全 True；guard/limit/abort 事件=[]。
+
+十八、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：主落地 t=1.7480 phi=[-0.0658,-0.0660]，|phi-ref|=0.0605 rad ≤0.15。
+2. 通过条件 2 不满足：轮最大间隙 229.4 mm < 248 mm。
+3. 通过条件 3 满足：上升→下落单步 |Δτ_leg|=3.777 N*m（FL8 为 37.3）。
+4. 通过条件 4 不满足：全跑 max|pitch|=0.5940 > FL8 的 0.1233（命中回退判据）；该值出现在 t=2.215 的**落地后** IDLE 阶段，FLIGHT 段为 0.3406。
+5. 通过条件 5 不满足：|vx| 未收敛（final 1.3996），qx 继续后退约 0.38 m；重锚定在 t=1.859 已执行（日志证实）。
+6. 通过条件 6 满足：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0。
+7. 数据事实：下落段手接与落地时 phi 均已达标（3.78 N*m / 0.0605 rad），但抬轮高度仍 229.4 mm，且落地后 pitch 发散到 0.594。只记录，不判断根因。
+
+十九、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL9_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL9_baseline_run01.log
+- 对照：FL8_baseline_run01.json.gz、FL6_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL10（phi 参考改世界系）（2026-10-10）
+
+VP编号：FL10
+
+一、修改文件与函数（PHI_WORLD_REFERENCE、_phi_force 新增 pitch、flight_leg_profile_torque 传参）
+
+1. control.py：`PHI_REFERENCE` 更名为 `PHI_WORLD_REFERENCE`（值 -0.1263 不变）；`_phi_force(leg_position, leg_velocity, pitch)` 新增 `pitch` 入参，参考改为 `phi_body_ref = PHI_WORLD_REFERENCE - pitch`；`flight_leg_profile_torque(...)` 新增 `pitch=0.0` 入参并转传。`KP_PHI=7.0`、`KD_PHI=1.1` 不变；`F_phi` 仍仅下落段生效。
+2. loop.py：飞行剖面调用处传入 `pitch=float(feedback.state.pitch)`。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- 飞行首帧 t=1.4250：phi_body=-0.1241、pitch=-0.0020、世界系=-0.1262（ref=-0.1263），手接首帧不顶 clamp；与代码换算式一致。
+
+四、语法/导入检查
+
+- py_compile `control.py loop.py` 退出码 0。
+
+五、飞行段 phi_body/pitch/世界系三线（含落地时刻值）
+
+```
+ t=1.4250 phi_body=-0.1241 pitch=-0.0020 world=-0.1262 (ref=-0.1263) gap=-0.0002 vz=+2.290
+ t=1.4650 phi_body=-0.1020 pitch=-0.0080 world=-0.1099 gap=0.0252 vz=+1.267
+ t=1.5050 phi_body=-0.0320 pitch=-0.0170 world=-0.0490 gap=0.0941 vz=+0.508
+ t=1.5450 phi_body=+0.0903 pitch=-0.0257 world=+0.0646 gap=0.1756 vz=+0.026
+ t=1.5850 phi_body=+0.1750 pitch=-0.0700 world=+0.1050 gap=0.2261 vz=-0.004
+ t=1.6250 phi_body=+0.1253 pitch=-0.1520 world=-0.0267 gap=0.2178 vz=-0.030
+ t=1.6650 phi_body=+0.0658 pitch=-0.2111 world=-0.1452 gap=0.1637 vz=-0.291
+ t=1.7050 phi_body=+0.0451 pitch=-0.2461 world=-0.2011 gap=0.0880 vz=-0.707
+ t=1.7450 phi_body=+0.0528 pitch=-0.2672 world=-0.2144 gap=0.0089 vz=-1.323
+```
+- 现象：`phi_body` 不再恒定于 -0.1263；世界系在下落段被拉向参考（经 -0.027/-0.145/-0.201/-0.214）。
+
+六、落地时世界系摆角误差
+
+- FLIGHT→LANDING t=1.7500：phi_body=[+0.0554,+0.0552]，pitch=-0.2694，world=[-0.2140,-0.2141]，`|world-(-0.1263)|=0.0877 rad` ≤0.15 → 通过条件 1 满足。
+
+七、轮最大离地间隙（mm）与时刻
+
+- 229.6 mm（0.229627 m），t=1.5990，phase=FLIGHT。低于通过条件 2 的 248 mm（与 FL9 的 229.4 同量级）。
+
+八、FLIGHT 段 max|pitch|
+
+- 0.2690 rad（≤ FL9 的 0.3406）→ 通过条件 3 满足；全跑 max|pitch|=0.8889（出现在落地后，见十）。
+
+九、落地后 1 s pitch/pitch_rate 曲线
+
+- pitch 范围=[-0.8889, +0.0989]；|pitch_rate|max=9.0096 rad/s（落地后发散，仅记录）。
+
+十、落地后 1 s vx/qx
+
+- |vx|max=1.9589、final=1.9463；qx 范围=[-0.9125, -0.1052]（继续后退约 0.8 m）；|roll|max=0.0091、|yaw|max=0.1169；最终 base z=0.2277 m。
+- 重锚定：`reset_reference` 帧=(0.099,ctx2)、(1.861,ctx5)、(1.961,ctx2)、(2.59,ctx6)；实际重锚一次（t=1.861）。
+
+十一、assertion_failures
+
+- 0。
+
+十二、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[40,40,40,40,6.00,6.00]；tau_jump=0；feasible 全 True；guard/limit/nonfinite/abort 事件=[]。
+
+十三、回退判据命中项
+
+- **腿长越界**：min leg=0.10272 m（t=2.5420，phase=IDLE），低于 leg_length_min=0.114；出现在落地后 IDLE 阶段（非飞行段），故未触发状态机 ABORT。
+- 落地后 pitch 发散到 -0.8889（FL9 为 0.594），全跑 max|pitch| 劣于 FL9。
+
+十四、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：落地世界系 |phi_body+pitch-(-0.1263)|=0.0877 rad ≤0.15（FL9 世界系误差 0.29）。
+2. 通过条件 2 不满足：轮最大间隙 229.6 mm < 248 mm。
+3. 通过条件 3 满足：FLIGHT 段 max|pitch|=0.2690 ≤ FL9 的 0.3406。
+4. 通过条件 4 满足：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0。
+5. 但命中回退判据“腿长越界”（min leg 0.10272 < 0.114，t=2.5420，IDLE）；且落地后 pitch/vx 比 FL9 更差（pitch -0.8889、vx final 1.946、qx 后退约 0.8 m），仅记录。
+6. 本轮只记录数据，不判断根因，不做修复与调参。
+
+十五、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL10_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL10_baseline_run01.log
+- 对照：FL9_baseline_run01.json.gz、FL6_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL11（修正世界系腿摆角符号）（2026-10-10）
+
+VP编号：FL11
+
+一、修改文件与函数（_phi_force 符号、判据口径、landing_buffer 叠加 F_phi）
+
+1. control.py：`_phi_force` 参考由 `PHI_WORLD_REFERENCE - pitch` 改为 **`PHI_WORLD_REFERENCE + pitch`**（由 `phi_world = phi_body - pitch` 反解）。PHI_WORLD_REFERENCE=-0.1263、KP_PHI=7.0、KD_PHI=1.1 不变。
+2. control.py：`landing_buffer_torque(...)` 新增 `pitch=0.0`，叠加 `F_phi`（同一组 PD、同一世界系参考）。
+3. loop.py：`landing_buffer` 分支传`pitch=float(feedback.state.pitch)`。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- 飞行首帧 t=1.4250：phi_body=-0.1241、pitch=-0.0020、world=phi_body-pitch=-0.1221；手接首帧不顶 clamp。
+
+四、语法/导入检查
+
+- py_compile `control.py loop.py` 退出码 0。
+
+五、坐标变换专项（解析式 vs 几何式）
+
+在飞行段取 5 帧（FL10 数据的 qpos/qvel），用 `data.xpos` 髋→轮向量算 `atan2(rx,-rz)`：
+
+```
+ t=1.425 phi_body=-0.1241 pitch=-0.0020 analytic=phi_body-pitch=-0.1221 geo=[-0.1221,-0.1221] diff=[-3.9e-06,+1.2e-05]
+ t=1.490 phi_body=-0.0635 pitch=-0.0136 analytic=-0.0499 geo=[-0.0499,-0.0500] diff=[-1.3e-05,+3.6e-05]
+ t=1.555 phi_body=+0.1277 pitch=-0.0289 analytic=+0.1566 geo=[+0.1567,+0.1565] diff=[-6.7e-05,+1.9e-04]
+ t=1.620 phi_body=+0.1346 pitch=-0.1424 analytic=+0.2770 geo=[+0.2771,+0.2765] diff=[-1.2e-04,+4.3e-04]
+ t=1.685 phi_body=+0.0520 pitch=-0.2308 analytic=+0.2829 geo=[+0.2830,+0.2825] diff=[-9.0e-05,+3.2e-04]
+```
+- 结论：解析式 `phi_body - pitch` 与几何式一致（最大差 4.3e-04 rad ≈ 0.025°；差非常数、随位形微变，可能是髀体原点与腿运动学参考点的安装差）→ **符号 `phi_world = phi_body - pitch` 得到证实**。
+
+六、飞行段 phi_body/pitch/世界系三线（含落地时刻值）
+
+```
+ t=1.4250 phi_body=-0.1241 pitch=-0.0020 world=-0.1221 gap=-0.0002 vz=+2.290
+ t=1.4750 phi_body=-0.0887 pitch=-0.0102 world=-0.0785 gap=0.0398 vz=+1.043
+ t=1.5250 phi_body=+0.0212 pitch=-0.0215 world=+0.0427 gap=0.1347 vz=+0.229
+ t=1.5750 phi_body=+0.1672 pitch=-0.0536 world=+0.2208 gap=0.2190 vz=-0.003
+ t=1.6250 phi_body=+0.0924 pitch=-0.1704 world=+0.2628 gap=0.2179 vz=-0.033
+ t=1.6750 phi_body=-0.0525 pitch=-0.2829 world=+0.2303 gap=0.1447 vz=-0.342
+ t=1.7250 phi_body=-0.1709 pitch=-0.3849 world=+0.2140 gap=0.0406 vz=-0.907
+```
+
+七、落地时世界系摆角误差
+
+- FLIGHT→LANDING t=1.7450：phi_body=[-0.2119,-0.2121]，pitch=-0.4271，world=phi_body-pitch=[+0.2152,+0.2150]，`|world-(-0.1263)|=0.3415 rad` >0.15 → 通过条件 2 不满足。（对照：按正确口径重算 FL10 为 0.41）
+
+八、接地后 0.2 s 内 phi 曲线
+
+- phi_body R：-0.2119 → +0.3061（区间 [-0.2253,+0.3061]），即触地后 0.2 s 内仍增大约 +0.52 rad → 仍有明显甩动（FL10 为 +0.055→+0.66）。
+- landing_buffer 只有 34 帧（t=1.7450~1.7780，约 33 ms），其后 WBC 接管、`F_phi=0`。
+
+九、轮最大离地间隙（mm）与时刻
+
+- 229.3 mm（0.229346 m），t=1.5990，phase=FLIGHT。低于通过条件 4 的 248 mm（与 FL10 的 229.6 同量级）。
+
+十、FLIGHT 段 max|pitch|
+
+- 0.4250 rad（FL10 为 0.2690）→ 通过条件 5 不满足（变差）；全跑 max|pitch|=0.7718。
+
+十一、落地后 1 s pitch/pitch_rate、vx/qx、min leg
+
+- pitch 范围=[-0.7718,-0.0596]；|pitch_rate|max=6.6368；
+- |vx|max=1.0476、**final=0.0110**（vx 收敛到 0 附近，比 FL10 的 1.946 明显改善）；
+- qx 范围=[-0.3747,-0.0673]（仍后退约 0.31 m）；min leg=0.21229（**未越界**）；
+- |roll|max=0.0581、|yaw|max=0.5313；最终 base z=0.1254 m（未站立）。
+
+十二、assertion_failures
+
+- 0。
+
+十三、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[40,40,40,40,6.00,6.00]；tau_jump=0；feasible 全 True；guard/limit/nonfinite/abort 事件=[]。
+- min leg=0.15612 m（全程 >= leg_length_min=0.114，**未命中越界回退判据**）。
+- output_source：flight_leg_profile=524、landing_buffer=34、airborne_zero=273、wbc_update=543、zero_order_hold=1626。
+
+十四、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：解析式 `phi_body-pitch` 与几何式一致（差 ≤4.3e-04 rad），符号修正正确。
+2. 通过条件 2 不满足：落地世界系误差 0.3415 rad >0.15。
+3. 通过条件 3 不满足：接地后 0.2 s 内 phi_body 仍由 -0.2119 增到 +0.3061（+0.52 rad）；缓冲段 F_phi 仅作用 33 ms。
+4. 通过条件 4 不满足：轮最大间隙 229.3 mm < 248 mm。
+5. 通过条件 5 不满足：FLIGHT 段 max|pitch|=0.4250 > FL10 的 0.2690。
+6. 通过条件 6 满足：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0；min leg 未越界。
+7. 数据事实：符号修好后落地世界系误差略降（0.41→0.34）但仍未达标；FLIGHT pitch 反而变大；vx 反而收敛（final 0.011）。只记录，不判断根因。
+
+十五、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL11_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL11_baseline_run01.log
+- 对照：FL10_baseline_run01.json.gz、FL9_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL12（c=0 干净版 + 系数测定专项）（2026-10-10）
+
+VP编号：FL12
+
+一、修改文件与函数（FEEDFORWARD_COUPLING、KP/KD_PHI、phi_eq 角度前馈）
+
+1. control.py：`KP_PHI=20.9`、`KD_PHI=1.67`（用户批准）；新增 `_phi_eq(L)=PHI_WORLD_REFERENCE+0.97*(L-0.28)`（角度前馈；`phi_eq(0.14)=-0.2621`、`phi_eq(0.28)=-0.1263`，与文档表一致）；`_phi_force(..., l_ref)` 世界系参考改为 `phi_eq(l_ref)`（`l_ref=None` 退常数）。
+2. 力前馈 `F_phi += FEEDFORWARD_COUPLING*F_L`：按排查agent指示，**系数未定前不填**；本版 `FEEDFORWARD_COUPLING=0.0`（前馈关闭）。
+3. loop.py：不改（仍传 `pitch`）；landing_buffer 仍用常数世界系参考、不加前馈。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- 手接首帧不顶 clamp；`phi_eq` 与文档表吐合（0.14→-0.2621、0.28→-0.1263）。
+
+四、语法/导入检查
+
+- py_compile `control.py` exit=0。
+
+五、前馈系数测定专项（七.2；不跑整跳）
+
+对飞行段不同 L 位形给 `F_L=100 N` 阶跃（两腿对称施加），由 `qacc` 投影测 `phidd`：
+
+| L[m] | vz | A10=d(phidd)/dF_L | A11=d(phidd)/dF_phi | c_opt=-A10/A11 | \|phidd\| 无 | \|phidd\| c_opt |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.1697 | -0.01 | +1.237 | +21.33 | **-0.0580** | 123.7 | 0.00 |
+| 0.1860 | -0.05 | +1.301 | +20.62 | **-0.0631** | 130.1 | 0.00 |
+| 0.2303 | +0.06 | +1.061 | +19.48 | **-0.0545** | 106.1 | 0.00 |
+| 0.2816 | -0.61 | +0.948 | +18.22 | **-0.0521** | 94.8 | 0.00 |
+| 0.3132 | -0.97 | +0.808 | +17.68 | **-0.0457** | 80.8 | 0.00 |
+| 0.3284 | +1.32 | +0.644 | +17.53 | **-0.0367** | 64.4 | 0.00 |
+
+- **待确认 k（对称双施加口径）**：c_opt 均为负，量级 **0.037~0.063（均值≈-0.052）**。
+- 对照文档：文档给 **+0.15**（符号与量级均不符）。文档 `F_phi += 0.15*F_L` 在本模型下使 |phidd| 由 113→412（3.7x 变差）。
+- 单腿口径复核：c_opt≈-0.083~-0.094（供交叉参照）。
+
+六、角度前馈专项（七.3）
+
+飞行段四线（L/phi_eq(L)/phi_body/pitch/世界系）：phi_eq 随 L 变化（不再恒 -0.1263），例：
+```
+ t=1.4250 L=0.2830 phi_eq=-0.1234 phi_body=-0.1241 pitch=-0.0020 world=-0.1221
+ t=1.5250 L=0.2585 phi_eq=-0.1472 phi_body=+0.0212 pitch=-0.0215 world=+0.0427
+ t=1.5750 L=0.1796 phi_eq=-0.2237 phi_body=+0.1253 pitch=-0.0770 world=+0.2023
+ t=1.6250 L=0.1725 phi_eq=-0.2306 phi_body=-0.1250 pitch=-0.2889 world=+0.1640
+ t=1.7250 L=0.3013 phi_eq=-0.1057 phi_body=-0.5314 pitch=-0.5621 world=+0.0308
+```
+
+七、落地时世界系摆角误差、飞行段峰值
+
+- FLIGHT→LANDING t=1.7410：phi_body=[-0.5662,-0.5662]、pitch=-0.5932、world=+0.0270，`|world-(-0.1263)|=0.1533 rad`（略超 0.15 → 通过条件 2 不满足）。
+- FLIGHT 段 max|world|=0.2092 rad（≤ FL11 的 0.27 → 通过条件 3 满足）。
+
+八、dphi/dt 过零次数与衰减
+
+- FLIGHT 段 dphi/dt 过零次数=1；|dphi/dt|max=6.135 rad/s；post-touch 0.2 s phi_body R 由 -0.5662 变到 -0.1917（+0.37）。
+
+九、轮最大离地间隙（mm）与时刻
+
+- 227.5 mm（0.227489 m），t=1.5990，phase=FLIGHT。低于 248 mm（与 FL11 的 229.3 同量级）→ 不满足。
+
+十、FLIGHT 段 max|pitch|
+
+- 0.5913 rad（FL10 为 0.2690）→ 不满足；全跑 max|pitch|=0.7143。
+
+十一、落地后 1 s pitch/pitch_rate、vx/qx、min leg
+
+- pitch 范围=[-0.7143, +0.0049]；|pitch_rate|max=4.9869；
+- |vx|max=1.1889、final=1.1466（未收敛）；qx 范围=[-0.9286,-0.0363]（后退约 0.89 m）；
+- min leg=0.21005 m；|roll|max=0.0015、|yaw|max=0.1229；最终 base z=0.2248 m。
+- 全跑 min leg=0.15642 m（**未越界**）。
+
+十二、assertion_failures
+
+- 0。
+
+十三、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[36.34,36.06,36.34,36.06,6.00,5.99]；tau_jump=0；feasible 全 True；guard/limit/nonfinite/abort 事件=[]。
+- output_source：flight_leg_profile=316、landing_buffer=28、wbc_update=664、zero_order_hold=1992。
+
+十四、结论（只写数据支持的现象）
+
+1. 前馈系数测定专项给出待确认 k：对称口径 c_opt≈**-0.052**（范围 -0.037~-0.063）；与文档 +0.15 不符；本版按指示用 c=0。
+2. 通过条件 2：落地世界系误差 0.1533 rad（略超 0.15）。
+3. 通过条件 3：FLIGHT 世界系峰值 0.2092 ≤0.27 → 满足。
+4. 通过条件 5：FLIGHT max|pitch|=0.5913 > FL10 的 0.2690 → 不满足。
+5. 通过条件 6：轮间隙 227.5 mm <248 mm → 不满足。
+6. 通过条件 7：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0；min leg 未越界 → 满足。
+7. 本轮只记录数据，不判断根因。
+
+十五、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL12_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL12_baseline_run01.log
+- 对照：FL11_baseline_run01.json.gz、FL10_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认 k 后重跑。
+
+署名：测试agent-ds

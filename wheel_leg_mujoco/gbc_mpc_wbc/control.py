@@ -44,13 +44,24 @@ FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
 FLIGHT_RETRACT_MARGIN = 0.005     # [m]
 # FL4（2026-10-09，用户批准）：上升收腿的参考速率限幅与力矩上限。
 FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s] 收腿参考速率上限
+FLIGHT_EXTEND_RATE_LIMIT = 1.5    # [m/s] 伸腿参考速率上限（FL9，与收腿同值同理由）
 FLIGHT_RETRACT_TORQUE_LIMIT = 36.0  # [N*m] 上升收腿力矩上限（=40 的 90%）
+# FL10（2026-10-10）：phi 参考改世界系。物理含义：与站立静平衡一致（质心落在轮接触点上）。
+PHI_WORLD_REFERENCE = -0.1263   # [rad] 世界系摆角参考（=phi_eq(0.28)）
+KP_PHI = 20.9             # [N*m/rad] FL12 新增益（用户批准）
+KD_PHI = 1.67             # [N*m*s/rad] FL12 新增益（用户批准）
+# FL12（2026-10-09）：腿摆角耦合前馈系数与静平衡角度前馈。
+# 系数专项实测（对称双施加，L=0.170~0.328）：c_opt=-A10/A11 均为负，量级 0.037~0.063（均值≈-0.052）。
+# 文档给 +0.15（符号与量级均不符），待排查agent确认后再填；本版先置 0（前馈关闭）。
+FEEDFORWARD_COUPLING = 0.0       # [-] F_phi += c*F_L（待确认，当前关闭）
+PHI_EQ_SLOPE = 0.97             # [rad/m] phi_eq 斜率（文档离线拟合）
+PHI_EQ_ANCHOR_LENGTH = 0.28     # [m] phi_eq 锚点腿长
 
-# FL6（2026-10-09，用户批准）：飞行段腿摆角 phi 稳定。
-# kp=I*omega^2, kd=I*2*zeta*omega，I≈0.045 kg·m²（phi 方向有效惯量），zeta=1，omega=2π*2 rad/s。
-PHI_REFERENCE = -0.1263   # [rad] 摆角参考（标称共模摆角）
-KP_PHI = 7.0              # [N*m/rad]
-KD_PHI = 1.1              # [N*m*s/rad]
+
+def _phi_eq(l_ref) -> float:
+    """静平衡摆角（世界系）随腿长参考：``phi_eq(L) = PHI_WORLD_REFERENCE + 0.97*(L-0.28)``。
+    拟合区间只到 L=0.14；L=0.119 属外推（已知限制）。"""
+    return PHI_WORLD_REFERENCE + PHI_EQ_SLOPE * (float(l_ref) - PHI_EQ_ANCHOR_LENGTH)
 
 
 def _leg_axis_torque(dynamics, force_per_leg) -> np.ndarray:
@@ -94,12 +105,17 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
     return np.asarray(forces, dtype=float)
 
 
-def _phi_force(leg_position, leg_velocity) -> np.ndarray:
-    """FL6 飞行段摆角 PD：``F_phi = kp_phi*(phi_ref-phi) - kd_phi*phi_dot``。"""
+def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
+    """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
+    ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
+    ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
+    ``l_ref=None`` 时退回常数 ``PHI_WORLD_REFERENCE``。"""
+    world_ref = PHI_WORLD_REFERENCE if l_ref is None else _phi_eq(l_ref)
+    phi_body_ref = world_ref + float(pitch)
     forces = []
     for side in range(2):
         index = 2 * side + 1
-        forces.append(KP_PHI * (PHI_REFERENCE - float(leg_position[index]))
+        forces.append(KP_PHI * (phi_body_ref - float(leg_position[index]))
                       - KD_PHI * float(leg_velocity[index]))
     return np.asarray(forces, dtype=float)
 
@@ -114,57 +130,80 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
 
 def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
                               leg_length_min, leg_length_max, nominal_length,
-                              retract_state=None, dt=0.0):
-    """FL3/FL4/FL7 飞行腿剖面：上升（vz>0）收腿抬轮；下落（vz<0）向 L0 伸腿。
+                              retract_state=None, dt=0.0, pitch=0.0):
+    """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
 
-    FL7（方案 A，手接连续）：上升段状态为二元组 ``(L_ref, v_ref, L_entry, ref_accel)``；
-    首次进飞行或由下落段重新进上升段时捕获实测状态 ``L_ref=L_entry=max(L_R,L_L)``、
-    ``v_ref=Ldot_entry``，因此手接第一步 ``F_L = KP*(L_ref-L)+KD*(v_ref-Ldot) ≈ 0``（不再阶跃）。
-    之后 ``v_ref`` 以 ``ref_accel`` 向 ``-RATE_LIMIT`` 收敛，``L_ref += v_ref*dt``，
-    且 ``L_ref = min(L_ref, L_entry)`` 防止参考继续伸长。下落段 ``L_ref=L0, v_ref=0``（与原行为一致）。
-    返回 ``(torque, new_retract_state)``。
+    状态为五元组 ``(mode, L_ref, v_ref, L_entry, ref_accel)``，``mode`` ∈ {"rising","falling"}。
+    - 上升：参考自首步起按 RATE 下收（无上穿挡位）；F_phi=0；力矩 clamp 36。
+    - 下落（FL9）：伸腿参考速率受限（L_ref 以 v_ref 向 nominal 收敛，v_ref 由 ref_accel 斜坡）；
+      模式切换时捕获上一状态保持 (L_ref,v_ref) 连续；此段启用 `F_phi`（phi PD）。
+    返回 ``(torque, new_state)``。
     """
     lo = float(leg_length_min)
     hi = float(leg_length_max)
-    if float(vertical_velocity) < 0.0:
-        l_ref = min(max(float(nominal_length), lo), hi)
-        torque = _leg_wrench_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity),
-                                    _phi_force(leg_position, leg_velocity))
-        return torque, None
-    target = lo + FLIGHT_RETRACT_MARGIN
-    if retract_state is None:
-        larger = 0 if float(leg_position[0]) >= float(leg_position[2]) else 2
-        l_entry = max(float(leg_position[0]), float(leg_position[2]))
-        v_ref = float(leg_velocity[larger])
-        l_ref = l_entry
-        t_apex = max(float(vertical_velocity) / GRAVITY, 1.0e-6)
-        ref_accel = (abs(v_ref) + FLIGHT_RETRACT_RATE_LIMIT) / t_apex
+    target_retract = lo + FLIGHT_RETRACT_MARGIN
+    target_extend = min(max(float(nominal_length), lo), hi)
+    falling = float(vertical_velocity) < 0.0
+    want_mode = "falling" if falling else "rising"
+    larger = 0 if float(leg_position[0]) >= float(leg_position[2]) else 2
+    if retract_state is not None and str(retract_state[0]) == want_mode:
+        mode = want_mode
+        l_ref = float(retract_state[1])
+        v_ref = float(retract_state[2])
+        l_entry = float(retract_state[3])
+        ref_accel = float(retract_state[4])
     else:
-        l_ref, v_ref, l_entry, ref_accel = (float(retract_state[0]), float(retract_state[1]),
-                                            float(retract_state[2]), float(retract_state[3]))
+        # 捕获：首次进飞行，或上升↔下落切换。保持 (L_ref,v_ref) 连续以消除单步阶跃。
+        l_entry = max(float(leg_position[0]), float(leg_position[2]))
+        if retract_state is not None:
+            l_ref = float(retract_state[1])
+            v_ref = float(retract_state[2])
+            ref_accel = float(retract_state[4])
+        else:
+            l_ref = l_entry
+            v_ref = float(leg_velocity[larger])
+            t_apex = max(abs(float(vertical_velocity)) / GRAVITY, 1.0e-6)
+            ref_accel = (abs(v_ref) + FLIGHT_RETRACT_RATE_LIMIT) / t_apex
+        mode = want_mode
+    step_limit = ref_accel * float(dt)
+    if mode == "rising":
         delta = -FLIGHT_RETRACT_RATE_LIMIT - v_ref
-        step = ref_accel * float(dt)
-        if abs(delta) <= step:
+        if abs(delta) <= step_limit:
             v_ref = -FLIGHT_RETRACT_RATE_LIMIT
         else:
-            v_ref += step * (1.0 if delta > 0 else -1.0)
-        l_ref = min(l_ref + v_ref * float(dt), l_entry)
-    l_ref = min(max(l_ref, target), hi)
+            v_ref += step_limit * (1.0 if delta > 0 else -1.0)
+        l_ref = max(target_retract, l_ref - FLIGHT_RETRACT_RATE_LIMIT * float(dt))
+    else:
+        delta = FLIGHT_EXTEND_RATE_LIMIT - v_ref
+        if abs(delta) <= step_limit:
+            v_ref = FLIGHT_EXTEND_RATE_LIMIT
+        else:
+            v_ref += step_limit * (1.0 if delta > 0 else -1.0)
+        l_ref = min(target_extend, l_ref + v_ref * float(dt))
+    l_ref = min(max(l_ref, lo), hi)
     forces = _pd_force_v(l_ref, v_ref, leg_position, leg_velocity)
-    torque = _leg_wrench_torque(dynamics, forces, _phi_force(leg_position, leg_velocity))
-    torque = np.clip(torque, -FLIGHT_RETRACT_TORQUE_LIMIT, FLIGHT_RETRACT_TORQUE_LIMIT)
-    return torque, (l_ref, v_ref, l_entry, ref_accel)
+    if falling:
+        phi = _phi_force(leg_position, leg_velocity, pitch, l_ref) + FEEDFORWARD_COUPLING * forces
+    else:
+        phi = np.zeros(2)
+    torque = _leg_wrench_torque(dynamics, forces, phi)
+    if mode == "rising":
+        torque = np.clip(torque, -FLIGHT_RETRACT_TORQUE_LIMIT, FLIGHT_RETRACT_TORQUE_LIMIT)
+    return torque, (mode, l_ref, v_ref, l_entry, ref_accel)
 
 
 def landing_buffer_torque(dynamics, leg_position, leg_velocity,
-                          leg_length_min, leg_length_max, nominal_length) -> np.ndarray:
-    """FL3 落地缓冲：同一组腿长 PD 对 L0 做弹簧阻尼（受压时向 L0 推回）。
+                          leg_length_min, leg_length_max, nominal_length,
+                          pitch=0.0) -> np.ndarray:
+    """FL3/FL9 落地缓冲：同一组腿长 PD 对 L0 做弹簧阻尼（受压时向 L0 推回）。
 
     说明：文档只给“从 L0 压缩到目标压缩量”与同一组 PD，未明写 l_ref；按弹簧阻尼
     缓冲的物理，l_ref 取标称 L0（若取 0.197 会产生向下的腿力，与缓冲相反）。
+    FL11：叠加 `F_phi`（同一组 PD、同一世界系参考），避免接地后 phi 无控被地面带着转。
     """
     l_ref = min(max(float(nominal_length), float(leg_length_min)), float(leg_length_max))
-    return _leg_axis_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity))
+    return _leg_wrench_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity),
+                              _phi_force(leg_position, leg_velocity, pitch))
 
 
 @dataclass(frozen=True)

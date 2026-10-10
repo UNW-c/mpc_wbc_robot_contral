@@ -85,7 +85,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     thrust_applied_last = False
     previous_com_xz = None
     previous_com_time = None
-    flight_leg_ref = None        # FL4：飞行上升收腿的限速参考（跨帧保持）
+    flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+    landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
     feedback = None              # 采样级：最近一拍反馈
     solution = None              # MPC 级：最近一次解（WBC 与记录共用）
     reason = None
@@ -139,6 +140,21 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         feedback = sampler.update(distance=sim.distance, phase_hint=phase_hint)
         if not feedback.decision.motion_enabled:
             solution = None
+        # FL9（2026-10-09）：落地重锚定修正。只对“跳过一次后落地”的重锚生效（跳过启动首帧
+        # 的 GROUND 脉冲），且每跳只触发一次。重锚 MPC planner + GroundContactEstimator +
+        # ControlSupervisor 的内部状态（BodyStateKalman 不在本仿真路径）。
+        if jump_command is not None and jump_command.phase.value == "FLIGHT":
+            landing_reanchor_pending = True
+        if (flight_leg_extend and landing_reanchor_pending
+                and feedback.decision.reset_reference):
+            from dataclasses import replace as _replace
+            land_state = _replace(feedback.state, position=sim.distance)
+            sim.mpc.reset(land_state)
+            sim.contact_estimator.reset()
+            sim.supervisor.reset()
+            landing_reanchor_pending = False
+            _LOGGER.info("落地重锚定：reset_reference=True @ t=%.3f s，mpc/estimator/supervisor 已重锚",
+                         float(d.time))
         # ---------------- 跳跃级：每物理步推进一次（纯计算，只用测量量）----------------
         previous_jump_phase = None if jump_command is None else jump_command.phase.value
         jump_wheel_gap = None
@@ -318,13 +334,15 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             torque = landing_buffer_torque(sim.dyn, leg_now, leg_rate_now,
                                            sim.jump.config.leg_length_min,
                                            sim.jump.config.leg_length_max,
-                                           sim.jump.config.leg_length_nominal)
+                                           sim.jump.config.leg_length_nominal,
+                                           pitch=float(feedback.state.pitch))
         elif flight_profile:
             torque, flight_leg_ref = flight_leg_profile_torque(
                 sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
                 sim.jump.config.leg_length_nominal,
-                retract_state=flight_leg_ref, dt=float(m.opt.timestep))
+                retract_state=flight_leg_ref, dt=float(m.opt.timestep),
+                pitch=float(feedback.state.pitch))
         elif flight_retract:
             leg_now = sim.dyn.leg_state()
             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
@@ -496,6 +514,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "qacc": np.asarray(d.qacc, dtype=float).copy(),
                 "ctrl": np.asarray(d.ctrl, dtype=float).copy(),
                 "com_xz": com[[0, 2]],
+                "distance": float(sim.distance),
                 "com_vxz": com_velocity_xz.copy(),
                 "wheel_hub_xz": hub_xz,
                 "qfrc_applied": np.asarray(d.qfrc_applied[:6], dtype=float).copy(),

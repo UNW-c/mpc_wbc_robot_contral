@@ -2450,3 +2450,624 @@ ctrl 与 raw、tau_jump：
 是否允许进入下一轮：
 
 ============================================================
+
+FL8：撤挡位恢复收腿 + 上升/下落手接全面连续化 + 落地重锚定（问题排查agent，2026-10-09）
+
+一、背景（FL7 run01 实测 + 离线复算）
+
+FL7 命中回退判据：轮最大间隙 248.7 → 131.6 mm。原因在数据里直接可见：
+
+  t=1.440 FLIGHT L=0.3139 phi=-0.1229 pitch=-0.0033 gap=+0.0014
+  t=1.500 FLIGHT L=0.3511 phi=-0.0999 pitch=-0.0295 gap=+0.0467
+  t=1.620 FLIGHT L=0.2906 phi=-0.0868 pitch=-0.1714 gap=+0.1316
+  t=1.760 FLIGHT L=0.2804 phi=-0.1169 pitch=-0.3600 gap=+0.0128
+
+腿全程未收到 0.28 以下（最小值 0.2804）。根因：FL7 加的“参考不得上穿入口腿长”挡位
+与 A_REF 斜坡叠加，参考要 0.14 s 才归零，等于把整个上升段吃完；参考刚开始下走，vz 已转负，
+剖面又切到“伸回 L0”。抬轮完全未发生。
+
+离线复算（临时脚本，从 FL6 t=1.424 手接前一帧出发，同一组剖面 + phi PD）：
+
+  变体                                      首步腿力矩   前 50 ms max|dphi/dt|   腿长终点
+  现行剖面（FL6）                            +36.00（顶限） 1.738 rad/s            0.2942 m
+  方案 A + 挡位（= FL7 实际）                +0.34          0.684                 0.3083 m（无收腿）
+  撑挡位 + 参考首步下收                      +1.01          0.795                 0.1769 m（收腿恢复）
+
+结论：只要撑掉挡位、让参考从首步就按 RATE 下收，就能同时拿到“手接平滑”与“收腿恢复”。
+但暴露出第二个阶跃：上升段转下落段时参考从 0.177 直接跳到 0.28，单步 Δτ=52 N·m（t=0.146）。
+FL6 里同样有这个下伸腿阶跃，时间点与 pitch 开始上涨重合，一并处理。
+
+另：`grep -rn "\.reset(" wheel_leg_mujoco/gbc_mpc_wbc/*.py` 返回空——
+`feedback.decision.reset_reference` 与任何 `.reset()` 在控制回路里**从未被调用**，
+MPC 的 planner 位置锚定与估计器位置在跳跃后仍是旧值，与“落地后持续后退 0.5 m、vx 不收敛”吐合。
+
+二、本轮改动（四项，不动任何增益/限幅）
+
+1. **删除滞空 phi 控制器**（`control.py`）：删除 `PHI_REFERENCE`、`KP_PHI`、`KD_PHI`、`_phi_force`；
+   `flight_leg_profile_torque` 改回纯 `F_L`（`F_phi=0`，同 `flight_leg_retract_torque`）。
+   依据：用户 2026-10-09 明确“整组删掉”；且手接阶跃消除后，FL5 那种 phi 发散尚未确认仍存在。
+2. **手接连续化（上升段）**（`control.py`）：撑掉“参考不得上穿入口腿长”挡位；
+   参考从首步起按 `FLIGHT_RETRACT_RATE_LIMIT` 下收（`L_ref = max(target, L_entry - RATE*(step+1)*dt)`）；
+   保留 `(L_ref, v_ref)` 二元状态与 `FLIGHT_RETRACT_REF_ACCEL` 斜坡，力公式不变。
+3. **手接连续化（下落段）**（`control.py`）：下落伸腿改为**速率受限参考**，
+   不再从当前值直接跳到 nominal；即 `L_ref` 以 `FLIGHT_EXTEND_RATE_LIMIT` 向上收敛到 nominal，
+   `v_ref` 同样以斜坡向 0 收敛。目的：消除 t=0.146 那个 52 N·m 单步阶跃。
+   **注：这一项只有离线依据（同一脚本观察到阶跃），没有单独扫过斜坡值；若你希望先只改上升段，
+   告我一声，我把 3 拆成单独一轮。**
+4. **落地重锚定**（`loop.py` + `Algorithm/estimator.py`）：
+   a) 消费 `feedback.decision.reset_reference`（supervision 在模式回到 GROUND 时置真）；
+      为真时调用 `mpc.reset(state)`（`Algorithm/mpc/controller.py::reset`，全重置，不传 soft）。
+   b) 给 `BodyStateKalman` 新增 `reset(state)`：重锚 `x/y/forward_path` 与前进速度估计，
+      清 covariance；在落地（LANDING→RECOVER 或 IDLE 首次）时调用。
+   c) 同时调 `supervision` 的 `reset()`（如接口允许），否则至少保证 `reset_reference` 每跳只触发一次。
+   说明：“连 WBC 一起重置”的落地方式：`Algorithm/wbc/*` 三个求解器（weighted/sns/task_qp）无内部状态，
+   有状态的是估计器与 supervision，已由 b/c 覆盖；不新增 WBC 内部状态。
+
+三、不变
+
+- 收腿速率 1.5 m/s、收腿力矩上限 36 N·m、腿关节限幅 40、轮限幅 6。
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动。
+- 落地缓冲、相位机、开关集不变；轮穿地仍仅记录。
+- pitch 控制**本轮不做**（用户已同意后置到下一段）。
+
+四、保险与回退
+
+- 回退 = git revert 或关闭开关。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；轮最大间隙仍 <200 mm；
+  或手接 dphi/dt 反而大于 FL6 的 1.19。
+
+五、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL8 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL6 run01（高度基准）与 FL7 run01（手接基准）。
+
+六、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **两个手接帧专项**各打 30 个物理步：
+   a) THRUST→FLIGHT：首步腿力矩不顶 clamp；
+   b) 上升→下落切换：单步 `|Δτ|` 不再出现 50 N·m 量级；
+   两项都需给 `ctrl`、`leg_position`、`leg_velocity`、`leg_state`、`output_source`。
+3. **重锚定专项**：打出落地前后各 1 s 的 `decision.reset_reference`、`context`、
+   `mpc_called`、`mpc_solution.reference`、估计器 `forward_velocity`、`forward_path`，
+   验证重锚确实在落地时发生且每跳只触发一次。
+
+七、通过条件
+
+1. 轮最大离地间隙 **≥248 mm**（回归到 FL6 水平，不能命中回退判据）；
+2. 手接后前 50 ms `max|dphi/dt| ≤ 0.8 rad/s`（依据：离线 0.795）；
+3. 上升→下落切换处单步 `|Δτ|` 不再出现 50 N·m 量级；
+4. 落地后 1 s：`|vx|` 收敛到 0 附近（|vx|max 不大于落地瞬间值的 1/2）、`qx` 不再单调后退；
+5. 无 joint_limit / nonfinite_state / ABORT；无断言失败。
+
+八、必须报告
+
+- 两个手接帧专项数据；全程 phi/dphi/dt/pitch 时间线；
+- 轮最大间隙与时刻；相位时间线；output_source 统计；
+- 重锚定专项（六.3）数据；
+- 落地：landing_buffer 帧数、落地腿长、最小腿长、轮穿地（仅记录）；
+- 落地后 1 s 姿态/平衡/vx/qx；assertion_failures。
+
+九、反馈格式
+
+VP编号：FL8
+修改文件与函数（phi 控制器删除、上升/下落手接、重锚定）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+手接帧专项 A（THRUST→FLIGHT）与 B（上升→下落）：
+进入飞行前 50 ms max|dphi/dt|：
+上升→下落切换单步 |Δτ|：
+重锚定专项（reset_reference/context/mpc.reference/估计器）：
+状态时间线：
+轮最大离地间隙（mm）与时刻：
+output_source 统计：
+落地：landing_buffer 帧数、落地腿长、最小腿长、轮穿地深度：
+落地后 1 s 姿态与平衡、vx、qx：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL9：下落段 phi 回复 + 下落段手接 + 落地重锚定修正（问题排查agent，2026-10-09）
+
+一、背景（FL8 run01 实测 + 离线复算）
+
+FL8 实测：phi 在收腿段被放大（dphi/dt 峰值 +3.82），伸腿段 dphi/dt 仍为正（+0.4~+1.3），
+phi 从 -0.122 单调涨到落地 +0.506，腿以偏角 36° 落地。
+
+   t      L       dL/dt    phi     dphi/dt
+  1.440  0.3123   0.00   -0.1217   0.00
+  1.560  0.1984  -1.63   +0.1468  +3.82
+  1.600  0.1769  -0.16   +0.2729  +2.71
+  1.640  0.2118  +1.20   +0.3143  +0.53
+  1.780  0.2779  +0.07   +0.4561  +1.31
+  1.800  0.2722  -0.28   +0.5064  +2.51
+
+结论：收腿段在“把腿往髋部收”，腿绕髋的转动惯量下降，飞行中角动量守恒下已有的摆角速度被放大；
+伸腿段只是反过程（惯量变大、速度被压小），**只能减速、不能反向**，因为没有任何回复力矩。
+对照 FL6（有 phi PD）：落地 phi=-0.126（垂直）；FL8（删掉控制器）：+0.506。
+所以“让下落伸腿段自然把摆角收回来”在纯腿长驱动下做不到，必须有主动作用。
+
+二、phi 控制范围离线对比（从 FL8 t=1.424 手接前一帧出发，同一腿长剖面）
+
+  phi 控制范围         落地时 phi   落地时 pitch   max|pitch|   轮最大间隙   腿长 min
+  无（FL8）              +0.5949      -0.0013        0.0013      259.4 mm     0.1363
+  全段（FL6）            -0.1428      -0.0015        0.0015      245.6 mm     0.1331
+  仅下落段（FL9）        +0.0251      -0.0015        0.0015      256.9 mm     0.1372
+
+结论：三者 max|pitch| 三位小数内相同（phi PD 力矩仅 1~2 N·m，远小于腿长通道 36~40），
+即 phi 控制范围对 pitch 影响可忽略；而仅下落段控制同时拿到“落地 phi 接近标称”与“高度几乎不损失”。
+注：离线 pitch 绝对值一向偏小（已知偏差），此处只看三种范围的差。
+
+三、本轮改动（三项）
+
+1. **下落段 phi 回复**（`control.py`）：重新加回 `PHI_REFERENCE=-0.1263`、
+   `KP_PHI=7.0`、`KD_PHI=1.1`（与 FL6 同值，未调），但 `F_phi` **仅在 `vertical_velocity < 0`（下落伸腿段）生效**，
+   上升段仍 `F_phi=0`。依据：二、离线对比。
+2. **下落段手接**（`control.py`）：伸腿参考改为速率受限，新增 `FLIGHT_EXTEND_RATE_LIMIT = 1.5` m/s；
+   理由：与 `FLIGHT_RETRACT_RATE_LIMIT` 同值同理由（避免 PD 误差过大、力矩顶满），
+   且校核行程：从最收 0.137 到标称 0.28 共 0.143 m，0.143/1.5 = 0.095 s，
+   落在下落窗口（vz<0 约 0.22 s）内，不会因限速而伸不到标称。
+   `v_ref` 斜坡形式与上升段一致。目的：消除上升→下落切换的单步 |Δτ|=37.3 N·m 阶跃。
+3. **落地重锚定修正**（`loop.py`）——**本工作区不适用 BodyStateKalman，已查实**：
+   `wheel_leg_mujoco/gbc_mpc_wbc/sampling.py::chassis_state` 直接用 MuJoCo 真值组装
+   （`velocity=rates[0]`、`pitch=dynamics.attitude()`、`position=sim.distance`），
+   `BodyStateKalman` 只被 `APP/chassis_controller.py` 用，不在本仿真路径上。
+   所以 4b 改为：
+   a) 调用 `sim.mpc.reset(state)`（state = 当期 `chassis_state`，position 取 `sim.distance`）
+      ——重锚 MPC planner 的位置/偏航与 `_previous_force/_trajectory/_theta_ff/_crank_ff/_pitch_bias`；
+   b) 重置 `GroundContactEstimator` 与 `ControlSupervisor` 的内部状态（两者都有 `reset()`）；
+   c) 在记录里打出 `sim.distance`、`mpc_solution.reference`、`decision.reset_reference`。
+4. **vx 不收敛只记录不修**（本轮只查）：记 WBC 速度任务残差与轮力矩，定位“重锚后仍持续后退”的来源。
+
+四、不变
+
+- 上升段：手接方式（撤挡位 + 参考首步下收 + `(L_ref,v_ref)`）、收腿速率 1.5、力矩 clamp 36。
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动。
+- 腿关节限幅 40、轮限幅 6；轮穿地仍仅记录。
+- pitch 控制（独立外环）**仍后置**（本轮靠“下落段 phi 回复”间接改善）。
+
+五、保险与回退
+
+- 回退 = git revert 或关闭开关。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  轮最大间隙比 FL8（228.1）更低；或 max|pitch| 反而大于 FL8 的 0.1233。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL9 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL6 run01（高度基准）、FL8 run01（pitch 基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. 手接帧专项：THRUST→FLIGHT 与 上升→下落 各 30 步，验证首步不顶 clamp、
+   上升→下落单步 |Δτ| 不再出现 37 N·m 量级。
+3. 重锚定专项：落地前后各 1 s 的 `decision.reset_reference`、`context`、`sim.distance`、
+   `mpc_solution.reference`、`mpc_called`。
+
+八、通过条件
+
+1. 落地时 `|phi - (-0.1263)| ≤ 0.15 rad`（依据：二、离线 0.0251）；
+2. 轮最大离地间隙 ≥ 248 mm；
+3. 上升→下落切换单步 |Δτ_leg| 不再出现 37 N·m 量级；
+4. max|pitch| 不劣于 FL8（0.1233）；
+5. 落地后 1 s `|vx|` 收敛（首选 |vx|max 不大于落地瞬间值的一半），`qx` 不再单调后退；
+6. 无 joint_limit / nonfinite_state / ABORT；无断言失败。
+
+九、必须报告
+
+- 两个手接帧专项数据；全程 phi/dphi/dt/pitch 时间线；
+- 落地时 phi 与到达时刻；轮最大间隙与时刻；output_source 统计；
+- 重锚定专项（七.3）数据；
+- 落地后 1 s 姿态/平衡/vx/qx；WBC 速度任务残差与轮力矩；assertion_failures。
+
+十、反馈格式
+
+VP编号：FL9
+修改文件与函数（下落段 phi 回复、FLIGHT_EXTEND_RATE_LIMIT、重锚定修正）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+手接帧专项 A（THRUST→FLIGHT）与 B（上升→下落）：
+进入飞行前 50 ms max|dphi/dt|：
+上升→下落切换单步 |Δτ|：
+落地时 phi 与到达时刻：
+重锚定专项（reset_reference/context/sim.distance/mpc.reference）：
+状态时间线：
+轮最大离地间隙（mm）与时刻：
+output_source 统计：
+落地：landing_buffer 帧数、落地腿长、最小腿长、轮穿地深度：
+落地后 1 s 姿态与平衡、vx、qx：
+WBC 速度任务残差与轮力矩：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL10：腿摆角参考改世界系（问题排查agent，2026-10-09）
+
+一、背景（FL9 run01 实测）
+
+FL9 的 phi 控制器生效，机体系 phi 误差仅 0.06 rad，但**世界系偏了 0.27~0.29 rad**：
+
+   t               phi(机体系)   pitch     phi+pitch(世界系)
+   1.440（出场）     -0.1217     -0.0032    -0.1249（≈标称 -0.1263）
+   1.580             +0.1716     -0.0618    +0.1099
+   1.740（落地前）   -0.0618     -0.3328    -0.3946
+   1.760（落地）     -0.0579     -0.3550    -0.4129
+
+根因：`phi` 是机体系角度，pitch 一倾，机体系对齐就等于世界系偏斜——腿在世界系里斜着砸向地面，
+导轮先接地，落地后 pitch 发散到 -0.594（压到机械结构）。
+
+用户确认（2026-10-09）：**先只修腿摆角，不做 pitch 外环**；落地后 pitch 发散估计是斜腿下压的
+后果，摆角修好后再看。用户判断“不要改 phi 的计算方式，而是把目标定在世界系，再转换到机体系”。
+
+由数据可确认换算式（出场时 phi+pitch=-0.1249 与标称吻合）：
+
+  phi_world = phi_body + pitch   =>   phi_body_ref = PHI_WORLD_REF - pitch
+
+二、本轮改动（只一项，不动任何增益/限幅）
+
+1. **phi 参考改世界系**（`control.py`）：
+   - `PHI_REFERENCE` 更名为 `PHI_WORLD_REFERENCE`，值 **-0.1263 rad 不变**
+     （用户 2026-10-09 确认；物理含义：与站立静平衡一致，质心落在轮接触点上）；
+   - `_phi_force(leg_position, leg_velocity, pitch)` 新增 `pitch` 入参，参考改为
+     `phi_body_ref = PHI_WORLD_REFERENCE - pitch`；
+   - `flight_leg_profile_torque(...)` 新增 `pitch` 入参，转传给 `_phi_force`；
+   - `KP_PHI=7.0`、`KD_PHI=1.1` 不变；`F_phi` **仍仅在下落段（`vz<0`）生效**（FL9 定下的范围）。
+2. **`loop.py`**：在飞行剖面调用处传入 `float(feedback.state.pitch)`。
+   `feedback.state.pitch` 就是记录里的 `pitch`（`loop.py:526`），口径一致。
+
+三、不做
+
+- **不做 pitch 外环**（用户明确后置）。
+- 不改上升段（仍 `F_phi=0`）、不改腿长剖面、不改收/伸腿速率与 clamp。
+- 落地后 pitch 发散本轮**只记录**，不做专门修复。
+- vx 不收敛延续记录。
+
+四、不变
+
+- `FLIGHT_RETRACT_RATE_LIMIT=1.5`、`FLIGHT_EXTEND_RATE_LIMIT=1.5`、力矩 clamp 36；
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动；
+- 腿关节限幅 40、轮限幅 6；轮穿地仍仅记录；重锚定逻辑不变。
+
+五、保险与回退
+
+- 回退 = git revert 或关闭开关。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  落地时**世界系**摆角误差反而大于 FL9 的 0.29 rad。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL10 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL9 run01（摆角基准）、FL6 run01（高度基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. 飞行段每帧同时打出 `phi_body`、`pitch`、`phi_body+pitch`（世界系），
+   验证 `phi_body+pitch` 在下落段确实被拉到 -0.1263 附近，而 `phi_body` 本身不再恒定于 -0.1263。
+
+八、通过条件
+
+1. 落地时**世界系**摆角 `|phi_body + pitch - (-0.1263)| ≤ 0.15 rad`
+   （依据：一、换算式；FL9 实测世界系误差 0.29 rad，机体系 0.06）；
+2. 轮最大离地间隙 ≥ 248 mm（不得低于 FL9 的 229.4）；
+3. max|pitch| 不劣于 FL9 的 0.3406（FLIGHT 段口径）；
+4. 无 joint_limit / nonfinite_state / ABORT；无断言失败。
+
+九、必须报告
+
+- 飞行段 `phi_body` / `pitch` / `phi_body+pitch` 三线时间线（含落地时刻值）；
+- 轮最大间隙与时刻；
+- 落地后 1 s pitch / pitch_rate 曲线（只记录，不要求收敛）；
+- 落地后 vx / qx（延续记录）；
+- assertion_failures。
+
+十、反馈格式
+
+VP编号：FL10
+修改文件与函数（PHI_WORLD_REFERENCE、_phi_force 新增 pitch、flight_leg_profile_torque 传参）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+飞行段 phi_body/pitch/世界系三线（含落地时刻值）：
+落地时世界系摆角误差：
+轮最大离地间隙（mm）与时刻：
+FLIGHT 段 max|pitch|：
+落地后 1 s pitch/pitch_rate 曲线：
+落地后 1 s vx/qx：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL11：修正世界系腿摆角变换的符号错误（问题排查agent，2026-10-09）
+
+一、根因（几何实证，不是推断）
+
+FL10 部署的换算式 `phi_world = phi_body + pitch` 符号错了。实测：
+
+  设 base 纯俯仰四元数 [cos(θ/2),0,sin(θ/2),0]，保持腿关节不变，mj_forward 后
+  用 `data.xpos` 直接量取髋体→轮体的世界向量，取 `atan2(rx, -rz)`：
+
+  θ(base pitch)   euler_pitch   phi_body  几何实测世界系腿角   几何-phi
+   +0.00            +0.0000      -0.1263    -0.1263            0.0000
+   +0.10            +0.1000      -0.1263    -0.2263           -0.1000
+   +0.20            +0.2000      -0.1263    -0.3263           -0.2000
+
+  故正确换算式为：
+
+    phi_world = phi_body - pitch     =>     phi_body_ref = PHI_WORLD_REFERENCE + pitch
+
+FL10 用了 `phi_body_ref = PHI_WORLD_REFERENCE - pitch`。落地时 pitch=-0.2694，
+FL10 的参考= -0.1263-(-0.2694)=**+0.143**，控制器把 phi 往前推到 +0.144；
+按正确口径换算到世界系应为 -0.1263 的位置，实际却是 +0.144-(-0.27)=**+0.41**。
+即：**控制器主动把腿向世界系前方多摆了 0.41 rad**，落地必然是前斜腿。
+实测吐合：t=1.750 落地 phi=+0.055 仍在往 +0.143 走，随后被地面带着转到 +0.66。
+
+附帯事实（符号修好后仍需看）：
+1. `F_phi` 只在 `vz<0` 生效；落地缓冲段用 `_leg_axis_torque`（F_phi=0）、WBC 接管后也 F_phi=0，
+   接地后 phi 无控制，会被地面带着继续转。
+2. 落地瞬间 L=0.3314（标称 0.28），腿力矩已 34.6 N·m——下伸段没能在触地前收回标称，
+   是“长腿硬撞”。
+
+二、本轮改动（三项）
+
+1. **纠正符号**（`control.py`）：`_phi_force` 中参考由 `PHI_WORLD_REFERENCE - pitch` 改为
+   `PHI_WORLD_REFERENCE + pitch`。`PHI_WORLD_REFERENCE=-0.1263`、`KP_PHI=7.0`、`KD_PHI=1.1` 不变。
+2. **判决口径同步修正**：世界系摆角改为 `phi_body - pitch`，验收判据为
+   `|phi_body - pitch - (-0.1263)| = |phi_body - pitch + 0.1263| ≤ 0.15 rad`。
+   日志/自检里要同时打 `phi_body`、`pitch`、`phi_body - pitch` 三条线。
+3. **phi 控制范围扩到落地缓冲段**（`loop.py`）：`landing_buffer` 分支除了腿长缓冲力矩外，
+   也叠加 `F_phi`（同一组 PD、同一世界系参考），避免接地后 phi 无控被地面带着转。
+   依据：一、附帯事实 1。
+
+三、不做
+
+- 不做 pitch 外环（用户明确后置）；phi 增益 7.0/1.1 **先不动**（先看符号纠正效果）。
+- 不改下伸段目标（仍标称 0.28）、不改收/伸腿速率与 clamp。
+- 落地后 WBC/pitch 发散、vx 不收敛、下伸段腿长收不回标称（0.331 vs 0.28）**本轮只记录**。
+
+四、不变
+
+- 世界系目标 `PHI_WORLD_REFERENCE = -0.1263`（用户确认，物理含义：同站立静平衡，质心落在轮接触点上）；
+- `FLIGHT_RETRACT_RATE_LIMIT=1.5`、`FLIGHT_EXTEND_RATE_LIMIT=1.5`、力矩 clamp 36；
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动；
+- 腿关节限幅 40、轮限幅 6；轮穿地仍仅记录；重锚定逻辑不变。
+
+五、保险与回退
+
+- 回退 = git revert 或关闭开关。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  落地世界系摆角误差反而大于 FL10 的 0.0877（按正确口径重算 FL10：0.41）。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL11 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL9 run01（无世界系）、FL10 run01（符号错）、FL6 run01（高度基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **坐标变换专项**（必做，防止再搞反）：在飞行段任取 5 帧，用模型直接算两份世界系摆角：
+   a) 解析式 `phi_body - pitch`；b) 几何式 `atan2(rx, -rz)`（`data.xpos` 髋体→轮体）。
+   两者之差应 <1e-6（或仅差一个固定安装常量，需在报告里写明该常量）。
+3. 飞行段每帧打 `phi_body`、`pitch`、`phi_body - pitch` 三线。
+
+八、通过条件
+
+1. 坐标变换专项（七.2）两者一致；
+2. 落地时世界系摆角 `|phi_body - pitch + 0.1263| ≤ 0.15 rad`；
+3. 接地后 phi 不再单调增大（缓冲段 `F_phi` 生效后，落地后 0.2 s 内 phi 不出现 FL10 那种 +0.055→+0.66 的甩动）；
+4. 轮最大离地间隙 ≥ 248 mm（不得低于 FL10 的 229.6）；
+5. FLIGHT 段 max|pitch| 不劣于 FL10 的 0.2690；
+6. 无 joint_limit / nonfinite_state / ABORT；无断言失败。
+
+九、必须报告
+
+- 坐标变换专项（七.2）结果；
+- 飞行段 `phi_body`/`pitch`/世界系三线（含落地时刻值）；
+- 落地时世界系摆角误差；接地后 0.2 s 内 phi 曲线（验证是否还被地面带着转）；
+- 轮最大间隙与时刻；FLIGHT 段 max|pitch|；
+- 落地后 1 s pitch/pitch_rate、vx/qx、min leg（是否又越界）；
+- assertion_failures。
+
+十、反馈格式
+
+VP编号：FL11
+修改文件与函数（_phi_force 符号、判据口径、landing_buffer 叠加 F_phi）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+坐标变换专项（解析式 vs 几何式）：
+飞行段 phi_body/pitch/世界系三线（含落地时刻值）：
+落地时世界系摆角误差：
+接地后 0.2 s 内 phi 曲线：
+轮最大离地间隙（mm）与时刻：
+FLIGHT 段 max|pitch|：
+落地后 1 s pitch/pitch_rate、vx/qx、min leg：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL12 候选待办（不在 FL11 范围，需用户先定口径）
+
+背景：用户 2026-10-09 提出“检查到逻辑后主动规划收腿，起缓冲作用并助姿态稳定”。
+排查agent分析结论（详见对话）：
+
+1. 作为缓冲（顺让）：可行，但必须带 `leg_length_min` 下限保护。
+   （FL10 已出现 min leg=0.10272 < 0.114，说明塌穿风险（腿被压到机械下限以下）已存在。）
+2. 作为姿态稳定：**权限弱 + 有耦合代价**。腿长对俯仰的力矩约 F·L·sin(phi)
+   即 150*0.28*0.126 ≈ 3.5 N·m 量级，远小于摆动通道；且腿长加速度经 M_L,phi
+   耦合直接打进 phi（正是前几轮 phi 失控的来源）。所以姿态仍应用 phi 通道。
+3. 最有价值的形式：**让下伸段在触地前把腿收回标称附近（甚至略短）**，
+   解决落地腿长 0.3314（标称 0.28）的“长腿硬撞”，一次性拿回缓冲行程。
+
+待用户定的口径（未定前不部署）：
+  a) 下伸段目标是否从 `nominal` 改为 `nominal - margin`，margin 取多少、依据是什么；
+  b) 触地判据用几何口径还是估计器口径，确认时间多少；
+  c) 主动收腿的下限与速率上限是否沿用 `leg_length_min + FLIGHT_RETRACT_MARGIN` / 1.5 m/s。
+
+============================================================
+
+FL12：腿摆角耦合前馈（力 + 角度）+ 新增益（问题排查agent，2026-10-09）
+
+一、背景：FL11 的失败与离线辨识
+
+FL11 实测：世界系角度从 -0.122 一路被推到 +0.27，落地世界系误差 0.341 rad；
+FLIGHT 段 max|pitch| 反而从 FL10 的 0.2690 涨到 0.4250。
+归因：不是增益小，是**扰动大**。FL11 落地时误差 0.341 rad，而 PD 只给出 7*0.341=2.4 N·m，
+而腿长通道的耦合力矩约 22 N·m（约 9 倍）。
+
+离线辨识（自由飞行、无接触，工作空间法 + 直接加速度法交叉核对，髋体→轮体解析链）：
+
+  L目标   phi静平衡   m_eff_L   Lambda_phi   c=|a10|/a11
+  0.140   -0.2620    0.306     0.01332      0.1577
+  0.160   -0.2349    0.316     0.01670      0.1625
+  0.200   -0.1899    0.357     0.02315      0.1603
+  0.240   -0.1547    0.408     0.02875      0.1536
+  0.280   -0.1263    0.465     0.03319      0.1472
+  0.310   -0.1080    0.509     0.03551      0.1433
+  0.330   -0.0968    0.540     0.03641      0.1412
+
+定义：`[Ldd; phidd] = A [F_L; F_phi]`，A00=1/m_eff_L，A11=1/Lambda_phi，
+A01=A10 为耦合。前馈系数 c = |A10|/A11（每 1 N 腿长力需要多少 N·m phi 力矩抵消反应）。
+
+结论：
+1. `c` 在 L=0.14~0.33 全段只变化 0.141~0.163（±7%）→ **可用常数 c=0.15**。
+2. `Lambda_phi` 变化 0.0133~0.0364（2.7 倍），在设计点上取标称值 0.0332。
+3. `phi_eq(L)`（静平衡摆角）斜率 ≈ **0.97 rad/m**——腿一收，静平衡摆角就变，
+   这是“角度前馈”的物理来源，可由 `standing_pose` 离线算出（同一条曲线）。
+
+二、本轮改动（三项，仅飞行段）
+
+1. **力前馈**（`control.py`，仅`vz<0`的下落段、即现有 `F_phi` 生效的同范围）：
+
+     F_phi += FEEDFORWARD_COUPLING * F_L      FEEDFORWARD_COUPLING = 【待自检测定，批准前不填】
+
+   **不得使用任何离线值。**排查agent最初的 0.15 是用“单腿施力”口径测的，与控制器
+   “两腿对称施力”口径不一致；测试agent算出的 -0.056（对称）/ -0.09（单腿）与之也不吻合；
+   排查agent按对称口径重测（F_L=100 N、F_phi=0 时 phidd_R=-1149 rad/s^2）得出 |c|>0.2、
+   超出扫描区间。三者互不吻合，故 c 的**数值与符号都必须实测**。
+   测定后把数值与符号一并写入代码常量，并在反馈报告里写明实测过程与交叉点。
+   注释里必须写清：实测口径（两腿同时、共模 phidd）、实测位形、交叉点。
+2. **新增益**（用户 2026-10-09 批准同时使用）：
+
+     KP_PHI = 20.9 N*m/rad     （原 7.0）
+     KD_PHI = 1.67 N*m*s/rad   （原 1.1）
+
+   依据：`kp = Lambda_phi*omega^2`、`kd = 2*zeta*Lambda_phi*omega`，Lambda_phi=0.0332（一、实测），
+   omega = 2*pi*4 = 25.1 rad/s（4 Hz）、zeta = 1.0。4 Hz 远低于腿长 PD 的约 9 Hz，不与腿长通道抢带宽。
+   Lambda_phi 随 L 降到 0.0133 时带宽升到约 40 rad/s，不振荡（用户已确认可接受超调）。
+3. **角度前馈**（`control.py`）：世界系目标不再是常数，而是跟随腿长参考的静平衡曲线：
+
+     phi_body_ref = phi_eq(L_ref) + pitch        （由 phi_world = phi_body - pitch 反解）
+
+   其中 `phi_eq(L)` 由 `standing_pose` 离线拟合（斜率 0.97 rad/m，锚点 `phi_eq(0.28)=-0.1263`），
+   固化为具名常量 + 注释来源；`L_ref` 用飞行剖面已有的参考腿长。
+   **已知限制**：拟合区间只到 L=0.14；下收目标 0.119 属外推，需在报告里标注。
+
+三、不做
+
+- 不做 pitch 外环（用户明确继续后置）；
+- 不改腿长剖面、不改收/伸腿速率与 clamp、不改落地缓冲；
+- 不改世界系基本换算式（FL11 已用几何实证确认 `phi_world = phi_body - pitch`）。
+
+四、不变
+
+- `PHI_WORLD_REFERENCE=-0.1263`（作为 `phi_eq(0.28)` 的锚点）；`FLIGHT_RETRACT/EXTEND_RATE_LIMIT=1.5`；
+  力矩 clamp 36；jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动；
+- 腿关节限幅 40、轮限幅 6；轮穿地仍仅记录；重锚定逻辑不变。
+- 前馈**仅飞行段生效**（用户 2026-10-09 明确）；落地缓冲段与接地后不用（地面约束会改有效惯量，
+  实测 m_eff_L 地面下 0.748 kg vs 自由飞行 0.465 kg，同一系数不成立）。
+
+五、保险与回退
+
+- 回退 = git revert 或关闭开关。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  世界系落地误差大于 FL11 的 0.341；或出现持续振荡（用户要求“可超调、不可振荡”）。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL12 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL11 run01（本轮直接前身）、FL8 run01（无 phi 控制的最佳 pitch 基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **前馈系数测定专项**（必做，必须先做这一项，再决定是否上整跳）：
+   在飞行位形（两腿都装上、机体离地）对**两条腿同时**施加 `[F_L, F_phi]`，`F_phi = k*F_L`；
+   扫描 `k`（建议 ±0.5，`F_L=100 N`），记录**共模摆角加速度** `0.5*(phidd_R + phidd_L)`，
+   找其过零点。该 `k` 即为 `FEEDFORWARD_COUPLING`（含符号）。
+   把 `k`、扫描区间端点对应的 `phidd`、以及交叉点全部报回来。
+   **若区间端点同号（无过零点），则不得上整跳，先报告并等排查agent确认口径。**
+3. **角度前馈专项**：打印 `L_ref`、`phi_eq(L_ref)`、`pitch`、`phi_body_ref` 四条线，
+   验证参考轨迹确实随 L 变化（而不是恒 -0.1263）。
+
+八、通过条件
+
+1. 前馈系数测定专项（七.2）找到「模摆角加速度过零点」且该点落在扫描区间内（否则不得上整跳）；
+2. 落地时世界系摆角 `|phi_body - pitch + 0.1263| ≤ 0.15 rad`（FL11 为 0.341）；
+3. 飞行段世界系摆角峰值不超过 FL11 的 0.27 rad；
+4. 无持续振荡：`dphi/dt` 过零次数有限且幅值单调衰减（具体阀值由本轮数据出来后定）；
+5. FLIGHT 段 max|pitch| 不劣于 FL10 的 0.2690；
+6. 轮最大离地间隙 ≥ 248 mm（不低于 FL11 的 229.3）；
+7. 无 joint_limit / nonfinite_state / ABORT；无断言失败；min leg 不越界。
+
+九、必须报告
+
+- 前馈符号专项（七.2）、角度前馈专项（七.3）；
+- 飞行段 `L_ref`/`phi_eq(L_ref)`/`phi_body`/`pitch`/世界系五线；
+- 落地时世界系摆角误差，以及飞行段世界系摆角峰值；
+- `dphi/dt` 过零次数与衰减情况；
+- 轮最大间隙与时刻；FLIGHT 段 max|pitch|；
+- 落地后 1 s pitch/pitch_rate、vx/qx、min leg；assertion_failures。
+
+十、反馈格式
+
+VP编号：FL12
+修改文件与函数（FEEDFORWARD_COUPLING、KP/KD_PHI、phi_eq 角度前馈）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+前馈系数测定专项（k 扫描、过零点、区间端点 phidd）：
+角度前馈专项（L_ref/phi_eq/参考四线）：
+飞行段五线（L_ref/phi_eq/phi_body/pitch/世界系）：
+落地时世界系摆角误差、飞行段峰值：
+dphi/dt 过零次数与衰减：
+轮最大离地间隙（mm）与时刻：
+FLIGHT 段 max|pitch|：
+落地后 1 s pitch/pitch_rate、vx/qx、min leg：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
