@@ -55,6 +55,60 @@ KD_PHI = 1.67             # [N*m*s/rad] FL12 新增益（用户批准）
 FEEDFORWARD_COUPLING = -0.052    # [-] F_phi += c*F_L（仅飞行下落段）
 PHI_EQ_SLOPE = 0.97             # [rad/m] phi_eq 斜率（文档离线拟合）
 PHI_EQ_ANCHOR_LENGTH = 0.28     # [m] phi_eq 锚点腿长
+# FL16B（2026-10-10，文档 B2 规格）：前馈斜坡时长。进入 THRUST 后 20 ms 线性 0 -> 上限，尔后保持。
+RELEASE_PHI_FEEDFORWARD_RAMP = 0.020   # [s]
+# FL17B（2026-10-10 用户拍定）：释放段双参考重锚定（预倾轨迹 + 世界系腿锚定）。
+# 来源：部署文档 FL17B 第一节。
+PHI_WORLD_ANCHOR = -0.1263        # [rad] 世界系腿摆角锚定值（=站立静平衡 phi_world，静力矩自平衡）
+RELEASE_PRE_TILT = 0.591          # [rad] 释放段末预倾角 theta_pre：量级取 FL13 飞行段俯仰变化 0.617 的保守值
+                                  # 0.591，方向与飞行段俯仰变化（-0.617）相反
+RELEASE_REFERENCE_TIME = 0.108    # [s] 释放段参考时长 T_release：FL13/FL15A 实测 THRUST 段时长
+
+
+def release_reanchor_pitch_reference(pitch0, elapsed) -> float:
+    """FL17B 释放段 pitch 参考：``pitch0 + (theta_pre - pitch0) * S(u)``，``u = elapsed/T_release``，
+
+    最小 jerk ``S(u) = 6u^5 - 15u^4 + 10u^3``（两端速度/加速度均为 0）。
+    ``elapsed=None`` 时退回 ``pitch0``。
+    """
+    if elapsed is None:
+        return float(pitch0)
+    u = min(1.0, max(0.0, float(elapsed) / RELEASE_REFERENCE_TIME))
+    s = 6.0 * u ** 5 - 15.0 * u ** 4 + 10.0 * u ** 3
+    return float(pitch0) + (RELEASE_PRE_TILT - float(pitch0)) * s
+# FL15B1a（2026-10-10 用户批准）：释放段（THRUST）腿摆角前馈，叠加到 WBC 的 angle_R/L 参考。
+# 目标：离地俯仰角速度 -> pitch_rate_target=+1.33 rad/s（释放段额外交付 +0.415 N*m*s，
+# 平均约 3.8 N*m）；只补 phi 控制角冲量一项（H_ctrl=-0.385），其余留 B1b。
+# 只在 THRUST 生效（压缩段与飞行段不动）；斜坡按腿长 compression_end -> release_end 线性升到末端偏移。
+RELEASE_PHI_FEEDFORWARD_AMPLITUDE = 0.0   # [rad] 斜坡末端腿摆角参考偏移。准入测量：Δprate≈0.0125*A，
+                                          # 达到 +1.33 rad/s 需 A≈107 rad（不可行），暂停部署待排查agent确认。
+# FL15B2（2026-10-10）：释放段（THRUST）腿摆角**力**前馈（B1 的备用入口）：给腿旋量加 (0, F_phi) 分量。
+RELEASE_PHI_FEEDFORWARD_FORCE = 1.58      # [N] 每腿腿摆角力前馈。反求：1.342 rad/s ÷ 0.8516 (rad/s)/N
+                                          # （探测 F=2 点）≈1.58 N；来源为批准目标 +1.33 rad/s + 实测灵敏度，非试数。
+
+
+def release_phi_force_ramp(elapsed) -> float:
+    """释放段腿摆角力前馈幅值 [N]：THRUST 起点后 ``RELEASE_PHI_FEEDFORWARD_RAMP`` 秒内线性升到上限。
+
+    ``elapsed=None``（调用方未提供相位内计时）时退回满幅值，保持与改动前一致。
+    """
+    if elapsed is None:
+        return RELEASE_PHI_FEEDFORWARD_FORCE
+    frac = min(1.0, max(0.0, float(elapsed) / RELEASE_PHI_FEEDFORWARD_RAMP))
+    return RELEASE_PHI_FEEDFORWARD_FORCE * frac
+
+
+def release_phi_feedforward_offset(leg_length, leg_length_start, leg_length_end) -> float:
+    """释放段腿摆角前馈偏移 [rad]：随腿长从 start 线性升到 end（超出范围钳位）。
+
+    斜坡起点取 ``compression_end``、终点取 ``release_end``，两者都是 JumpConfig 的导出量，
+    不引入新的标定系数。
+    """
+    span = float(leg_length_end) - float(leg_length_start)
+    if span <= 0.0:
+        return 0.0
+    progress = (float(leg_length) - float(leg_length_start)) / span
+    return RELEASE_PHI_FEEDFORWARD_AMPLITUDE * min(1.0, max(0.0, progress))
 
 
 def _phi_eq(l_ref) -> float:
@@ -258,7 +312,10 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
               jump_config=None, leg_length_compression: bool = False,
-              leg_length_thrust: bool = False) -> WbcOutcome:
+              leg_length_thrust: bool = False,
+              release_phi_feedforward: bool = False,
+              release_phi_force_feedforward: bool = False,
+              release_phi_feedforward_elapsed: float | None = None) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -291,12 +348,25 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
                                    and jump.phase.value == "THRUST")
     com_target = (None if (vmc_phase or leg_length_phase or leg_length_thrust_phase)
                   else desired_com_acceleration_z)
+    # FL15B1a（2026-10-10 批准）：释放段腿摆角前馈（B1），只在 THRUST 生效。
+    angle_reference_R = holds.get("angle_R")
+    angle_reference_L = holds.get("angle_L")
+    if (release_phi_feedforward
+            and jump is not None and jump.active and jump.phase.value == "THRUST"
+            and jump_config is not None):
+        leg_now = dynamics.leg_state()
+        angle_ff = release_phi_feedforward_offset(
+            float(leg_now[0]), jump_config.compression_end, jump_config.release_end)
+        angle_reference_R = (angle_ff if angle_reference_R is None
+                             else float(angle_reference_R) + angle_ff)
+        angle_reference_L = (angle_ff if angle_reference_L is None
+                             else float(angle_reference_L) + angle_ff)
     balance, motion = tasks.tasks(feedback.state, feedback.rows, sample,
                                   desired_com_acceleration_z=com_target,
                                   pitch_reference=holds.get("pitch"),
                                   roll_reference=holds.get("roll"),
-                                  angle_R_reference=holds.get("angle_R"),
-                                  angle_L_reference=holds.get("angle_L"))
+                                  angle_R_reference=angle_reference_R,
+                                  angle_L_reference=angle_reference_L)
     # (b) 腿长任务参考跟跳跃：wbc.py::tasks 里该任务参考标称 L0，跳跃期必须换成跳跃给出的目标腿长，
     #     否则 WBC 会把正在伸长的腿拉回去（与蹬伸力对撞，第 32 次排查 bug#1 的机理）。
     if jump is not None and jump.active and jump.leg_length_target is not None:
@@ -366,6 +436,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     feedforward_force = 0.0
     dynamics_bias_solve = dynamics.dynamics_bias()
     limits_solve = dynamics.limits
+    feedforward_active = False
     if vmc_phase:
         mass_total = (float(np.sum(dynamics.model.body_mass)) if jump_config is None
                       else float(jump_config.total_mass))
@@ -373,14 +444,21 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         feedforward_force = 0.5 * mass_total * (GRAVITY + a_z)
         tau_ff, _peak = dynamics.thrust_torque(np.full(2, feedforward_force))
         tau_ff = np.asarray(tau_ff, dtype=float)
-        dynamics_bias_solve = dynamics_bias_solve - np.asarray(selection, dtype=float).T @ tau_ff
-        limits_solve = ActuatorLimits(dynamics.limits.lower - tau_ff, dynamics.limits.upper - tau_ff)
+        feedforward_active = True
+    # FL16（2026-10-10）：释放段腿摆角力前馈改经 external_force 注入 WBC 动力学约束
+    # （M*qdd + h - S^T*tau - tau_ext = 0），输出端不再另加（避免双重计数）。
+    # 依据：post-solve 硬加会开环破坏姿态/接触任务；折进 bias 又会被 QP 完全吸收（前两轮实测）。
+    if (release_phi_force_feedforward and jump is not None and jump.active
+            and jump.phase.value == "THRUST"):
+        tau_leg_ff = _leg_wrench_torque(dynamics, np.zeros(2),
+                                        np.full(2, release_phi_force_ramp(release_phi_feedforward_elapsed)))
+        external = np.asarray(selection, dtype=float).T @ tau_leg_ff
     torque, result = control.solve_wbc(
         mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics_bias_solve,
         contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=limits_solve,
         decision=feedback.decision, dt=timing.wbc_dt, external_force=external,
         weight_overrides=jump_weight_overrides)
-    if vmc_phase:
+    if feedforward_active:
         torque = np.asarray(torque, dtype=float) + tau_ff
     raw_torque = np.asarray(torque, dtype=float).copy()
     timings["wbc"].append(time.perf_counter() - start)

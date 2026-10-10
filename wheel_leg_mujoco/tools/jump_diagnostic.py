@@ -163,7 +163,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              explicit_jump_reference=False, compression_only=False, freeze_jump_reference=False,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
-             flight_leg_extend=False):
+             flight_leg_extend=False, release_phi_feedforward=False,
+             release_phi_force_feedforward=False, release_reanchor=False):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
@@ -177,7 +178,10 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
             leg_length_compression=leg_length_compression, leg_length_thrust=leg_length_thrust,
             thrust_only=thrust_only, flight_zero_torque=flight_zero_torque,
-            flight_leg_retract=flight_leg_retract, flight_leg_extend=flight_leg_extend)
+            flight_leg_retract=flight_leg_retract, flight_leg_extend=flight_leg_extend,
+            release_phi_feedforward=release_phi_feedforward,
+            release_phi_force_feedforward=release_phi_force_feedforward,
+            release_reanchor=release_reanchor)
     release_end = float(sim.jump.config.release_end) if sim.jump is not None else float(config.nominal_length)
     document = {
         "metadata": {
@@ -207,6 +211,9 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             "flight_zero_torque": bool(flight_zero_torque),
             "flight_leg_retract": bool(flight_leg_retract),
             "flight_leg_extend": bool(flight_leg_extend),
+            "release_phi_feedforward": bool(release_phi_feedforward),
+            "release_phi_force_feedforward": bool(release_phi_force_feedforward),
+            "release_reanchor": bool(release_reanchor),
             "viewer_xfrc_applied_executed": False,
             "viewer_xfrc_applied_note": "GUI viewer path is not executed by this headless tool; xfrc_applied remains separately recorded.",
             "units": {
@@ -260,6 +267,12 @@ def main():
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
+    parser.add_argument("--release-phi-feedforward", action="store_true",
+                        help="FL15B1a：THRUST 段给 angle_R/L 参考叠加斜坡腿摆角前馈")
+    parser.add_argument("--release-phi-force-feedforward", action="store_true",
+                        help="FL15B2：THRUST 段给腿旋量加 phi 力前馈（B1 备用入口）")
+    parser.add_argument("--release-reanchor", action="store_true",
+                        help="FL17B：THRUST 段双参考重锚定（预倾 pitch 轨迹 + 世界系腿锚定）")
     args = parser.parse_args()
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
@@ -272,7 +285,10 @@ def main():
              thrust_only=args.thrust_only,
              flight_zero_torque=args.flight_zero_torque,
              flight_leg_retract=args.flight_leg_retract,
-             flight_leg_extend=args.flight_leg_extend)
+             flight_leg_extend=args.flight_leg_extend,
+             release_phi_feedforward=args.release_phi_feedforward,
+             release_phi_force_feedforward=args.release_phi_force_feedforward,
+             release_reanchor=args.release_reanchor)
 
 
 if __name__ == "__main__":
