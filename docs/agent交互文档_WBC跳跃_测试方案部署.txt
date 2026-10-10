@@ -3187,3 +3187,742 @@ ctrl 与 raw、tau_jump：
 是否允许进入下一轮：
 
 ============================================================
+
+FL14：优先收敛 pitch（外环）+ 速度位移专项（问题排查agent，2026-10-10）
+
+一、背景（FL13 后用户定的优先级）
+
+用户 2026-10-10：优先任务是**把 pitch 倾角收敛**；其次速度位移问题需分清
+“是真发散”还是“测试时长不够还没看到收敛”，并排查成因（怀疑：MPC 接管后规划结果 /
+WBC 任务冲突（为收 pitch 牺牲速度） / 控制器实际未接管或状态不对导致求解被关）。
+
+离线测量（自由飞行、两腿对称施力，排查agent）：
+
+  全机俯仰惯量（绕质心 y）           Iyy = 0.2888 kg*m^2
+  每腿 10 N*m phi 力矩 -> 俯仰角加速度 +151.4 rad/s^2
+  phi 通道对俯仰的权限                7.57 rad/s^2 每 N*m（等效惯量 0.132 kg*m^2）
+  同上 -> 竖直耦合                    每腿 10 N*m 给机体竖直 +-1.29 m/s^2
+
+结论：pitch 与 phi 是**同一自由度的两个目标**（世界系腿角 = phi_body - pitch）。
+FL12 把世界系腿角控住后，pitch 与 phi_body 几乎等量反向/同向摆动，pitch 无人管；
+要压 pitch 必须显式加 pitch 反馈，并接受腿世界系角度变差（用户已同意“牺牲腿摆角”）。
+
+二、本轮改动（两项）
+
+1. **pitch 外环**（`control.py`，级联在 phi 参考上，仅飞行段）：
+
+     phi_body_ref = phi_eq(L_ref) + pitch + PITCH_KP*(0 - pitch) + PITCH_KD*(0 - pitch_rate)
+
+   说明：
+   - 保留 `phi_eq(L_ref)+pitch` 作为基座（保证基本几何），pitch 项作为附加偏置；
+   - 级联而非并列，防止两个环抢同一个 `F_phi`；
+   - **PITCH_KP / PITCH_KD 的数值必须由离线辨识给出后再填**。
+     辨识方法：在离线自由飞行里扫 `K = PITCH_KP`（`PITCH_KD = 2*zeta*sqrt(K)`，zeta 取 1），
+     从同一初始 pitch/rate 出发，找“pitch 收敛到 0 且无持续振荡”的最小 K；
+     把扫描区间、每组收敛时间与超调量一并报回排查agent，由排查agent批准后写入。
+     **批准前不填值、不跑整跳。**
+2. **速度位移专项**：
+   a) **延长测试时长到 5 s**（`--duration 5.0`），看 vx/qx 是否只是“还没到收敛”；
+      报告里给出 1s/2s/3s/4s/5s 五个时刻的 vx/qx，以及 vx 是否出现过拐点/符号变化。
+   b) 继续 FL13 的速度任务专项采样（desired/achieved/residual、摩擦锥余量、
+      `mode`/`motion_enabled`/`balance_enabled` 逐拍），并额外记录：
+      - `mpc_called` 与 `mpc_solution.reference` 的速度分量（验证“MPC 接管后规划”假设）；
+      - `feasible` / `fallback` / `relaxed`（验证“求解失败被关”假设）；
+      - 落地后是否有 `airborne_active` 残留（验证“控制器未接管”假设）。
+
+三、不做
+
+- 不调 phi 增益（20.9/1.67 不变）、不改角度前馈 `phi_eq`、不改前馈系数 -0.052；
+- 不改腿长剖面/速率/clamp、不改落地缓冲、不改重锚定逻辑；
+- 不因速度不收敛而调任何参数（只查因）。
+
+四、不变
+
+- `PHI_WORLD_REFERENCE=-0.1263`；`FEEDFORWARD_COUPLING=-0.052`（仅飞行段）；
+  `FLIGHT_RETRACT/EXTEND_RATE_LIMIT=1.5`；力矩 clamp 36；jump_height=0.18、jump_stroke=0.12、
+  jump_time=1.0；无扰动；腿关节限幅 40、轮限幅 6；轮穿地仅记录。
+
+五、保险与回退
+
+- 回退 = git revert 或把 `PITCH_KP/PITCH_KD` 置 0（退化为 FL13 行为）。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  pitch 出现持续振荡（用户要求可超调、不可振荡）；或世界系落地误差大于 FL13。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL14 --case baseline --run-id run01 --duration 5.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+注意：`duration` 从 3.0 改为 **5.0**（速度收敛观察用）；其余开关与 FL13 完全相同。
+对照：FL13 run01、FL12 run01、FL10 run01（pitch 最佳基准 0.2690）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **pitch 外环离线辨识专项**（部署前必做）：按二.1 的扫描方法给出 K 扫描表（含收敛时间、超调量、是否振荡）。
+3. 速度专项采样字段齐全（二.2b）。
+
+八、通过条件
+
+1. FLIGHT 段 max|pitch| **≤ 0.30 rad**（FL10 基准 0.2690；FL13 为 0.591）；
+2. pitch 无持续振荡（`pitch_rate` 过零次数有限且幅值衰减）；
+3. 落地世界系摆角 `|phi_body - pitch + 0.1263|`：允许比 FL13 的 0.153 变差，但需报告实际值；
+4. 速度专项拿到完整数据；给出 vx/qx 在 1~5 s 的五个时刻值，明确回答“是真发散还是时长不够”；
+5. 无 joint_limit / nonfinite_state / ABORT；无断言失败；min leg 不越界。
+
+九、必须报告
+
+- pitch 外环离线辨识表 + 代码里实际写入的 K 值与依据；
+- 飞行段 `L_ref`/`phi_eq`/`phi_body`/`pitch`/世界系五线 + `max|pitch|`；
+- pitch_rate 过零次数与衰减；
+- 落地世界系摆角误差；
+- **速度专项全部数据（1~5 s 五个时刻的 vx/qx + FL13 诊断字段）**；
+- 轮最大间隙与时刻；assertion_failures；min leg。
+
+十、反馈格式
+
+VP编号：FL14
+修改文件与函数（PITCH_KP/PITCH_KD 及写入依据、采样字段）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+pitch 外环离线辨识表与取值：
+飞行段五线 + max|pitch|：
+pitch_rate 过零次数与衰减：
+落地时世界系摆角误差：
+速度专项（1~5 s 的 vx/qx 五时刻 + 诊断字段）：
+“真发散 vs 时长不够”结论（只写数据支持的现象）：
+轮最大离地间隙（mm）与时刻：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL14b（结案）：pitch 级联外环方案废弃（问题排查agent，2026-10-10）
+
+离线闭环扫 K（自由飞行，从 FL13 t=1.424 出发，腿长剖面 + 世界系 phi 环 + pitch 外环，
+初始俯仰角速度注入 -2 rad/s）：
+
+  K     Kd    |pitch|峰值  终值     过零次数
+  0.0   0.00   1.5704     -1.5156    0   （=现行世界系补偿，pitch 发散）
+  0.5   1.41   0.6697     -0.6591    0
+  1.0   2.00   0.6561     -0.6561    0
+  2.0   2.83   0.6096     -0.6096    0
+  4.0   4.00   0.5404     -0.5404    0
+
+结论：
+1. K=0（现行 `+pitch` 世界系补偿）在模型里是 pitch 发散的原因（涨到 -1.5）。
+2. K≥0.5 后不再发散，且**全区间无振荡**（过零次数全 0）。
+3. **但无任何 K 能把 pitch 收敛到 0**，稳态残差卡在 -0.54~-0.66。该级联纯比例，无积分/无前馈，
+   消除不了稳态偏置。
+4. 离线 pitch 绝对值不可信（同口径“无控制”只有 0.0013，实测 FL8 为 0.1233），
+   只能用于判断稳定/振荡两个定性结论。
+
+用户 2026-10-10 结论：pitch 级联外环不可行，改走“释放段前馈”路线。→ 见 FL15。
+
+============================================================
+
+FL15：释放段前馈路线（摆腿前馈 / ZMP 参考 / pitch 速率前馈）——分阶段（问题排查agent，2026-10-10）
+
+一、需求与约束（用户 2026-10-10）
+
+目标：消除飞行段“为控腿摆角而产生的 pitch 大倾角”，而不是在飞行段再去修 pitch。
+候选手段：
+  a) 排查起跳时（离地瞬间）腿摆角/摆角速度产生的根源；
+  b) 摆腿（phi）前馈；
+  c) ZMP 参考规划；
+  d) pitch 前馈（预倾）。
+
+**硬约束（用户明确）**：
+1. **只在释放过程（THRUST）部署**；压缩过程禁止——在压缩预倾会被释放段反作用抵消，
+   且会改变整体姿态、与控制器干涉。
+2. 前馈目标是“**提前校正**”，不是飞行中回授（外环已废弃）。
+3. 已试过的两个失败方式要避开：压缩预倾（被释放抵消）、释放段预倾角度（时间短、效果不佳）。
+
+二、关键物理判断（本方案的出发点）
+
+1. **飞行段的角动量在离地瞬间就定下了**。释放段结束时离地，之后无外力矩。
+   所以想影响飞行姿态，**必须在释放段结束前完成**。
+2. 释放段很短（约 0.11 s），**摆“角度”靠不住**（用户已实测到这一点），
+   但**摆“角速度/角动量”靠得住**：角速度在离地后守恒，不会被释放段本身抵消。
+   → 本方案主打 **速率级前馈**，不是角度级。
+3. phi 与 pitch 是同一自由度的两个目标（世界系腿角 = phi_body - pitch）。
+   释放段地面反力可以同时改变两者的速率，所以适合在此处做**联合预置**。
+
+三、分阶段方案（A 与 B **并行**，用户 2026-10-10）
+
+阶段 A 只加采样、不改控制；阶段 B 是实现与离线辨识。两者可同时推进：
+A 的实测数据与 B 的离线复算互为交叉验证，不互相阻塞。
+并发不影响验证：B1 在压缩段无任何改动，两者不互扰。
+
+**阶段 A：释放段因果排查（纯诊断，不改控制）**
+
+目的：回答“起跳时腿摆角/角速度从哪里来”。逐拍输出：
+  - 释放段（THRUST）全程：`L`、`L_dot`、`phi_body`、`dphi_body/dt`、`pitch`、`pitch_rate`、
+    `wheel_gap`、`F_L` 与腿力矩；
+  - 标记三个时刻：THRUST 开始、最大椎长速率、离地（gap>1mm）；
+  - 给出离地瞬间的 `phi_body`、`dphi/dt`、`pitch`、`pitch_rate` 四个值（这是一切前馈的起点）。
+验收：数据齐全；能回答“离地瞬间的摆角速度是释放段产生的，还是压缩段带过来的”。
+
+**阶段 B：摆腿前馈（release-only；用户已选定先走 B1）**
+
+做法：在释放段给 phi 一条**规划好的参考轨迹**（不是常数），使离地瞬间的
+`phi_body` 与 `dphi/dt` 达到目标值；核心是**用 phi 的角速度去抵消飞行段腿长耦合将要产生的反作用**。
+
+实现入口（**用户 2026-10-10 定：优先 B1；若发现与 pitch 平衡或其他通道冲突，则换 B2**）：
+  B1) **改 WBC 的 `angle_R/L`（腿角任务）参考**，在释放段叠加前馈轨迹；
+  B2) 在现有 VL1/TR 的腿长空间驱动里，给 `[F_L, F_phi]` 增加 phi 分量。
+
+切换判据（B1 → B2）：B1 部署后若出现下列情况之一，关掉 B1、改 B2：
+  a) 释放段 pitch 反而变大（与 pitch 平衡冲突）；
+  b) WBC 报不可行 / 出现降级（`feasible=False` / `fallback` / `relaxed`）频率上升；
+  c) 腿长通道或轮通道出现新的饱和。
+
+目标值来源：阶段 A 的离地数据 + 离线自由飞行复算（后者对 phi 可信，前面已多次验证）。
+**目标值与轨迹不靠扫系数标定，改由三．C 末尾那条角冲量推导链直接算出**；
+算完报排查agent批准后部署。
+
+### FL15A 已回，B1 目标值推导结果（问题排查agent，2026-10-10）
+
+FL15A 实测：离地摆角速度 +0.243 rad/s（释放末段产生，非压缩段带入）；
+离地 `pitch=-0.0027`、接近 0；**飞行段 phi 控制角冲量 H_ctrl = -0.385 N*m*s，
+而离地角动量仅 -0.030 N*m*s（相差约 13 倍）**。
+
+推导（全部用实测值与公式，无标定系数）：
+
+  1) H_ctrl = -0.385 N*m*s（FL15A 实测）
+  2) 需补的离地俯仰角动量 H_need = -H_ctrl = +0.385 N*m*s
+     目标离地俯仰角速度 pitch_rate_target = H_need / Iyy = 0.385 / 0.2888 = **+1.33 rad/s**
+     （Iyy=0.2888 已实测；符号待单步自检确认，见下）
+  3) 释放段需额外交付的角冲量 = +0.385 - (-0.030) = **+0.415 N*m*s**
+     释放段时长约 0.108 s（THRUST 1.316~1.424）→ 平均需额外俯仰力矩 **约 3.8 N*m**
+     （相对腿关节限幅 40 N*m 很小，可行）
+
+**重要保留（不掩盖）：**
+- 这条只补偿“phi 控制的角冲量”。实测飞行段机体俯仰角速度峰值达 -4.5 rad/s 量级，
+  对应角动量约 1.3 N*m*s，远大于 0.385——说明 phi 控制不是唯一来源，
+  本前馈只能抵消其中一部分。先把这部分拿掉，看剩余量再决定后续。
+- 因此 B1 分两步：**B1a 只补这一项**（目标 +1.33 rad/s），跑一版看飞行段 max|pitch| 与
+  世界系摆角的变化；不够再谈 B1b（补剩余量）。
+- **符号必须单步自检**：先给一个幅度小的释放段腿摆前馈（只跑 10 ms、只施加不跑整跳），
+  量取释放段结束时的 `pitch_rate` 变化方向；方向与上文相反就把前馈取反。
+- 注入方式：在 THRUST 段给 WBC 的 `angle_R/L` 参考叠加一条斜坡轨迹（用户选定的 B1），
+  **压缩段与飞行段一律不动**；前馈做成可关的具名开关。
+
+**批准前不部署。**
+
+### B1a 探测结果与改走 B2（问题排查agent，2026-10-10）
+
+测试agent按准入第 1 步做了释放段小幅度探测（A=+0.05 / +0.50，未跑整跳）：
+
+  - 方向与推导一致；但灵敏度仅 **0.0125 (rad/s)/rad** → 达到目标 +1.33 rad/s 需幅值 **~107 rad**，不可行。
+  - 释放段 pitch 未被弄坏（max|pitch| 0.00201 -> 0.00200/0.00188），但也未推动；
+    WBC 全部 feasible，无降级，三条 B1→B2 切换判据均未触发。
+
+**结论：B1 通道（WBC `angle_R/L` 参考，二级任务）权限太低，不足以在 0.108 s 内交付 +0.415 N*m*s。
+排查agent批准改走 B2。**
+
+理由：B2 用的是现有 VL1/TR 腿长空间驱动里的 `[F_L, F_phi]` 旋量中的 `F_phi` 分量，
+**与飞行段 phi 控制是同一个通道**（正是它把腿摆动了 0.4~0.6 rad），有真实权限；
+而 B1 动的是二级任务，主任务一压就没权限了。
+
+**B2 实施与幅值辨识（同样先探测、后整跳）：**
+1. 只改 VL1/TR 释放段驱动的输出级，给 `[F_L, F_phi]` 加 `F_phi_ff`（具名可关开关，默认 0）；
+   压缩段与飞行段一律不动。
+2. **先做灵敏度探测（不跑整跳）**：取 `F_phi_ff` ∈ {2, 4, 8} N*m（每腿），各跑一次释放段，
+   量取离地瞬间 `pitch_rate`，给出灵敏度 (rad/s)/(N*m) 与线性度；
+   报回后由排查agent定幅值。
+3. 量级预估（仅作参考，不代替探测）：需额外交付 +0.415 N*m*s / 0.108 s ≈ 平均 **3.8 N*m**；
+   离线自由飞行测得 phi 通道的俯仰权限 7.57 rad/s² 每 N*m，若地面下同样是这个量级，
+   则所需 `F_phi_ff` 约 1~4 N*m（远小于 36/40 限幅）。
+4. **效果下界（测试agent问的）**：H_ctrl=0.385 只占实测机体角动量（约 ~1.3 N*m*s）的约 30%，
+   所以 B1a/B2a 预期只能把 FLIGHT `max|pitch|` 从 FL13 的 0.591 降到约 0.41 量级。
+   故下界定为 **≤0.45 rad**（即至少降 20%）；若低于 0.45 即算通道有效，剩余量归 B1b/B2b。
+5. 若探测显示灵敏度仍然极低（同量级于 B1），则两通道都不可行，停下来重新分析，
+   不再换第三种注入方式硬试。
+
+### B2 探测结果与整跳批准（问题排查agent，2026-10-10）
+
+测试agent探测结果：
+
+  B1a（angle 参考）：灵敏度 ≈0.0125 (rad/s)/rad，需 ~107 rad（不可行）
+  B2（求解后 phi 力）：灵敏度 ≈0.85 (rad/s)/N，需 ~1.6 N/腿（可行，权限高约 68 倍）
+
+**批准跑整跳，参数如下：**
+
+  RELEASE_PHI_FEEDFORWARD_FORCE = 1.6 N（每腿），**斜坡形式**：
+    进入 THRUST 后 20 ms 线性斜坡从 0 升到 1.6 N，尔后保持直到相位切换（离地），不做斜坡下降
+    （尾部切换由已连续化的飞行手接处理，不再重复斜坡）。
+
+依据：
+1. 幅值 1.6 N = 目标角冲量 0.415 N*m*s / 释放段 0.108 s / 当前灵敏度 0.85 反推；
+2. **斜坡而非常数**：直接阶跃会重演 FL7/FL8 那个“力阶跃->姿态/摆角注入”的问题（已有实测教训）；
+   20 ms 取释放段（108 ms）的约 1/5，兼顾“抑制阶跃”与“冲量损失可接受”；
+3. 斜坡造成的冲量损失（约 10%）先不补偿，以实测离地 `pitch_rate` 为准；
+   若实测离地 `pitch_rate` 低于目标 +1.33 rad/s，下一轮按实测比例放大（不拍）。
+
+验收：
+- 实测离地 `pitch_rate`（与 FL15A 的 -0.105 对比）、释放段 `pitch`/`pitch_rate`；
+- 飞行段 `max|pitch|` **≤0.45 rad**（效果下界，至少比 FL13 的 0.591 降 20%）；
+- 飞行段 `max|dphi/dt|`、世界系落地误差（与 FL13 对比）；
+- WBC 可行性、轮最大间隙、min leg；无 joint_limit/nonfinite_state/ABORT。
+
+开关默认关；若飞行段 `max|pitch|` 反而变大或出现振荡，立即置 0 并报排查agent。
+
+**阶段 C（已废弃，C1 静态核查不通过）**
+
+用户 2026-10-10 认为 ZMP 方案比摆腿前馈更系统（规划系数可由 ZMP 规划得出，不用标定），
+要求可行则优先。排查agent做了 C1 静态核查，结论**不可行**，三条障碍均在代码里查实：
+
+1. **ZMP 参考在跳跃路径下被强制关闭。**跳跃用 `model_variant="held_leg"`（**6 状态**），
+   而 `simulation.py:197-201`：`if base.zmp_reference and reduced.state_dim < 8: overrides["zmp_reference"]=False`。
+   因为 `_apply_zmp_reference` 要把摆腿分量写进参考状态的 `[:,6]/[:,7]` 两列，**6 状态模型没这两列**。
+   要用它必须切到 `leg_input`（8 状态）模型——那是换模型，不是加前馈。
+2. **更根本：ZMP 通道的驱动量是“前进加速度”，不是竖直推离。**
+   `Δ* = z_com*a(t)/g` 里的 `a` 是水平（前进）加速度；跳跃释放段基本竖直（`a_forward ≈ 0`），
+   所以即使切到 8 状态模型，释放段的 ZMP 参考也算成 ~0。
+3. 另外：`zmp_split = 1.0` 被强制写死（无 pitch 分配自由度）；`zmp_crank_limit = 0.18 rad`，权限很小。
+
+**更正**：之前写“C 与 B 同源、C 更系统”需修正——曲柄通道确实与摆腿前馈同源，
+但它由前进加速度驱动，在竖直起跳里拿不到有效输入。
+
+**C 的“系统化”诉求已并入 B1**（用户 2026-10-10 同意）：系数不靠扫，改由一阶物理推。
+推导链（全部是公式，无标定系数）：
+
+  1) 飞行段 phi 控制将要产生的角冲量  H_ctrl = ∫ tau_phi dt
+     （由离地四量与 phi 环增益 20.9/1.67、以及飞行段 phi 偏移预估直接积分）
+  2) 需要的离地俯仰角动量          H_takeoff = Iyy * pitch_rate_target
+     （Iyy = 0.2888 kg*m^2，已实测；pitch_rate_target = 使 H_takeoff = -H_ctrl）
+  3) 反算释放段所需腿摆前馈           以释放段可用地面反力/腿摆权限反求
+     phi_ref / dphi/dt 目标值（不引入经验系数）
+
+结果报排查agent**批准后才部署**。
+
+四、不做
+
+- 不做飞行段 pitch 外环（FL14b 已废弃）；
+- 不改压缩段（任何形式的前馈/预倾都禁止）；
+- 不改 phi 增益（20.9/1.67）、不改 `phi_eq`、不改前馈系数 -0.052、不改腿长剖面/速率/clamp；
+- 本轮阶段 A **不改任何控制**，只加采样。
+
+五、不变
+
+- 阶段 A 与 FL13 完全同参数同命令，只增加采样字段；
+- **速度/位移线本轮不管**（用户 2026-10-10：后面单独测试），
+  FL14 里写的 5 s 时长与速度任务专项不在本轮范围，本轮仍用 `--duration 3.0`；
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0（速度问题另议）；
+- 无扰动；腿关节限幅 40、轮限幅 6；轮穿地仅记录。
+
+六、保险与回退
+
+- 阶段 A 无风险（只加采样）；若字段打不出，先报字段清单再改。
+- 阶段 B/C 的回退：git revert 或关闭新增前馈开关（需把前馈做成可关的具名开关）。
+- 回退判据（阶段 B/C）：joint_limit / nonfinite_state / ABORT；
+  轮最大间隙低于 200 mm；离地瞬间 `phi` 或 `pitch_rate` 反而变大；pitch 出现持续振荡。
+
+七、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+阶段 A（诊断，与 FL13 完全同开关）：
+
+  tools/jump_diagnostic.py --stage FL15A --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+阶段 B1（待前馈轨迹辨识并报批后部署，新增可关开关）：
+
+  tools/jump_diagnostic.py --stage FL15B1 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend   （+ 前馈开关）
+
+两阶段可并行推进：A 先跑拿数据，B1 的轨迹与系数由离线辨识给出并报批后再跑。
+
+八、通过条件（阶段 A）
+
+1. 释放段逐拍数据齐全（含三个标记时刻与四个离地量）；
+2. 能明确回答“离地摆角速度来自释放段还是压缩段”；
+3. 给出“飞行段 phi 控制的反作用量级”与离地角动量的对比（判断前馈需要多大）；
+4. 无 joint_limit / nonfinite_state / ABORT；无断言失败。
+
+九、必须报告（阶段 A）
+
+- 释放段逐拍表（含标记时刻）；
+- 离地瞬间 `phi_body` / `dphi/dt` / `pitch` / `pitch_rate` 四个值；
+- 离地角动量（`pitch_rate`）与飞行段 phi 控制反作用的量级对比；
+- 结论：“摆角速度来源”判断 + 对前馈方案的定量要求。
+
+十、反馈格式
+
+### FL15A（先报这一份）
+
+VP编号：FL15A
+修改文件与函数（只加采样字段）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+释放段逐拍表（并标出 THRUST 开始/最大椎长速率/离地）：
+离地瞬间 phi_body/dphi/dt/pitch/pitch_rate：
+离地角动量 vs 飞行段反作用量级：
+摆角速度来源判断（只写数据支持的现象）：
+assertion_failures：
+结论（只写数据支持的现象）：
+是否允许进入下一阶段（B）：
+
+### FL15B1（A 报完、前馈轨迹报批后，再报这一份）
+
+VP编号：FL15B1
+修改文件与函数（前馈开关、angle_R/L 参考叠加、离线辨识表）：
+前馈轨迹与系数及其依据（含离线辨识表）：
+起跳前预检 / 单步自检 / 语法导入检查：
+释放段逐拍表与离地四量（与 FL15A 对照）：
+释放段 pitch 与 pitch_rate（判断是否与 pitch 平衡冲突）：
+WBC 可行性（feasible/fallback/relaxed 频率）：
+飞行段 max|pitch| 与 max|dphi/dt|（与 FL13 对照）：
+轮最大离地间隙（mm）与时刻：
+是否触发 B1→B2 切换判据（三．B）：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL16：释放段摆角前馈改走 external_force（修复 B2 结构问题）（问题排查agent，2026-10-10）
+
+一、根因（查实，不是推断）
+
+B2 实现（`control.py:418-433`）是在 `solve_wbc` **之后**把 phi 力矩硬加到总力矩：
+WBC 求解时按“没有这个力矩”算接触力/加速度，加完就不再匹配——姿态/接触任务被开环破坏，
+轮子又还在地面，地面反力实际分配变了而 WBC 假设没变。→ 对应实测“状态很奇怪”。
+
+对照 VP1 的做法（折进 `dynamics_bias`+限幅）又被 QP 完全吸收（实测净力矩逐位不变）。
+两次都不对的真正原因：**前馈没进入 WBC 的动力学约束**。
+
+接口事实（已读代码）：
+- `Algorithm/supervision.py:257,278-282`：`solve_wbc(..., external_force=None)`，
+  注释写明“external_force：调用方直接注入的广义等效力（跳跃用，方案 v3 第 6 节）”；
+- `Algorithm/wbc/*.py`：进入动力学约束 `M*qdd + h - S^T*tau - tau_ext = 0`（`h = h - external_force`），
+  **要求 nv 维**，维度不合法直接抛错；
+- `control.py:372-373` 现在 `external = None`。
+
+二、本轮改动（一项，语义必须同时改）
+
+1. 前馈从“解后硬加”改为**传入 `external_force`**：
+
+     tau_ff = 将 J^T*[0, F_phi] 映射到 nv 维广义坐标（只在两条腿的腿关节列非零，其余 0）
+     solve_wbc(..., external_force=tau_ff)
+
+   **同时**：输出端不再另加这个力矩——**直接用 WBC 解出的总力矩**。
+   这是避免双重计数的关汿：WBC 解出的 `S^T*tau_wbc` 已经是“包含前馈在内”的结果，
+   再加一次就会变成 `S^T(tau_wbc + tau_ff)`，与假设不符。
+   （两种做法只能取其一，本轮选“WBC 自己算进去”。）
+2. **20 ms 线性斜坡必须在本轮实现**（重要）：文档 B2 规格写明“进入 THRUST 后 20 ms 线性
+   0→1.58 N”，而上一轮 FL15B2 实际实现的是**常量阶跃**（与文档不符）。斜坡要在 FL16 路径里做，
+   即 **`external_force` 的幅值在进入 THRUST 后 20 ms 内线性从 0 升到 1.58 N**，尔后保持到相位切换。
+   依据：常量阶跃会重演 FL7/FL8 已实测的“力阶跃→姿态/摆角注入”。
+   幅值 1.58 N（每腿）、只在 THRUST 生效、压缩/飞行段不动、可关具名开关默认关。
+
+### 作废声明（必须在报告里保留）
+
+**上一轮 FL15B2 的整跳结果作废，不作任何结论依据。**理由：两处与文档不符
+  偏差一：前馈在 `solve_wbc` 之后硬加（破坏 WBC 动力学一致性）；
+  偏差二：常量阶跃，未做 20 ms 斜坡。
+故其“效果差很多、状态很奇怪”**不能归因到符号或幅值**，必须先修结构再谈。
+单步验证的“开启侧”必须是**带斜坡的 external_force 版本**，保证验证对象与规格一致。
+
+三、本轮只做单步验证（用户 2026-10-10 同意，不跑整跳、不跑释放探测）
+
+单步自检内容（开/关前馈在同一物理态下对比，**开启侧必须带 20 ms 斜坡**）：
+  a) **前馈确实进入了解**：`feasible`、`qacc`、接触力、`S^T*tau_wbc` 在开/关时必须有可见差异
+     （若逐位不变，说明又被吸收，不能上下一级）；
+  b) 差异量与 `tau_ff` 同量级（不能出现放大或符号翻转）；
+  c) 方向：离地俯仰角速度变化方向应为 **正**（与推导的目标 +1.33 rad/s 同向）；
+  d) 无 `feasible=False` / `fallback` / `joint_limit`。
+
+四、不做
+
+- 不跑整跳，不跑释放段探测（单步通过后再议下一级）；
+- 不改幅值/轨迹/相位范围/增益；不改压缩段；不恢复“解后硬加”的旧路径。
+
+五、不变
+
+- `RELEASE_PHI_FEEDFORWARD_FORCE = 1.58`、斜坡 20 ms；jump_height=0.18、jump_stroke=0.12、
+  jump_time=1.0、duration=3.0；负扰动；腿限幅 40、轮限幅 6。
+
+六、保险与回退
+
+- 开关默认关；验证不通过（差异不可见 / 符号反 / feasible 降级）一律不得上下一级，
+  报排查agent并保留前馈置 0。
+
+七、命令（单步验证）
+
+不开整跳，只跑单步对比脚本（开/关 juxtapose）；如现有工具无法只跑单步，则用 `duration=3.0` 但
+**前馈只在 THRUST 生效**，对比开启前后 THRUST 段同一时刻的 `qacc`/接触力/`tau_wbc`。
+
+八、通过条件
+
+1. 三条对比量（qacc / 接触力 / tau_wbc）在开/关之间有**可见且同量级**的差异；
+2. 差异方向与前馈同向（无符号翻转）；离地俯仰角速度变化为正；
+3. 无 feasible=False / fallback / joint_limit / nonfinite / ABORT；assertion_failures=0。
+
+九、必须报告
+
+- 开/关前馈的 `qacc`、接触力、`tau_wbc` 逐项对比（含差值）；
+- 是否出现“被吸收”（逐位不变）；
+- 若可行，给出释放段 `pitch_rate` 变化方向的单步证据（不要求跑完整释放）；
+- 结论 + 是否允许上下一级（释放段探测）。
+
+十、反馈格式
+
+VP编号：FL16
+修改文件与函数（external_force 注入、输出端不再硬加）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+开/关前馈对比（qacc / 接触力 / tau_wbc + 差值）：
+是否被吸收（逐位不变）：
+方向与量级判断：
+feasible/fallback/joint_limit：
+assertion_failures：
+结论（只写数据支持的现象）：
+是否允许上下一级：
+
+============================================================
+
+FL17B：释放段双参考重锚定（预倾轨迹 + 世界系腿锚定）（问题排查agent，2026-10-10）
+
+一、背景与已定参数（用户 2026-10-10 拍定）
+
+前面的三连失败（VP1 折进 bias 被吸收 / B2 解后硬加破坏一致性 / FL16 external_force 被当扰动补偿）
+根因都是“给 WBC 加力”——它会把已知的力当扰动抵消。本方案改走**重锚定任务参考**（不是加力）：
+WBC 会去**实现**它，而不是抵消它。
+
+已查实的接口事实：
+1. `loop.py:180-193` `explicit_jump_reference` → 用当前反馈构造一份 `MotionSample`，
+   以 `sample_override` 每拍传给 WBC（`loop.py:298`）→ **WBC 用这份参考代替 MPC 的解**。
+   字段顺序（`sampling.py::chassis_state`）：[0]pos [1]vel [2]pitch [3]pitch_rate [4]yaw [5]yaw_rate [6]hip [7]hip_rate。
+2. `control.py:333-334` `angle_reference_R/L = holds.get("angle_R"/"angle_L")`（来自 `loop.py:198-206` 的 `jump_holds`）
+   → **6 状态模型也能写腿角参考**（不需切 8 状态；更正之前错误结论）。
+3. 参考本是**每拍下发**的（MPC 也是每拍给一份），所以本方案只是**换数据源**，不涉及“冻结→重算”改动。
+
+锚定值（用户拍定，有计算依据）：
+
+  实测（`standing_pose`，mg=142.7 N）：
+    phi_world=-0.1263（站立静平衡）：dx=0.0000 m  → 静力矩 0.00 N*m
+    phi_world= 0.0000（腿真竖直）    ：dx=-0.0269 m → 静力矩 **-3.84 N*m（机头向上）**
+
+  phi_world=0 时轮在质心前方 26.9 mm，**静力矩与飞行段发散同向（都是机头向上）**，
+  等效角冲量 3.84*0.108=0.41 N*m*s（约 1.43 rad/s）→ 会加重发散。故**排除 0**，
+  取 `PHI_WORLD_ANCHOR = -0.1263`（静力矩自平衡；代价：推力有 mg*sin(0.1263)<20 N 的水平分量，约 12.6%）。
+
+二、本轮改动（三项，只在释放段（THRUST））
+
+1. **pitch 参考重锚定**：THRUST 段将 `sample_override` 的 pitch 分量（state[2]）由 0.0 改为规划轨迹
+
+     pitch_ref(t) = pitch0 + (theta_pre - pitch0) * S(u),  u = t_elapsed / T_release
+     S(u) = 6u^5 - 15u^4 + 10u^3        # 最小 jerk，两端速度/加速度均为 0
+
+   依据：阶跃会在释放段开头造成力矩冲击（FL7/FL8 实测教训）；线性斜坡仍有加速度跳变。
+   `theta_pre` **量级从 FL13 实测飞行段俯仰变化量 0.591 rad 起（方向相反）**，靠实测迭代，不扫系数。
+2. **腿角参考世界系锚定**：同一段内将 `angle_R/L` 参考（`jump_holds` 机制）按同一式子写
+
+     phi_body_ref(t) = PHI_WORLD_ANCHOR + pitch_ref(t)
+
+   依据：与下落段 `_phi_force` 的 `phi_body_ref = world_ref + float(pitch)` 同一式子（已几何实证）。
+   两个参考**运动学自洽**（腿角鎏言 pitch 同步移动），不会互拉——这是本方案与之前阶跃方案的关键差别。
+3. **数据源切换**：THRUST 段由自定义规划提供参考（`sample_override` + `angle_R/L` 参考），
+   不再用 MPC 解出的参考；离地后（FLIGHT）回到原逻辑。
+
+三、不做
+
+- **不改任何权重/增益/限幅**；不碰 `forward_velocity`（用户：发散不确定，先不管，出问题再议；
+  目前目标速度仍为 0）；不做有速度输入的跳跃（后续单独测）。
+- 不做飞行段 pitch 外环（FL14b 已废弃）；不做摆腿力前馈（B1/B2/FL16 已先后否定）。
+- 不改压缩段；不改腿长剖面/速率/clamp。
+
+四、不变
+
+- jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动；
+- 腿关节限幅 40、轮限幅 6；轮穿地仅记录；重锚定（MPC）逻辑不变；
+- 飞行段phi 控制（KP/KD=20.9/1.67、c=-0.052、 `phi_eq` 角度前馈）不变。
+
+五、保险与回退
+
+- 本方案做成**可关具名开关**（默认关）；关掉即完全回到 FL13 行为。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  释放段 max|pitch| 反而变大；飞行段 max|pitch| 大于 FL13 的 0.591；pitch 出现持续振荡。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL17B --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend   （+ 新增双参考开关）
+
+对照：FL13 run01（无预倾基准）、FL15A run01（离地四量基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **参考写入专项（必做）**：逐拍打印 `sample_override` 的 state[2]（pitch 参考）、
+   `angle_reference_R/L`、以及实测 `pitch`/`phi_body`，验证：
+   a) pitch 参考确实是规划轨迹（不是阶跃、不是 0）；
+   b) 腿角参考符合 `PHI_WORLD_ANCHOR + pitch_ref`；
+   c) 实测 `phi_body - pitch`（世界系）在释放段保持接近 -0.1263。
+3. **符号专项**：确认 pitch 参考变正/变负后，离地实测 pitch 的同向变化（防止参考符号或字段错位）。
+
+八、通过条件
+
+1. 参考写入专项通过（三条）；
+2. 飞行段 `max|pitch|` **小于 FL13 的 0.591**（这是本轮唯一目标）；
+3. 释放段 `max|pitch|` 不出现异常尖峰（可超调、不可振荡）；
+4. 世界系摆角落地误差不劣于 FL13 的 0.153（不作硬指标，但要报实际值）；
+5. 轮最大离地间隙 ≥ FL13 的 227.5 mm（不得因预倾把高度吃掉）；
+6. 无 joint_limit / nonfinite_state / ABORT；无断言失败；min leg 不越界。
+
+九、必须报告
+
+- 参考写入专项（七.2）四线；符号专项（七.3）；
+- 释放段逐拍：`pitch_ref` / 实测 `pitch` / `pitch_rate` / `phi_body` / 世界系腿角；
+- 离地四量（与 FL15A 对照）；
+- 飞行段 `max|pitch|`（与 FL13 对照）、`max|dphi/dt|`、世界系落地误差；
+- 轮最大间隙、min leg、下伸段腿长；
+- 位移/速度（只记录，不要求收敛）；assertion_failures。
+
+十、反馈格式
+
+VP编号：FL17B
+修改文件与函数（sample_override 的 pitch 参考、angle_R/L 世界系锚定、开关）：
+theta_pre 取值与依据：
+起跳前预检 / 单步自检 / 语法导入检查：
+参考写入专项（pitch_ref/angle_ref/实测 pitch/世界系腿角）：
+符号专项：
+释放段逐拍表：
+离地四量（与 FL15A 对照）：
+飞行段 max|pitch|（与 FL13 对照）/ max|dphi/dt| / 世界系落地误差：
+轮最大离地间隙（mm）与时刻 / min leg / 下伸段腿长：
+位移/速度（仅记录）：
+assertion_failures：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================
+
+FL18：释放段“轮-髋协同”双通道重锚定（预倾 + 世界系腿竖直）（问题排查agent，2026-10-10）
+
+一、背景与结论更正
+
+前面四次尝试均失败于“给 WBC 加力”：VP1（折进 dynamics_bias）被 QP 吸收、B2（解后硬加）破坏一致性、
+FL16（external_force）被当扰动补偿、FL17B（写 pitch 参考）被写进去了但**执行不出来**。
+
+FL17B 实测：参考 0.591 → 实测 0.058（**跟踪率约 10%**）；飞行段 max|pitch| 0.7832（劣于 FL13 的 0.6193）；
+轮最大间隙 183.7（FL13 227.5）；min leg 0.10517（越界）；世界系落地误差 0.3717（FL13 0.1181）。
+
+**排查agent更正了自己两条错论**：
+1. “腿角参考写不进去（需 8 状态）”错——`control.py:333` 的 `angle_R/L` 参考在 6 状态模型也能写。
+2. “预倾与腿竖直不可兼得”错——那是**飞行段角动量守恒**的结论；释放段轮子在地面，
+   **地面反力是外部力矩通道**，打破了守恒，所以两者可分为两个通道**协同**。
+
+本轮重新定性：`phi_world = phi_body − theta` 里，`phi_body` 由腿关节给、`theta` 由轮/地面反力给，
+**可以各自独立**。实验结果也正好印证：腿通道有效（释放段被明显扰动）、轮通道被抢（pitch 只有 10%）。
+
+二、两通道分工（本方案核心）
+
+| 目标 | 通道 | 当前状态 |
+|---|---|---|
+| 腿世界系竖直（蹬腿力竖直） | 腿关节 / `angle_R/L` 任务（髋轴即俯仰轴，±20 N·m） | 有效 |
+| pitch 预倾 | **轮通道**（pitch 任务“两轮同向”） | **无效**：`THRUST: wheel_owned=True`，轮被 jump 独占 |
+
+关系式（与下落段 `_phi_force` 同一式子）：`phi_body_ref(t) = PHI_WORLD_ANCHOR + pitch_ref(t)`
+
+三、**要测前先查清的两件事（只读，不改代码）**
+
+1. **`thrust_wheel_gain` 的用途**：`jump.py` 在 THRUST 下 `wheel_owned=True, wheel_torque=config.thrust_wheel_gain`。
+   它是干什么的（抵住轮子反转？补反作用？）→ 决定能否 `wheel_owned=False`，或只能改成“叠加到 WBC 轮输出”。
+2. **THRUST 段 pitch 任务的 `desired/achieved/residual`**（字段 FL13 已加）→
+   预期 `achieved≈0`、`residual` 大，用于坐实“轮被抢 → pitch 无执行器”的假设。
+
+四、要改什么（三项，仅 THRUST 段，均做成可关具名开关）
+
+1. **轮归属**：THRUST 段改为 `wheel_owned=False`（或按三.1 结果改为叠加），让 pitch 任务重新拿到执行器。
+2. **pitch 参考重锚定（走轮通道）**：`state[2]`（已核实 = pitch）由 0.0 改为最小 jerk 轨迹：
+
+     pitch_ref(t) = pitch0 + (theta_pre - pitch0) * S(u),  u = t_elapsed / T_release
+     S(u) = 6u^5 - 15u^4 + 10u^3      # 两端速度/加速度均为 0，避开 FL7/FL8 的阶跃教训
+
+   `theta_pre` 量级从 FL13 实测飞行段俯仰变化量 **0.591 rad 起（方向相反）**，靠实测迭代，不扫系数。
+3. **腿角参考世界系锚定（走髋通道）**：`phi_body_ref(t) = PHI_WORLD_ANCHOR + pitch_ref(t)`。
+   `PHI_WORLD_ANCHOR = -0.1263`（用户拍定）。依据（已实测，mg=142.7 N）：
+   取 0 时轮在质心前方 26.9 mm → 静力矩 **-3.84 N*m 机头向上**，与飞行段发散同向，会加重发散；
+   取 -0.1263 时静力矩为 0，代价是推力有约 12.6% 的水平分量。
+
+五、**分阶段测试（关键：逐步放开，避免无法归因）**
+
+  **阶段 1：只开腿锚定**（pitch 参考仍为 0，轮归属不变）
+    目的：单独看腿锚定对释放段几何/高度/离地状态的影响。
+  **阶段 2：只开轮通道预倾**（腿锚定关，pitch 参考为轨迹）
+    目的：单独看预倾能不能被追上、对飞行段 pitch 的影响。
+  **阶段 3：两通道同时开**
+    目的：看协同（预倾与腿竖直同时成立）。
+
+每阶段跑一次整跳，命令与 FL13 相同，只换开关组合；阶段 3 不通过则退回阶段 1/2 的结果。
+
+六、每阶段必须报告的数据（缺一不可）
+
+- 释放段逐拍：`pitch_ref` / 实测 `pitch` / `pitch_rate` / `phi_body` / `phi_body - pitch`（世界系）/ `L` / `L_dot` /
+  `wheel_gap` / 轮力矩 / 髋力矩；
+- **pitch 任务的 `desired/achieved/residual`**（THRUST）；
+- **`angle_R/L` 任务的 `desired/achieved/residual`**（THRUST）；
+- 离地四量（与 FL15A 对照）；
+- 飞行段 `max|pitch|` / `max|dphi/dt|` / 世界系落地误差；
+- 轮最大间隙与时刻 / min leg / 下伸段腿长；
+- 位移/速度（仅记录）；assertion_failures。
+
+七、通过条件
+
+- 阶段 1：释放段世界系腿角保持 **-0.1263 ± 0.03**；释放段/飞行段 `max|pitch|` 不劣于 FL13 的 0.6193；
+  轮最大间隙 ≥ 227.5 mm；min leg ≥ 0.114。
+- 阶段 2：实测 pitch 对参考的**跟踪率 ≥ 50%**（验证轮通道真的拿回来了）；
+  飞行段 `max|pitch|` **< FL13 的 0.6193**。
+- 阶段 3：两条都达标，且飞行段 `max|pitch|` **≤ 0.45 rad**（比 FL13 降 ≥20%）。
+- 全部阶段：无 joint_limit / nonfinite_state / ABORT；无持续振荡；min leg 不越界。
+
+八、保险与回退
+
+- 三个开关默认全关；关掉即完全回到 FL13 行为。
+- 任何阶段回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  释放段 `max|pitch|` 异常尖峰；飞行段 `max|pitch|` 大于 FL13；pitch 持续振荡。
+
+九、不做
+
+- **不改任何权重/增益/限幅**；不碰 `forward_velocity`（用户：先不管，出问题再议；目标速度仍 0）；
+  不做有速度输入的跳跃（后续单独测）。
+- 不恢复“解后硬加”或 `external_force` 旧路径；不改压缩段；不改腿长剖面/速率/clamp；
+  不做飞行段 pitch 外环。
+
+十、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL18S1 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend   （+ 阶段对应的开关）
+
+阶段 2/3 同命令，仅改 stage 名与开关组合。对照：FL13 run01（基准）、FL15A run01（离地四量）。
+
+十一、反馈格式
+
+VP编号：FL18S<1|2|3>
+三.1/三.2 只读核查结论（投入本轮前先回）：
+修改文件与函数（轮归属、pitch 参考、腿锚定、开关）：
+theta_pre 取值与依据：
+起跳前预检 / 单步自检 / 语法导入检查：
+释放段逐拍表：
+pitch 任务 desired/achieved/residual：
+angle_R/L 任务 desired/achieved/residual：
+参考跟踪率（实测 pitch / 参考 pitch）：
+世界系腿角在释放段的保持情况：
+离地四量（与 FL15A 对照）：
+飞行段 max|pitch|（与 FL13 对照）/ max|dphi/dt| / 世界系落地误差：
+轮最大离地间隙 / min leg / 下伸段腿长：
+位移/速度（仅记录）：
+assertion_failures：
+结论（只写数据支持的现象）：
+是否允许进入下一阶段：
+
+============================================================
