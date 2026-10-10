@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
                         help="FL1：FLIGHT 或真离地时输出显式零力矩，不保持地面力矩")
     parser.add_argument("--flight-leg-retract", action="store_true",
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
+    parser.add_argument("--flight-leg-extend", action="store_true",
+                        help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--jump-height", type=float, default=None,
                         help="启用跳跃并给定目标质心抬升 [m]")
     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
@@ -92,7 +94,8 @@ def main() -> int:
             leg_length_thrust=args.leg_length_thrust,
             thrust_only=args.thrust_only,
             flight_zero_torque=args.flight_zero_torque,
-            flight_leg_retract=args.flight_leg_retract)
+            flight_leg_retract=args.flight_leg_retract,
+            flight_leg_extend=args.flight_leg_extend)
     summary = sim.summary(args.duration)
     _LOGGER.info("仿真结束：完成=%s 停止原因=%s 里程=%.4f m",
                  summary["completed"], summary["stop_reason"], sim.distance)

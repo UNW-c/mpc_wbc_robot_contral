@@ -42,33 +42,129 @@ JUMP_COM_VERTICAL_WEIGHT = 5000.0
 FLIGHT_RETRACT_KP = 3000.0        # [N/m]
 FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
 FLIGHT_RETRACT_MARGIN = 0.005     # [m]
+# FL4（2026-10-09，用户批准）：上升收腿的参考速率限幅与力矩上限。
+FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s] 收腿参考速率上限
+FLIGHT_RETRACT_TORQUE_LIMIT = 36.0  # [N*m] 上升收腿力矩上限（=40 的 90%）
+
+# FL6（2026-10-09，用户批准）：飞行段腿摆角 phi 稳定。
+# kp=I*omega^2, kd=I*2*zeta*omega，I≈0.045 kg·m²（phi 方向有效惯量），zeta=1，omega=2π*2 rad/s。
+PHI_REFERENCE = -0.1263   # [rad] 摆角参考（标称共模摆角）
+KP_PHI = 7.0              # [N*m/rad]
+KD_PHI = 1.1              # [N*m*s/rad]
+
+
+def _leg_axis_torque(dynamics, force_per_leg) -> np.ndarray:
+    """逐腿轴向力（F_phi=0）-> 执行器力矩；见 ``_leg_wrench_torque``。"""
+    return _leg_wrench_torque(dynamics, force_per_leg, np.zeros(2))
+
+
+def _leg_wrench_torque(dynamics, force_L, force_phi) -> np.ndarray:
+    """逐腿 (F_L, F_phi) 力旋量 -> 执行器力矩：``tau = J^T @ [F_L, F_phi]``，
+    并 clamp 到执行器限幅。FL6：飞行段用 F_phi 稳定摆角。"""
+    from . import robot as R  # 延迟导入，避免模块级循环依赖
+    dynamics.leg_state()  # 惰性建立解析运动学
+    torque = np.zeros(dynamics.model.nu)
+    for side, leg in enumerate(R.LEGS):
+        kin = dynamics._leg_kinematics[leg.name]
+        angles = {name: float(dynamics.data.qpos[dynamics.model.joint(name).qposadr[0]])
+                  for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+        tau = kin.jacobian(angles).T @ np.array([float(force_L[side]), float(force_phi[side])])
+        for offset, actuator in enumerate(dynamics.leg_actuators[2 * side:2 * side + 2]):
+            torque[actuator] = tau[offset]
+    return np.clip(torque, dynamics.limits.lower, dynamics.limits.upper)
+
+
+def _pd_force(l_ref, leg_position, leg_velocity) -> np.ndarray:
+    """同一组腿长 PD：``F_L = kp*(l_ref - L) - kd*Ldot``（腿长顺序 [L_R,phi_R,L_L,phi_L]）。"""
+    forces = []
+    for side in range(2):
+        index = 2 * side
+        forces.append(FLIGHT_RETRACT_KP * (float(l_ref) - float(leg_position[index]))
+                      - FLIGHT_RETRACT_KD * float(leg_velocity[index]))
+    return np.asarray(forces, dtype=float)
+
+
+def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
+    """FL7：带参考腿速的腿长 PD：``F_L = kp*(l_ref - L) + kd*(v_ref - Ldot)``。"""
+    forces = []
+    for side in range(2):
+        index = 2 * side
+        forces.append(FLIGHT_RETRACT_KP * (float(l_ref) - float(leg_position[index]))
+                      + FLIGHT_RETRACT_KD * (float(v_ref) - float(leg_velocity[index])))
+    return np.asarray(forces, dtype=float)
+
+
+def _phi_force(leg_position, leg_velocity) -> np.ndarray:
+    """FL6 飞行段摆角 PD：``F_phi = kp_phi*(phi_ref-phi) - kd_phi*phi_dot``。"""
+    forces = []
+    for side in range(2):
+        index = 2 * side + 1
+        forces.append(KP_PHI * (PHI_REFERENCE - float(leg_position[index]))
+                      - KD_PHI * float(leg_velocity[index]))
+    return np.asarray(forces, dtype=float)
 
 
 def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
                               leg_length_min, leg_length_max) -> np.ndarray:
-    """FL2 飞行段主动收腿力矩：``tau = J^T @ [F_L, 0]``，``F_L = kp*(L_ref-L) - kd*Ldot``。
-
-    ``L_ref = leg_length_min + FLIGHT_RETRACT_MARGIN``，并 clamp 到
-    ``[leg_length_min, leg_length_max]``；输出力矩 clamp 到执行器限幅。
-    腿长顺序与 ``leg_state()`` 一致：[L_R, phi_R, L_L, phi_L]。
-    """
-    from . import robot as R  # 延迟导入，避免模块级循环依赖
+    """FL2 飞行段主动收腿力矩：``l_ref = leg_length_min + FLIGHT_RETRACT_MARGIN``。"""
     l_ref = min(max(float(leg_length_min) + FLIGHT_RETRACT_MARGIN,
                     float(leg_length_min)), float(leg_length_max))
-    dynamics.leg_state()  # 惰性建立解析运动学
-    torque = np.zeros(dynamics.model.nu)
-    for side, leg in enumerate(R.LEGS):
-        index = 2 * side
-        length = float(leg_position[index])
-        rate = float(leg_velocity[index])
-        force = FLIGHT_RETRACT_KP * (l_ref - length) - FLIGHT_RETRACT_KD * rate
-        kin = dynamics._leg_kinematics[leg.name]
-        angles = {name: float(dynamics.data.qpos[dynamics.model.joint(name).qposadr[0]])
-                  for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
-        tau = kin.jacobian(angles).T @ np.array([force, 0.0])
-        for offset, actuator in enumerate(dynamics.leg_actuators[2 * side:2 * side + 2]):
-            torque[actuator] = tau[offset]
-    return np.clip(torque, dynamics.limits.lower, dynamics.limits.upper)
+    return _leg_axis_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity))
+
+
+def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                              leg_length_min, leg_length_max, nominal_length,
+                              retract_state=None, dt=0.0):
+    """FL3/FL4/FL7 飞行腿剖面：上升（vz>0）收腿抬轮；下落（vz<0）向 L0 伸腿。
+
+    FL7（方案 A，手接连续）：上升段状态为二元组 ``(L_ref, v_ref, L_entry, ref_accel)``；
+    首次进飞行或由下落段重新进上升段时捕获实测状态 ``L_ref=L_entry=max(L_R,L_L)``、
+    ``v_ref=Ldot_entry``，因此手接第一步 ``F_L = KP*(L_ref-L)+KD*(v_ref-Ldot) ≈ 0``（不再阶跃）。
+    之后 ``v_ref`` 以 ``ref_accel`` 向 ``-RATE_LIMIT`` 收敛，``L_ref += v_ref*dt``，
+    且 ``L_ref = min(L_ref, L_entry)`` 防止参考继续伸长。下落段 ``L_ref=L0, v_ref=0``（与原行为一致）。
+    返回 ``(torque, new_retract_state)``。
+    """
+    lo = float(leg_length_min)
+    hi = float(leg_length_max)
+    if float(vertical_velocity) < 0.0:
+        l_ref = min(max(float(nominal_length), lo), hi)
+        torque = _leg_wrench_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity),
+                                    _phi_force(leg_position, leg_velocity))
+        return torque, None
+    target = lo + FLIGHT_RETRACT_MARGIN
+    if retract_state is None:
+        larger = 0 if float(leg_position[0]) >= float(leg_position[2]) else 2
+        l_entry = max(float(leg_position[0]), float(leg_position[2]))
+        v_ref = float(leg_velocity[larger])
+        l_ref = l_entry
+        t_apex = max(float(vertical_velocity) / GRAVITY, 1.0e-6)
+        ref_accel = (abs(v_ref) + FLIGHT_RETRACT_RATE_LIMIT) / t_apex
+    else:
+        l_ref, v_ref, l_entry, ref_accel = (float(retract_state[0]), float(retract_state[1]),
+                                            float(retract_state[2]), float(retract_state[3]))
+        delta = -FLIGHT_RETRACT_RATE_LIMIT - v_ref
+        step = ref_accel * float(dt)
+        if abs(delta) <= step:
+            v_ref = -FLIGHT_RETRACT_RATE_LIMIT
+        else:
+            v_ref += step * (1.0 if delta > 0 else -1.0)
+        l_ref = min(l_ref + v_ref * float(dt), l_entry)
+    l_ref = min(max(l_ref, target), hi)
+    forces = _pd_force_v(l_ref, v_ref, leg_position, leg_velocity)
+    torque = _leg_wrench_torque(dynamics, forces, _phi_force(leg_position, leg_velocity))
+    torque = np.clip(torque, -FLIGHT_RETRACT_TORQUE_LIMIT, FLIGHT_RETRACT_TORQUE_LIMIT)
+    return torque, (l_ref, v_ref, l_entry, ref_accel)
+
+
+def landing_buffer_torque(dynamics, leg_position, leg_velocity,
+                          leg_length_min, leg_length_max, nominal_length) -> np.ndarray:
+    """FL3 落地缓冲：同一组腿长 PD 对 L0 做弹簧阻尼（受压时向 L0 推回）。
+
+    说明：文档只给“从 L0 压缩到目标压缩量”与同一组 PD，未明写 l_ref；按弹簧阻尼
+    缓冲的物理，l_ref 取标称 L0（若取 0.197 会产生向下的腿力，与缓冲相反）。
+    """
+    l_ref = min(max(float(nominal_length), float(leg_length_min)), float(leg_length_max))
+    return _leg_axis_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity))
 
 
 @dataclass(frozen=True)

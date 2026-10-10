@@ -193,6 +193,9 @@ class JumpPlanner:
         self.direction_lost_isolated_R = False
         self.direction_lost_isolated_L = False
         self.transition_reason: str | None = None
+        # FL4（2026-10-09）：进入 FLIGHT 后“曾真实几何离地”latch；仅 latch 置位后才允许 LANDING，
+        # 避免 release_end 在仍接地时触发 FLIGHT 后立即被几何接触误判落地。
+        self._airborne_confirmed = False
         self._direction_lost_seen = {"R": False, "L": False}
 
     # ------------------------------------------------------------------ 事件
@@ -203,6 +206,7 @@ class JumpPlanner:
         self.started_at = float(time)
         self.phase_since = float(time)
         self.transition_reason = "跳跃开始"
+        self._airborne_confirmed = False
         config = self.config
         _LOGGER.info(
             "跳跃开始：目标高度 %.3f m | 压缩行程 %.3f m | 压缩终点 %.4f m | "
@@ -293,18 +297,23 @@ class JumpPlanner:
             # 压在地面时法向力也会掉到零；据此断开控制器会让机体在最需要控姿时失控（已实测）。
             if obs.wheel_gap > LIFTOFF_GAP:
                 self._enter(JumpPhase.FLIGHT, obs,
-                            "轮地间隙张开到 %.1f mm（真离地，腿长 %.4f m，腿长率 %+.3f m/s）"
+                            "轮地间隙张开到 %.1f mm（几何离地，腿长 %.4f m，腿长率 %+.3f m/s）"
                             % (1.0e3 * obs.wheel_gap, obs.leg_length, obs.leg_length_rate))
             elif obs.leg_length >= config.release_end:
+                # FL3 更新版（2026-10-09）：恢复 release_end 触发。它是推离完成的标志，也是轮真正
+                # 离开地面的起点（实测：释放段腿伸展量≈base 上升量，wheel_gap 全程＜0.1 mm）。
                 self._enter(JumpPhase.FLIGHT, obs,
-                            "到达释放上限 %.4f m（接触仍在，按兜底判据转飞行）" % config.release_end)
+                            "推离完成（腿到达释放上限 %.4f m，gap=%.2f mm，轮即将离地）"
+                            % (config.release_end, 1.0e3 * obs.wheel_gap))
             return self._command(self.phase)
         if self.phase is JumpPhase.FLIGHT:
-            # 着地保险：几何双轮接触与法向力估计必须同时确认。
-            if all(obs.geometry_contact) and all(obs.contact):
+            # FL4：先置位“曾真实几何离地”latch；只有 latch 置位后，几何接触才允许转 LANDING。
+            if obs.wheel_gap > LIFTOFF_GAP:
+                self._airborne_confirmed = True
+            if self._airborne_confirmed and all(obs.geometry_contact) and obs.wheel_gap <= 0.0:
                 self._enter(JumpPhase.LANDING, obs,
-                            "重新检测到接触（落地腿长 %.4f m，姿态 %.2f deg）"
-                            % (obs.leg_length, obs.pitch * 57.2957795))
+                            "几何接触恢复（落地腿长 %.4f m，间隙 %.2f mm，姿态 %.2f deg）"
+                            % (obs.leg_length, 1.0e3 * obs.wheel_gap, obs.pitch * 57.2957795))
             return self._command(self.phase)
         if self.phase is JumpPhase.LANDING:
             if (all(obs.geometry_contact) and all(obs.contact)

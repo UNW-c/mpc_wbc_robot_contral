@@ -46,7 +46,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              leg_length_thrust: bool = False,
              thrust_only: bool = False,
              flight_zero_torque: bool = False,
-             flight_leg_retract: bool = False) -> None:
+             flight_leg_retract: bool = False,
+             flight_leg_extend: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -55,7 +56,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     """
     m, d = sim.model, sim.data
     from .sampling import FeedbackSampler
-    from .control import mpc_stage, wbc_stage, flight_leg_retract_torque
+    from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
+                          flight_leg_profile_torque, landing_buffer_torque)
     from .jump import JumpObservation, LIFTOFF_GAP
     from Algorithm.contact_state import JumpPhaseHint
     from Algorithm.mpc.trajectory import MotionSample
@@ -83,6 +85,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     thrust_applied_last = False
     previous_com_xz = None
     previous_com_time = None
+    flight_leg_ref = None        # FL4：飞行上升收腿的限速参考（跨帧保持）
     feedback = None              # 采样级：最近一拍反馈
     solution = None              # MPC 级：最近一次解（WBC 与记录共用）
     reason = None
@@ -289,10 +292,40 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         geometrically_airborne = bool(jump_wheel_gap is not None and jump_wheel_gap > LIFTOFF_GAP)
         flight_zero = bool(flight_zero_torque and jump_command is not None
                            and (jump_command.phase.value == "FLIGHT" or geometrically_airborne))
-        # FL2（2026-10-09）：几何离地时用主动收腿力矩代替零力矩（腿收短、把轮抬高）。
-        flight_retract = bool(flight_leg_retract and geometrically_airborne
-                              and sim.jump is not None)
-        if flight_retract:
+        jump_phase_value = None if jump_command is None else jump_command.phase.value
+        # FL3（2026-10-09）：飞行腿剖面（上升收腿/下落伸腿）与落地缓冲。
+        leg_now = None
+        leg_rate_now = None
+        landing_buffer = False
+        if sim.jump is not None and flight_leg_extend and (geometrically_airborne
+                                                           or jump_phase_value in ("LANDING", "FLIGHT")):
+            leg_now = sim.dyn.leg_state()
+            leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+            compression_target = (sim.jump.config.leg_length_nominal
+                                  - (sim.jump.config.leg_length_nominal
+                                     - sim.jump.config.leg_length_min) * 0.5)
+            landing_buffer = bool(jump_phase_value == "LANDING"
+                                  and float(d.qvel[2]) < 0.0
+                                  and min(float(leg_now[0]), float(leg_now[2])) > compression_target)
+        # FL5（2026-10-09）：飞行剖面门控改为“FLIGHT 相位或几何离地”（FL4 因只靠 gap>1mm，
+        # 推离完成时 gap≈0.03 mm 剖面不启动，腿被动伸到上限）。
+        flight_profile = bool(flight_leg_extend and sim.jump is not None
+                              and (jump_phase_value == "FLIGHT" or geometrically_airborne))
+        # FL2（2026-10-09）：仅收腿（无伸腿开关时），几何离地时用收腿力矩代替零力矩。
+        flight_retract = bool(flight_leg_retract and not flight_leg_extend
+                              and geometrically_airborne and sim.jump is not None)
+        if landing_buffer:
+            torque = landing_buffer_torque(sim.dyn, leg_now, leg_rate_now,
+                                           sim.jump.config.leg_length_min,
+                                           sim.jump.config.leg_length_max,
+                                           sim.jump.config.leg_length_nominal)
+        elif flight_profile:
+            torque, flight_leg_ref = flight_leg_profile_torque(
+                sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
+                sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
+                sim.jump.config.leg_length_nominal,
+                retract_state=flight_leg_ref, dt=float(m.opt.timestep))
+        elif flight_retract:
             leg_now = sim.dyn.leg_state()
             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
             torque = flight_leg_retract_torque(sim.dyn, leg_now, leg_rate_now,
@@ -308,7 +341,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             else:
                 torque = np.zeros_like(torque)
         write_actuator_output(d, torque)
-        if flight_retract:
+        if landing_buffer:
+            output_source = "landing_buffer"
+        elif flight_profile:
+            output_source = "flight_leg_profile"
+        elif flight_retract:
             output_source = "flight_leg_retract"
         elif flight_zero:
             output_source = "flight_zero_torque"
@@ -415,15 +452,14 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     assertion_passed = False
                     reasons.append("thrust_not_applied")
                 if previous_phase == "FLIGHT" and current_phase == "LANDING":
-                    if not geometry_contact_candidate:
+                    # FL6（2026-10-09）：与 jump.py 纯几何判据一致，不再要求估计器接触/法向力。
+                    if not bool(all(geometry_flags)):
                         assertion_passed = False
                         reasons.append("geometry_contact_not_confirmed")
-                    if not estimator_contact_confirmed:
+                    gap_min = float(np.min(np.asarray(wheel_points, dtype=float)[:, 2]))
+                    if not (gap_min <= 0.0):
                         assertion_passed = False
-                        reasons.append("estimator_contact_not_confirmed")
-                    if not normal_force_positive:
-                        assertion_passed = False
-                        reasons.append("normal_force_not_positive")
+                        reasons.append("wheel_gap_not_closed")
                 if previous_phase == "LANDING" and current_phase == "RECOVER" and not estimator_contact_confirmed:
                     assertion_passed = False
                     reasons.append("dual_contact_not_confirmed")
@@ -504,6 +540,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "geometrically_airborne": bool(geometrically_airborne),
                 "flight_zero_torque": bool(flight_zero_torque),
                 "flight_leg_retract": bool(flight_leg_retract),
+                "flight_leg_extend": bool(flight_leg_extend),
                 "mpc_called": bool(mpc_called),
                 "wbc_due": bool(sim.timing.wbc_due(step)),
                 "mpc_solution": None if solution is None else {
