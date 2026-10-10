@@ -50,10 +50,9 @@ FLIGHT_RETRACT_TORQUE_LIMIT = 36.0  # [N*m] 上升收腿力矩上限（=40 的 9
 PHI_WORLD_REFERENCE = -0.1263   # [rad] 世界系摆角参考（=phi_eq(0.28)）
 KP_PHI = 20.9             # [N*m/rad] FL12 新增益（用户批准）
 KD_PHI = 1.67             # [N*m*s/rad] FL12 新增益（用户批准）
-# FL12（2026-10-09）：腿摆角耦合前馈系数与静平衡角度前馈。
-# 系数专项实测（对称双施加，L=0.170~0.328）：c_opt=-A10/A11 均为负，量级 0.037~0.063（均值≈-0.052）。
-# 文档给 +0.15（符号与量级均不符），待排查agent确认后再填；本版先置 0（前馈关闭）。
-FEEDFORWARD_COUPLING = 0.0       # [-] F_phi += c*F_L（待确认，当前关闭）
+# FL13（2026-10-10）：启用耦合前馈，c 取测试agent专项实测值（对称双施加、共模 phidd 过零）。
+# 实测 c_opt 区间 -0.037~-0.063，取 -0.052；文档原 +0.15（单腿口径）作废。
+FEEDFORWARD_COUPLING = -0.052    # [-] F_phi += c*F_L（仅飞行下落段）
 PHI_EQ_SLOPE = 0.97             # [rad/m] phi_eq 斜率（文档离线拟合）
 PHI_EQ_ANCHOR_LENGTH = 0.28     # [m] phi_eq 锚点腿长
 

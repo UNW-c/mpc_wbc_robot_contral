@@ -3071,3 +3071,119 @@ ctrl 与 raw、tau_jump：
 是否允许进入下一轮：
 
 ============================================================
+
+FL13：启用耦合前馈（c=-0.052）+ 速度任务不收敛专项排查（问题排查agent，2026-10-10）
+
+一、背景（FL12 run01 实测）
+
+FL12（c=0 + 新增益 20.9/1.67）效果与代价：
+
+  指标                 FL11     FL12
+  落地世界系误差       0.341    0.153（接近达标）
+  FLIGHT 世界系峰值   0.27     0.207
+  FLIGHT max|pitch|   0.425    0.591（变差）
+  轮最大间隙           229.3    227.5 mm
+
+世界系腿摆角确实收敛了（误差降一半），但**代价全落在 pitch 上**：为把腿保持世界系竖直，
+`phi_body` 被摆到 -0.564，而机体 `pitch` 到 -0.591，两者几乎等大反向（世界系竖直的必然结果）。
+
+**关键新发现（否定“轮毂发力牺牲位移”）：**落地后 0.8 s 轮力矩只有 **1~4 N·m**（限幅 6）——轮子基本没发力。
+同期 pitch 从 -0.71 收敛到 ~0（t=2.2），phi 从 -0.59 收敛到 -0.22，
+**但 vx 一直卡在 -0.8~-1.18 m/s，qx 从 -0.05 退到 -0.735 且无停止趋势。**
+即：姿态与摆角都收敛了，速度完全不收敛，且不是靠轮毂发力造成的。→ 速度任务本身未生效或参考不对。
+
+前馈系数：测试agent专项实测（对称双施加，L=0.170~0.328）得 c_opt ≈ -0.052（区间 -0.037~-0.063，
+有明确过零点）。排查agent原给 +0.15（单腿口径）**作废**，且排查agent按对称口径重测得 |c|>0.2 的
+矛盾结果，故不采信自己的离线值，采信测试agent的实测值。
+
+二、本轮改动（一项代码 + 一项排查）
+
+1. **启用耦合前馈**（`control.py`）：
+
+     FEEDFORWARD_COUPLING = -0.052        # F_phi += c * F_L，仅飞行段（vz<0）
+
+   依据：测试agent专项实测（对称双施加、共模 phidd 过零点）。
+   **交叉验证要求**：应用后飞行段世界系摆角峰值应比 FL12 的 0.207 更小；
+   若反而变大，立即回退前馈并报排查agent。
+2. **速度任务不收敛专项排查**（**只记录，不改控制、不动参数**）：
+   在落地后 0~1 s（IDLE 段）逐拍输出：
+   a) WBC 任务轨迹里 `forward_velocity` 与 `position` 的 **desired / achieved / residual / activation**。
+      已查实：`control.py:339` 的 `task_trace` 条目现在只有 `desired_acceleration` / `bias_acceleration` /
+      `activation`，**无 achieved/residual**；而 WBC 层（`Algorithm/wbc/task_qp.py:176-178`）
+      已经算出了 `achieved = J*qacc + bias` 与 `residual = achieved - desired`。
+      改法：求解后用 `outcome.task_trace` 里的 achieved/residual 回填进条目（只加字段，不改求解）。
+   b) 轮子的法向力、纵向力与**摩擦锥余量**（是否饱和/打滑）；
+   c) MPC 参考中的速度分量与 `sim.distance`；
+   d) `decision.mode`、`motion_enabled`、`balance_enabled` 逐拍值（确认速度任务真的被启用）。
+
+三、不做
+
+- **不做 pitch 外环**（用户继续后置）。pitch 本轮仍会因世界系腿控制而偏大，只记录。
+- 不改增益（20.9/1.67 不变）、不改角度前馈 `phi_eq`、不改腿长剖面/速率/clamp、不改落地缓冲。
+- 不因速度不收敛而调任何参数（本轮只查清原因）。
+
+四、不变
+
+- `PHI_WORLD_REFERENCE=-0.1263`；`PHI_EQ_SLOPE=0.97`、锚点 0.28；`FLIGHT_RETRACT/EXTEND_RATE_LIMIT=1.5`；
+  力矩 clamp 36；jump_height=0.18、jump_stroke=0.12、jump_time=1.0、duration=3.0；无扰动；
+- 腿关节限幅 40、轮限幅 6；轮穿地仍仅记录；重锚定逻辑不变；前馈仅飞行段。
+
+五、保险与回退
+
+- 回退 = git revert 或把 `FEEDFORWARD_COUPLING` 置 0。
+- 回退判据：joint_limit / nonfinite_state / ABORT；腿长越界；
+  飞行段世界系摆角峰值反而大于 FL12 的 0.207（则前馈符号/量级错，立即置 0 并报排查agent）。
+
+六、命令
+
+backend=wls；model_variant=held_leg；preset=tuned-agile；nominal_length=0.28。
+
+  tools/jump_diagnostic.py --stage FL13 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：FL12 run01（c=0 基准）、FL10 run01（pitch 最佳基准）。
+
+七、自检要求
+
+1. 语法/导入检查；单步自检；同组输入重复评价一致。
+2. **前馈交叉验证**：同一位形、同一 `F_L` 阶跃，分别测 c=0 与 c=-0.052 的共模 phidd；
+   后者应更接近 0。把两个数报回来。
+3. **速度任务专项**：确保 `wbc_task_trace` 里 `forward_velocity`/`position` 确实打出了 acquired/residual
+   （若打不出，说明字段名不对，先报告字段清单再改）。
+
+八、通过条件
+
+1. 前馈交叉验证通过（c=-0.052 下共模 phidd 更接近 0）；
+2. 飞行段世界系摆角峰值 ≤ FL12 的 0.207；
+3. 落地时世界系摆角 `|phi_body - pitch + 0.1263| ≤ 0.15 rad`（FL12 为 0.153）；
+4. 速度任务专项拿到完整数据（desired/achieved/residual、摩擦锥余量、模式位）；
+5. 无 joint_limit / nonfinite_state / ABORT；无断言失败；min leg 不越界。
+
+九、必须报告
+
+- 前馈交叉验证（两个共模 phidd）；
+- 飞行段五线（L_ref/phi_eq/phi_body/pitch/世界系）与峰值；
+- 落地世界系摆角误差；
+- **速度任务专项全部数据**（八.4），这是本轮重点；
+- 轮最大间隙与时刻；FLIGHT 段 max|pitch|；
+- 落地后 1 s pitch/pitch_rate、vx/qx、min leg；assertion_failures。
+
+十、反馈格式
+
+VP编号：FL13
+修改文件与函数（FEEDFORWARD_COUPLING=-0.052、wbc_task_trace 补字段）：
+起跳前预检：
+单步自检：
+语法/导入检查：
+前馈交叉验证（c=0 vs c=-0.052 共模 phidd）：
+飞行段五线（L_ref/phi_eq/phi_body/pitch/世界系）与峰值：
+落地时世界系摆角误差：
+速度任务专项（desired/achieved/residual/摩擦锥余量/模式位）：
+轮最大离地间隙（mm）与时刻：
+FLIGHT 段 max|pitch|：
+落地后 1 s pitch/pitch_rate、vx/qx、min leg：
+assertion_failures：
+ctrl 与 raw、tau_jump：
+结论（只写数据支持的现象）：
+是否允许进入下一轮：
+
+============================================================

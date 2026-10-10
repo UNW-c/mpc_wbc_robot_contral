@@ -3367,3 +3367,99 @@ VP编号：FL12
 是否允许进入下一轮：否，等待问题排查agent确认 k 后重跑。
 
 署名：测试agent-ds
+
+============================================================
+
+# 测试agent-ds：FL13（启用 c=-0.052 前馈 + 速度任务专项）（2026-10-10）
+
+VP编号：FL13
+
+一、修改文件与函数（FEEDFORWARD_COUPLING=-0.052、wbc_task_trace 补字段）
+
+1. control.py：`FEEDFORWARD_COUPLING = -0.052`（启用耦合前馈，仅飞行下落段 vz<0；`F_phi += c*F_L`）。
+2. wbc_task_trace 补字段：**经核查无需改代码**。当前 `control.py` 已在求解后回填 achieved/residual/scaling/exhausted；实测 t=2.004 的 forward_velocity 条目已含 `achieved_acceleration`/`residual`/`scaling`/`exhausted`。文档所述“只有 desired/bias/activation”与本工作区现状不符，故未改动。
+3. 其余不变：KP_PHI=20.9/KD_PHI=1.67、phi_eq 角度前馈、腿长剖面/速率/clamp、落地缓冲、重锚定。
+
+二、起跳前预检
+
+- 通过：关节力矩峰值 37.52 N*m <= 40.00。
+
+三、单步自检
+
+- 手接首帧不顶 clamp；phi_eq 与文档表吐合。
+
+四、语法/导入检查
+
+- py_compile `control.py` exit=0。
+
+五、前馈交叉验证（c=0 vs c=-0.052 共模 phidd）
+
+同一飞行位形、F_L=100 N 阶跃（两腿对称），由 qacc 投影：
+```
+ t=1.550 L=0.2121 : c=0 -> +112.69 ; c=-0.052 -> +8.76  （降 92.2%）
+ t=1.650 L=0.2058 : c=0 -> +127.50 ; c=-0.052 -> +23.62 （降 81.5%）
+```
+- 通过：c=-0.052 使共模 phidd 接近 0。
+
+六、飞行段五线（L_ref/phi_eq/phi_body/pitch/世界系）与峰值
+
+- FLIGHT max|world|=**0.2042 rad**（≤ FL12 的 0.207 → 通过）。
+- FLIGHT max|pitch|=0.6193 rad；全跑 max|pitch|=0.6987。
+
+七、落地时世界系摆角误差
+
+- FLIGHT→LANDING t=1.7420：phi_body=[-0.6288,-0.6287]、pitch=-0.6206、world=-0.0082，`|world-(-0.1263)|=0.1181 rad` ≤0.15 → 通过（FL12 为 0.153）。
+
+八、速度任务专项（落地后 IDLE 段；本轮重点）
+
+- IDLE 段模式位：`{('recovery', motion=False, balance=True), ('ground', motion=True, balance=True)}`；GROUND 段 motion_enabled=True。
+- GROUND 段 261 个 WBC 帧（t=1.956~2.996）：`forward_velocity` 条目 **261/261 均含 achieved/residual**。
+  - desired_acceleration 大幅振荡：范围约 [-14.64, +8.87]（例：t≈1.96 为 -14.3，t≈2.2 为 +8.5，之后在 -5~+3 间振荡）；
+  - achieved 跟随 desired；residual 大多在 -1.0~-2.0（achieved 偏小于 desired），个别帧到 ±10；
+  - activation=1.0。
+- 摩擦锥：GROUND 段 `|Ft|/Fn` max=0.6483、mean=0.1666（未饱和）；normal=[42.6,119.0] N、tangent|max|=75.4 N。
+  - 整个 IDLE（含 recovery）段 max `|Ft|/Fn`=0.9993（近摩擦锥极限）。
+- MPC：`mpc_solution` 在 260/261 帧存在；`sim.distance` 终值=-1.05216 m；vx≈-0.399→-1.071（1 s 内基本停在 -1.0，未收敛）；qx∈[-0.8107,-0.0332]。
+
+九、轮最大离地间隙（mm）与时刻
+
+- 227.3 mm（0.227318 m），t=1.5980，phase=FLIGHT。低于 248 mm（与 FL12 的 227.5 同量级）→ 通过条件 6 不满足。
+
+十、FLIGHT 段 max|pitch|
+
+- 0.6193 rad（FL12 为 0.5913，FL10 为 0.2690）。
+
+十一、落地后 1 s pitch/pitch_rate、vx/qx、min leg
+
+- 全跑 min leg=0.15642 m（**未越界**）；max leg=0.32836 m；
+- vx 1 s 内 final=-1.0034（未收敛）；qx 范围=[-0.8107,-0.0332]（后退约 0.78 m）；
+- max forward disp=1.0468 m。
+
+十二、assertion_failures
+
+- 0。
+
+十三、ctrl 与 raw、tau_jump
+
+- max|ctrl|=[36.35,36.68,36.35,36.68,6.00,5.99]；tau_jump=0；feasible 全 True；guard/limit/nonfinite/abort 事件=[]。
+- output_source：flight_leg_profile=317、landing_buffer=26、wbc_update=665、zero_order_hold=1992。
+
+十四、结论（只写数据支持的现象）
+
+1. 通过条件 1 满足：c=-0.052 使共模 phidd 降 81.5~92.2%，接近 0。
+2. 通过条件 2 满足：FLIGHT 世界系峰值 0.2042 ≤0.207。
+3. 通过条件 3 满足：落地世界系误差 0.1181 ≤0.15（FL12 为 0.153）。
+4. 通过条件 4 满足：拿到 forward_velocity 的 desired/achieved/residual/activation、摩擦锥余量、模式位、MPC 解与 vx/qx。
+5. 通过条件 5 满足：无 joint_limit/nonfinite_state/ABORT；assertion_failures=0；min leg 未越界。
+6. 通过条件 6 不满足：轮间隙 227.3 mm <248 mm。
+7. 速度专项现象（只记录）：GROUND 段 motion_enabled=True、forward_velocity 激活=1、条目含 achieved/residual；但 desired 大幅振荡（[-14.6,+8.9]），vx 稳定在 -1.0 不收敛，摩擦锥未饱和（max 0.65）。
+
+十五、结果文件
+
+- 数据：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL13_baseline_run01.json.gz
+- 日志：C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\FL13_baseline_run01.log
+- 对照：FL12_baseline_run01.json.gz、FL10_baseline_run01.json.gz
+
+是否允许进入下一轮：否，等待问题排查agent确认。
+
+署名：测试agent-ds
