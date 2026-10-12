@@ -27,6 +27,7 @@ import numpy as np
 
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
+from .leg_angle_anchor import phi_body_reference  # noqa: E402
 from .jump import GRAVITY  # noqa: E402
 from Algorithm.wbc import ActuatorLimits  # noqa: E402
 
@@ -41,7 +42,8 @@ JUMP_COM_VERTICAL_WEIGHT = 5000.0
 # 收腿下限 = leg_length_min + 0.005 m。
 FLIGHT_RETRACT_KP = 3000.0        # [N/m]
 FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
-FLIGHT_RETRACT_MARGIN = 0.005     # [m]
+# FL19（2026-10-10 用户指定）：飞行段收腿下限改为绝对腿长 0.20 m（每腿）。
+FLIGHT_RETRACT_FLOOR = 0.20       # [m]
 # FL4（2026-10-09，用户批准）：上升收腿的参考速率限幅与力矩上限。
 FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s] 收腿参考速率上限
 FLIGHT_EXTEND_RATE_LIMIT = 1.5    # [m/s] 伸腿参考速率上限（FL9，与收腿同值同理由）
@@ -55,60 +57,10 @@ KD_PHI = 1.67             # [N*m*s/rad] FL12 新增益（用户批准）
 FEEDFORWARD_COUPLING = -0.052    # [-] F_phi += c*F_L（仅飞行下落段）
 PHI_EQ_SLOPE = 0.97             # [rad/m] phi_eq 斜率（文档离线拟合）
 PHI_EQ_ANCHOR_LENGTH = 0.28     # [m] phi_eq 锚点腿长
-# FL16B（2026-10-10，文档 B2 规格）：前馈斜坡时长。进入 THRUST 后 20 ms 线性 0 -> 上限，尔后保持。
-RELEASE_PHI_FEEDFORWARD_RAMP = 0.020   # [s]
-# FL17B（2026-10-10 用户拍定）：释放段双参考重锚定（预倾轨迹 + 世界系腿锚定）。
-# 来源：部署文档 FL17B 第一节。
-PHI_WORLD_ANCHOR = -0.1263        # [rad] 世界系腿摆角锚定值（=站立静平衡 phi_world，静力矩自平衡）
-RELEASE_PRE_TILT = 0.591          # [rad] 释放段末预倾角 theta_pre：量级取 FL13 飞行段俯仰变化 0.617 的保守值
-                                  # 0.591，方向与飞行段俯仰变化（-0.617）相反
-RELEASE_REFERENCE_TIME = 0.108    # [s] 释放段参考时长 T_release：FL13/FL15A 实测 THRUST 段时长
-
-
-def release_reanchor_pitch_reference(pitch0, elapsed) -> float:
-    """FL17B 释放段 pitch 参考：``pitch0 + (theta_pre - pitch0) * S(u)``，``u = elapsed/T_release``，
-
-    最小 jerk ``S(u) = 6u^5 - 15u^4 + 10u^3``（两端速度/加速度均为 0）。
-    ``elapsed=None`` 时退回 ``pitch0``。
-    """
-    if elapsed is None:
-        return float(pitch0)
-    u = min(1.0, max(0.0, float(elapsed) / RELEASE_REFERENCE_TIME))
-    s = 6.0 * u ** 5 - 15.0 * u ** 4 + 10.0 * u ** 3
-    return float(pitch0) + (RELEASE_PRE_TILT - float(pitch0)) * s
-# FL15B1a（2026-10-10 用户批准）：释放段（THRUST）腿摆角前馈，叠加到 WBC 的 angle_R/L 参考。
-# 目标：离地俯仰角速度 -> pitch_rate_target=+1.33 rad/s（释放段额外交付 +0.415 N*m*s，
-# 平均约 3.8 N*m）；只补 phi 控制角冲量一项（H_ctrl=-0.385），其余留 B1b。
-# 只在 THRUST 生效（压缩段与飞行段不动）；斜坡按腿长 compression_end -> release_end 线性升到末端偏移。
-RELEASE_PHI_FEEDFORWARD_AMPLITUDE = 0.0   # [rad] 斜坡末端腿摆角参考偏移。准入测量：Δprate≈0.0125*A，
-                                          # 达到 +1.33 rad/s 需 A≈107 rad（不可行），暂停部署待排查agent确认。
-# FL15B2（2026-10-10）：释放段（THRUST）腿摆角**力**前馈（B1 的备用入口）：给腿旋量加 (0, F_phi) 分量。
-RELEASE_PHI_FEEDFORWARD_FORCE = 1.58      # [N] 每腿腿摆角力前馈。反求：1.342 rad/s ÷ 0.8516 (rad/s)/N
-                                          # （探测 F=2 点）≈1.58 N；来源为批准目标 +1.33 rad/s + 实测灵敏度，非试数。
-
-
-def release_phi_force_ramp(elapsed) -> float:
-    """释放段腿摆角力前馈幅值 [N]：THRUST 起点后 ``RELEASE_PHI_FEEDFORWARD_RAMP`` 秒内线性升到上限。
-
-    ``elapsed=None``（调用方未提供相位内计时）时退回满幅值，保持与改动前一致。
-    """
-    if elapsed is None:
-        return RELEASE_PHI_FEEDFORWARD_FORCE
-    frac = min(1.0, max(0.0, float(elapsed) / RELEASE_PHI_FEEDFORWARD_RAMP))
-    return RELEASE_PHI_FEEDFORWARD_FORCE * frac
-
-
-def release_phi_feedforward_offset(leg_length, leg_length_start, leg_length_end) -> float:
-    """释放段腿摆角前馈偏移 [rad]：随腿长从 start 线性升到 end（超出范围钳位）。
-
-    斜坡起点取 ``compression_end``、终点取 ``release_end``，两者都是 JumpConfig 的导出量，
-    不引入新的标定系数。
-    """
-    span = float(leg_length_end) - float(leg_length_start)
-    if span <= 0.0:
-        return 0.0
-    progress = (float(leg_length) - float(leg_length_start)) / span
-    return RELEASE_PHI_FEEDFORWARD_AMPLITUDE * min(1.0, max(0.0, progress))
+# FL21（2026-10-12 用户批准）：上升->下落交接处的 F_phi 启用斜坡（单点）。
+# 依据：phi 环带宽 omega=25 rad/s -> 时间常数 1/25 = 40 ms（部署文档 FL21 三）。
+# 计时起点为“进入 falling 的那一刻”；切换后前 T_ramp 内 F_phi 乘 (0->1)。FL22 起上升段也启用。
+FLIGHT_PHI_RAMP = 0.040    # [s]
 
 
 def _phi_eq(l_ref) -> float:
@@ -164,7 +116,7 @@ def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
     ``l_ref=None`` 时退回常数 ``PHI_WORLD_REFERENCE``。"""
     world_ref = PHI_WORLD_REFERENCE if l_ref is None else _phi_eq(l_ref)
-    phi_body_ref = world_ref + float(pitch)
+    phi_body_ref = phi_body_reference(world_ref, pitch)
     forces = []
     for side in range(2):
         index = 2 * side + 1
@@ -175,8 +127,8 @@ def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
 
 def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
                               leg_length_min, leg_length_max) -> np.ndarray:
-    """FL2 飞行段主动收腿力矩：``l_ref = leg_length_min + FLIGHT_RETRACT_MARGIN``。"""
-    l_ref = min(max(float(leg_length_min) + FLIGHT_RETRACT_MARGIN,
+    """FL2 飞行段主动收腿力矩：``l_ref = FLIGHT_RETRACT_FLOOR``（FL19 起为绝对 0.20 m）。"""
+    l_ref = min(max(FLIGHT_RETRACT_FLOOR,
                     float(leg_length_min)), float(leg_length_max))
     return _leg_axis_torque(dynamics, _pd_force(l_ref, leg_position, leg_velocity))
 
@@ -186,15 +138,17 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
                               retract_state=None, dt=0.0, pitch=0.0):
     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
 
-    状态为五元组 ``(mode, L_ref, v_ref, L_entry, ref_accel)``，``mode`` ∈ {"rising","falling"}。
-    - 上升：参考自首步起按 RATE 下收（无上穿挡位）；F_phi=0；力矩 clamp 36。
+    状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
+    - 上升：参考自首步起按 RATE 下收（无上穿挡位）；力矩 clamp 36。
     - 下落（FL9）：伸腿参考速率受限（L_ref 以 v_ref 向 nominal 收敛，v_ref 由 ref_accel 斜坡）；
-      模式切换时捕获上一状态保持 (L_ref,v_ref) 连续；此段启用 `F_phi`（phi PD）。
+      模式切换时捕获上一状态保持 (L_ref,v_ref) 连续。
+    - FL21/FL22：``phi_elapsed`` 自飞行剖面首次进入起累计；F_phi 乘启用斜坡因子（``FLIGHT_PHI_RAMP`` 秒内 0->1），
+      **上升与下落两段都启用**（FL22：把阻尼提前到上升段）。
     返回 ``(torque, new_state)``。
     """
     lo = float(leg_length_min)
     hi = float(leg_length_max)
-    target_retract = lo + FLIGHT_RETRACT_MARGIN
+    target_retract = min(max(FLIGHT_RETRACT_FLOOR, lo), hi)
     target_extend = min(max(float(nominal_length), lo), hi)
     falling = float(vertical_velocity) < 0.0
     want_mode = "falling" if falling else "rising"
@@ -205,6 +159,7 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
         v_ref = float(retract_state[2])
         l_entry = float(retract_state[3])
         ref_accel = float(retract_state[4])
+        phi_elapsed = float(retract_state[5]) if len(retract_state) > 5 else 0.0
     else:
         # 捕获：首次进飞行，或上升↔下落切换。保持 (L_ref,v_ref) 连续以消除单步阶跃。
         l_entry = max(float(leg_position[0]), float(leg_position[2]))
@@ -212,11 +167,14 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
             l_ref = float(retract_state[1])
             v_ref = float(retract_state[2])
             ref_accel = float(retract_state[4])
+            # 模式切换：phi 计数延续（FL22 下 phi 全程启用，不因切换重新起斜坡）。
+            phi_elapsed = float(retract_state[5]) if len(retract_state) > 5 else 0.0
         else:
             l_ref = l_entry
             v_ref = float(leg_velocity[larger])
             t_apex = max(abs(float(vertical_velocity)) / GRAVITY, 1.0e-6)
             ref_accel = (abs(v_ref) + FLIGHT_RETRACT_RATE_LIMIT) / t_apex
+            phi_elapsed = 0.0     # 飞行剖面首次进入：phi 启用斜坡从此计时（FL22）
         mode = want_mode
     step_limit = ref_accel * float(dt)
     if mode == "rising":
@@ -235,14 +193,16 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
         l_ref = min(target_extend, l_ref + v_ref * float(dt))
     l_ref = min(max(l_ref, lo), hi)
     forces = _pd_force_v(l_ref, v_ref, leg_position, leg_velocity)
-    if falling:
-        phi = _phi_force(leg_position, leg_velocity, pitch, l_ref) + FEEDFORWARD_COUPLING * forces
-    else:
-        phi = np.zeros(2)
+    # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
+    # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
+    phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
+    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
+           + FEEDFORWARD_COUPLING * forces) * phi_ramp
+    phi_elapsed += float(dt)
     torque = _leg_wrench_torque(dynamics, forces, phi)
     if mode == "rising":
         torque = np.clip(torque, -FLIGHT_RETRACT_TORQUE_LIMIT, FLIGHT_RETRACT_TORQUE_LIMIT)
-    return torque, (mode, l_ref, v_ref, l_entry, ref_accel)
+    return torque, (mode, l_ref, v_ref, l_entry, ref_accel, phi_elapsed)
 
 
 def landing_buffer_torque(dynamics, leg_position, leg_velocity,
@@ -312,10 +272,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
               jump_config=None, leg_length_compression: bool = False,
-              leg_length_thrust: bool = False,
-              release_phi_feedforward: bool = False,
-              release_phi_force_feedforward: bool = False,
-              release_phi_feedforward_elapsed: float | None = None) -> WbcOutcome:
+              leg_length_thrust: bool = False) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -348,25 +305,12 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
                                    and jump.phase.value == "THRUST")
     com_target = (None if (vmc_phase or leg_length_phase or leg_length_thrust_phase)
                   else desired_com_acceleration_z)
-    # FL15B1a（2026-10-10 批准）：释放段腿摆角前馈（B1），只在 THRUST 生效。
-    angle_reference_R = holds.get("angle_R")
-    angle_reference_L = holds.get("angle_L")
-    if (release_phi_feedforward
-            and jump is not None and jump.active and jump.phase.value == "THRUST"
-            and jump_config is not None):
-        leg_now = dynamics.leg_state()
-        angle_ff = release_phi_feedforward_offset(
-            float(leg_now[0]), jump_config.compression_end, jump_config.release_end)
-        angle_reference_R = (angle_ff if angle_reference_R is None
-                             else float(angle_reference_R) + angle_ff)
-        angle_reference_L = (angle_ff if angle_reference_L is None
-                             else float(angle_reference_L) + angle_ff)
     balance, motion = tasks.tasks(feedback.state, feedback.rows, sample,
                                   desired_com_acceleration_z=com_target,
                                   pitch_reference=holds.get("pitch"),
                                   roll_reference=holds.get("roll"),
-                                  angle_R_reference=angle_reference_R,
-                                  angle_L_reference=angle_reference_L)
+                                  angle_R_reference=holds.get("angle_R"),
+                                  angle_L_reference=holds.get("angle_L"))
     # (b) 腿长任务参考跟跳跃：wbc.py::tasks 里该任务参考标称 L0，跳跃期必须换成跳跃给出的目标腿长，
     #     否则 WBC 会把正在伸长的腿拉回去（与蹬伸力对撞，第 32 次排查 bug#1 的机理）。
     if jump is not None and jump.active and jump.leg_length_target is not None:
@@ -445,14 +389,6 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         tau_ff, _peak = dynamics.thrust_torque(np.full(2, feedforward_force))
         tau_ff = np.asarray(tau_ff, dtype=float)
         feedforward_active = True
-    # FL16（2026-10-10）：释放段腿摆角力前馈改经 external_force 注入 WBC 动力学约束
-    # （M*qdd + h - S^T*tau - tau_ext = 0），输出端不再另加（避免双重计数）。
-    # 依据：post-solve 硬加会开环破坏姿态/接触任务；折进 bias 又会被 QP 完全吸收（前两轮实测）。
-    if (release_phi_force_feedforward and jump is not None and jump.active
-            and jump.phase.value == "THRUST"):
-        tau_leg_ff = _leg_wrench_torque(dynamics, np.zeros(2),
-                                        np.full(2, release_phi_force_ramp(release_phi_feedforward_elapsed)))
-        external = np.asarray(selection, dtype=float).T @ tau_leg_ff
     torque, result = control.solve_wbc(
         mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics_bias_solve,
         contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=limits_solve,

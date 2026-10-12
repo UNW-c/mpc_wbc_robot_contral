@@ -59,12 +59,6 @@ def parse_args() -> argparse.Namespace:
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
-    parser.add_argument("--release-phi-feedforward", action="store_true",
-                        help="FL15B1a：THRUST 段给 angle_R/L 参考叠加斜坡腿摆角前馈")
-    parser.add_argument("--release-phi-force-feedforward", action="store_true",
-                        help="FL15B2：THRUST 段给腿旋量加 phi 力前馈（B1 备用入口）")
-    parser.add_argument("--release-reanchor", action="store_true",
-                        help="FL17B：THRUST 段双参考重锚定（预倾 pitch 轨迹 + 世界系腿锚定）")
     parser.add_argument("--jump-height", type=float, default=None,
                         help="启用跳跃并给定目标质心抬升 [m]")
     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
@@ -101,10 +95,7 @@ def main() -> int:
             thrust_only=args.thrust_only,
             flight_zero_torque=args.flight_zero_torque,
             flight_leg_retract=args.flight_leg_retract,
-            flight_leg_extend=args.flight_leg_extend,
-            release_phi_feedforward=args.release_phi_feedforward,
-            release_phi_force_feedforward=args.release_phi_force_feedforward,
-            release_reanchor=args.release_reanchor)
+            flight_leg_extend=args.flight_leg_extend)
     summary = sim.summary(args.duration)
     _LOGGER.info("仿真结束：完成=%s 停止原因=%s 里程=%.4f m",
                  summary["completed"], summary["stop_reason"], sim.distance)

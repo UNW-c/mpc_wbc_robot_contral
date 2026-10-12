@@ -163,7 +163,7 @@ class JumpCommand:
     wheel_torque: float                 # [N*m] 轮俯仰指令（左右对称）
     hold_torque: bool                   # True = 输出级保持上一拍力矩（飞行段）
     disconnect: bool                    # True = 断开控制器（飞行段）
-    leg_angle_feedforward: bool         # False = 断开 MPC 腿摆角前馈/反馈（方案第 7 节契约）
+    wheel_torque: float                # [N*m] 轮俯仰指令（左右对称）
     abort_reason: str | None = None
     # WP3（2026-10-09）：本拍 WBC 质心竖直加速度目标 [m/s^2]。None = 本相位不向 WBC
     # 提供质心竖直任务（例如 FLIGHT 无接触）。来源：现有 JumpConfig 推导量 com_acceleration()。
@@ -348,13 +348,13 @@ class JumpPlanner:
             # 阶段九：压缩目标改为用户批准的半重支撑参考（满足 -g < a < 0），不再取负 THRUST 加速度。
             return JumpCommand(leg_force=-config.leg_force(), leg_length_target=None,
                                wheel_owned=False, wheel_torque=0.0, hold_torque=False,
-                               disconnect=False, leg_angle_feedforward=False,
+                               disconnect=False,
                                desired_com_acceleration_z=config.compress_acceleration(), **common)
         if phase is JumpPhase.COMPRESS_BRAKE:
             # 阶段九：制动把支撑力升到 1.5 倍重，把下降速度刹回，再切 THRUST。
             return JumpCommand(leg_force=-config.leg_force(), leg_length_target=None,
                                wheel_owned=False, wheel_torque=0.0, hold_torque=False,
-                               disconnect=False, leg_angle_feedforward=False,
+                               disconnect=False,
                                desired_com_acceleration_z=config.brake_acceleration(), **common)
         if phase in (JumpPhase.THRUST,):
             # WP3：释放由 WBC 统一求解（质心竖直任务），不再叠加 tau_jump。
@@ -362,23 +362,22 @@ class JumpPlanner:
             return JumpCommand(leg_force=config.leg_force(), leg_length_target=None,
                                wheel_owned=True,
                                wheel_torque=config.thrust_wheel_gain, hold_torque=False,
-                               disconnect=False, leg_angle_feedforward=False,
+                               disconnect=False,
                                desired_com_acceleration_z=acceleration, **common)
         if phase is JumpPhase.FLIGHT:
             # 飞行段：断开控制器，输出级保持上一拍力矩（用户 D4：力矩保持）
             return JumpCommand(leg_force=0.0, leg_length_target=None,
                                wheel_owned=False, wheel_torque=0.0, hold_torque=True,
-                               disconnect=True, leg_angle_feedforward=False, **common)
+                               disconnect=True, **common)
         if phase in (JumpPhase.LANDING, JumpPhase.RECOVER):
             # 落地与恢复：腿长回标称，其余交还 WBC（跳跃期"关闭冲突功能"在此结束）
             return JumpCommand(leg_force=0.0, leg_length_target=config.leg_length_nominal,
                                wheel_owned=False, wheel_torque=0.0, hold_torque=False,
-                               disconnect=False, leg_angle_feedforward=False, **common)
+                               disconnect=False, **common)
         if phase is JumpPhase.ABORT:
             return JumpCommand(leg_force=0.0, leg_length_target=config.leg_length_nominal,
                                wheel_owned=False, wheel_torque=0.0, hold_torque=False,
-                               disconnect=False, leg_angle_feedforward=True, **common)
+                               disconnect=False, **common)
         # IDLE：不干预
         return JumpCommand(leg_force=0.0, leg_length_target=None, wheel_owned=False,
-                           wheel_torque=0.0, hold_torque=False, disconnect=False,
-                           leg_angle_feedforward=True, **common)
+                           wheel_torque=0.0, hold_torque=False, disconnect=False, **common)

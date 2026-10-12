@@ -47,10 +47,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              thrust_only: bool = False,
              flight_zero_torque: bool = False,
              flight_leg_retract: bool = False,
-             flight_leg_extend: bool = False,
-             release_phi_feedforward: bool = False,
-             release_phi_force_feedforward: bool = False,
-             release_reanchor: bool = False) -> None:
+             flight_leg_extend: bool = False) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -60,8 +57,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     m, d = sim.model, sim.data
     from .sampling import FeedbackSampler
     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
-                          flight_leg_profile_torque, landing_buffer_torque,
-                          PHI_WORLD_ANCHOR, release_reanchor_pitch_reference)
+                          flight_leg_profile_torque, landing_buffer_torque)
     from .jump import JumpObservation, LIFTOFF_GAP
     from Algorithm.contact_state import JumpPhaseHint
     from Algorithm.mpc.trajectory import MotionSample
@@ -82,11 +78,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     sim._command = None
     torque = np.zeros(m.nu)      # 输出级：最近一次控制解（零阶保持）
     jump_command = None           # 跳跃级：最近一拍跳跃指令（飞行段用于"力矩保持"）
-    # FL16B/FL17B：THRUST 相位进入时刻，用于释放段前馈/参考的相位内计时。
-    release_phi_thrust_enter_time = None
-    # FL17B：释放段起点实测俯仰角（一次捕获）。
-    release_reanchor_pitch0 = None
-    release_reanchor_angle_ref = None
     jump_reference = None         # Diagnostic explicit fixed WBC reference
     jump_holds = None             # 新部署：跳跃开始时捕获一次的姿态/腿角冻结参考
     previous_phase = "IDLE"     # Diagnostic-only state-flow audit
@@ -209,44 +200,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 angle_R=float(sim.pose.angle - leg_now[1]),
                 angle_L=float(sim.pose.angle - leg_now[3]))
 
-        # FL16B/FL17B：THRUST 相位进入时刻（只用测量时间，无状态耦合）。
-        if (jump_command is not None and jump_command.active
-                and jump_command.phase.value == "THRUST"):
-            if release_phi_thrust_enter_time is None:
-                release_phi_thrust_enter_time = float(d.time)
-        else:
-            release_phi_thrust_enter_time = None
-
-        # FL17B（2026-10-10）：释放段双参考重锚定（预倾轨迹 + 世界系腿锚定），只在 THRUST。
-        # 3）数据源切换：THRUST 用本规划参考（sample_override + angle_R/L），离地后回原逻辑。
-        if release_reanchor:
-            if release_phi_thrust_enter_time is not None:
-                if release_reanchor_pitch0 is None:
-                    release_reanchor_pitch0 = float(feedback.state.pitch)
-                pitch_ref = release_reanchor_pitch_reference(
-                    release_reanchor_pitch0, float(d.time) - release_phi_thrust_enter_time)
-                state = feedback.state.vector(sim.reduced.state_dim)
-                state[1] = 0.0
-                state[2] = pitch_ref          # 1）pitch 参考重锚定（规划轨迹，非常数）
-                state[3] = 0.0
-                state[5] = 0.0
-                if state.size > 7:
-                    state[6] = 0.0
-                    state[7] = 0.0
-                jump_reference = MotionSample(
-                    state=np.asarray(state, dtype=float),
-                    acceleration=np.zeros(sim.reduced.state_dim, dtype=float),
-                    force=np.zeros(sim.reduced.input_dim, dtype=float),
-                    timestamp=float(d.time))
-                # 2）腿角参考世界系锚定：phi_body_ref = PHI_WORLD_ANCHOR + pitch_ref
-                jump_holds = dict(angle_R=PHI_WORLD_ANCHOR + pitch_ref,
-                                  angle_L=PHI_WORLD_ANCHOR + pitch_ref)
-                release_reanchor_angle_ref = PHI_WORLD_ANCHOR + pitch_ref
-            else:
-                release_reanchor_pitch0 = None
-                release_reanchor_angle_ref = None
-                jump_reference = None
-                jump_holds = None
 
         # WP5（compression_only）：压缩完成或立即停止条件都在写 THRUST / 推进物理前生效。
         if compression_only and jump_command is not None:
@@ -327,12 +280,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 vmc_feedforward=vmc_feedforward,
                 leg_length_compression=leg_length_compression,
                 leg_length_thrust=leg_length_thrust,
-                release_phi_feedforward=release_phi_feedforward,
-                release_phi_force_feedforward=release_phi_force_feedforward,
-                release_phi_feedforward_elapsed=(None if release_phi_thrust_enter_time is None
-                                                 else float(d.time) - release_phi_thrust_enter_time),
                 jump_config=(None if sim.jump is None else sim.jump.config),
-                sample_override=(jump_reference if (explicit_jump_reference or release_reanchor)
+                sample_override=(jump_reference if explicit_jump_reference
                                  and jump_command is not None and jump_command.active
                                  else None))
             torque = outcome.torque
@@ -613,11 +562,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "flight_zero_torque": bool(flight_zero_torque),
                 "flight_leg_retract": bool(flight_leg_retract),
                 "flight_leg_extend": bool(flight_leg_extend),
-                "release_phi_feedforward": bool(release_phi_feedforward),
-                "release_phi_force_feedforward": bool(release_phi_force_feedforward),
-                "release_reanchor": bool(release_reanchor),
-                "release_angle_reference": (None if release_reanchor_angle_ref is None
-                                            else float(release_reanchor_angle_ref)),
                 "mpc_called": bool(mpc_called),
                 "wbc_due": bool(sim.timing.wbc_due(step)),
                 "mpc_solution": None if solution is None else {
