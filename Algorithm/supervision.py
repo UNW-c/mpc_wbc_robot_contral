@@ -255,7 +255,8 @@ class SupervisedControl:
                   limits: ActuatorLimits, decision: ControlDecision, dt: float,
                   estimate: DisturbanceEstimate | None = None,
                   external_force: np.ndarray | None = None,
-                  weight_overrides: dict | None = None):
+                  weight_overrides: dict | None = None,
+                  motion_override: bool | None = None):
         if not decision.balance_enabled:
             if self.compensation and self.compensation.space == DisturbanceSpace.GENERALIZED_FORCE:
                 self.compensation.reset()
@@ -272,7 +273,10 @@ class SupervisedControl:
             raise ValueError("Contact dimension must match mass matrix")
         jacobian = np.vstack([block.jacobian for block in active])
         bias = np.concatenate([block.bias for block in active])
-        tasks = list(balance_tasks) + (list(motion_tasks) if decision.motion_enabled else [])
+        tasks = list(balance_tasks) + (
+            list(motion_tasks)
+            if (decision.motion_enabled if motion_override is None else bool(motion_override))
+            else [])
         if not balance_tasks:
             raise ValueError("Supported control requires explicit balance tasks")
         # external_force：调用方直接注入的广义等效力（跳跃用，方案 v3 第 6 节）。

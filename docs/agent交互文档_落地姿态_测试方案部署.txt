@@ -1,0 +1,359 @@
+================================================================
+轮腿机器人（circleg-robot）落地姿态 测试方案部署
+撰写：问题排查agent
+生效：2026-10-17
+================================================================
+
+0. 本文件用途与替代关系
+
+本文件替代 `docs/agent交互文档_WBC跳跃_测试方案部署.txt`。
+旧文件（及其对应的 `..._数据与测试结果反馈.txt`）上下文过长，自本文件生效起**停用**，
+仅作历史查询，不再追加、不再引用。
+
+两份新文件：
+  A. 本文件（问题排查agent -> 测试agent）：方案、规格、判据、交付队列。
+  B. `docs/agent交互文档_落地姿态_数据与测试结果反馈.txt`（测试agent-ds -> 问题排查agent）：结果与反馈。
+
+历史轮次（WP8 ... FL55、LAND0/1A、OBS1、RAMP1、SW1、LAND2/2B/4/5）的原始记录在旧文件里。
+
+================================================================
+1. 一轮读完的现状
+================================================================
+
+1.1 目标与优先级（用户 2026-10-17）
+
+  - 当前唯一优先项：**落地姿态**。跳跃高度/间隙优化暂缓（跳跃段轮间隙已达 0.22153 m，
+    高于硬下限 200 mm，不必再压）。
+  - 200 mm 是硬性下限，不得回退。
+
+1.2 对象与链路
+
+  - 工程：`wheel_leg_mujoco/gbc_mpc_wbc/`（轮腿，MuJoCo），共享算法层 `Algorithm/`。
+  - 节拍：每物理步采样（`sampling.py`）-> 估计器 + 监督层；WBC 自己的节拍。
+  - 模型：nq=21、nv=20、nu=6；timestep=0.001 s。
+    腿长范围 0.114 ~ 0.430 m，标称 0.28 m。
+    `leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+    执行器限幅：髋 ±40 N*m；轮 ±6 N*m（`MJCF/robot.xml:176-182`）。
+
+1.3 运行命令模板
+
+  tools/jump_diagnostic.py --stage <STAGE> --case baseline --run-id run01 --duration 3.0 \
+      --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+      --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+  结果：`results/{stage}_{case}_{run_id}.json.gz`。
+
+================================================================
+2. 基线数据表（同口径，触地 t=1.7470，触地后 1252 帧）
+================================================================
+
+| 指标                                | SW1_f016_t36 | LAND2B | LAND4 | LAND5 |
+|-------------------------------------|--------------|--------|-------|-------|
+| 触地后 airborne_zero 帧             | 12           | 695    | 252   | 324   |
+| 触地后 wbc_update 帧                | (未记)       | 134    | -     | 227   |
+| 触地后 landing_buffer 帧            | 18           | 18     | 18    | 18    |
+| 触地后 flight_leg_profile 帧        | 256          | 0      | 0     | 0     |
+| 末值 pitch                          | +0.00476     | -0.52271 | -0.52271 | -1.27071 |
+| 末值腿长 R/L                        | 0.28394/0.28366 | 0.41427/0.41428 | 0.41427/0.41428 | 0.22387/0.32215 |
+| 触地后 max|pitch|                   | 0.79598      | 0.79598 | 0.79598 | 1.27071 |
+| 反弹幅                              | 0.07755      | 0.01137 | 0.01137 | 0.21693 |
+| 腿长越界(>0.430) 帧                 | (未记)       | 0      | 0     | 254（峰 0.43572 @ t=2.6810）|
+| 飞行段最大轮间隙                     | 0.22153      | 0.22153 | 0.22153 | 0.22153 |
+| ABORT                               | 0            | 0      | 0     | 0     |
+
+LAND2B / LAND4 的轨迹**全程 3000 帧逐位 0.0**；LAND4 只改了 443 帧的 `output_source` 标签
+（`airborne_zero` -> `zero_order_hold`），那 443 帧的 ctrl 本来就全为 0。
+
+LAND5 与 LAND2B 的首处差异：t=2.2120，六个通道同时变，`max|dctrl|=13.3529`。
+
+================================================================
+3. 已定案结论（对本轮有用的）
+================================================================
+
+3.1 落地窗口的真实结构
+
+  - 跳跃相位：COMPRESS 1.000、COMPRESS_BRAKE 1.157、THRUST 1.316、FLIGHT 1.425、
+    **LANDING 1.747~1.765（18 帧）**、**RECOVER 1.765~1.766（1 ms）**、IDLE 起 1.766。
+  - 即：跳跃自己的落地控制只有 18 ms + 1 ms，交出时 pitch 已经是 **-0.7704 rad**（-44 度）。
+
+3.2 三道门都挂在 `feedback.decision.contact` 上
+
+  | 门 | 位置 | 作用 |
+  |----|------|------|
+  | 1 | loop.py:266 `airborne` | 离地档力矩清零（LAND4 已加几何双确认）|
+  | 2 | loop.py:279 `contact_available` | 任一接触才调 WBC |
+  | 3 | sampling.py:122 监督层 | 决定 mode / motion_enabled / balance_enabled |
+
+3.3 估计器是纯力判据，会被"主动清零力矩"自证循环
+
+  `Algorithm/contact_state.py`：`off_force=5 N` / `on_force=15 N` 双阈值滞回；
+  轮腿侧配置 `GroundContactConfig(off_duration_idle=0.050)`，`sampling.py:115` 只传法向力。
+  LAND5 已把几何接触作为否决项传入（`geometry_contact`，可选参数，默认不改变行为）。
+
+3.4 【关键】WBC 任务分级：balance 只有 pitch
+
+  `wbc.py`（约 220-258 行）：
+      balance = (pitch,)
+      motion  = (angle_R, angle_L, forward_velocity, length_R, length_L, yaw, roll)
+  `supervision.py:275`：
+      tasks = balance_tasks + (motion_tasks if decision.motion_enabled else [])
+  `supervision.py:90`：`motion_enabled` 是**属性**，`return self.mode == ControlMode.GROUND`。
+
+  => 只有 `ground` 模式才启用腿长/腿角/roll/yaw/前进速度；
+     `recovery` 与 **`single_support`** 下只剩 pitch 一项在控。
+
+3.5 【关键】LAND5 变差的完整链条（有帧级证据）
+
+  1. t=1.766 跳跃交出，pitch -0.7704；
+  2. 之后 mode 大多在 recovery / single_support -> **腿长无控**；
+  3. LAND5 触地后 mode 统计：ground 只有 205 帧
+     （1.897 单帧、1.997~2.147 共 151 帧、2.315~2.367 共 53 帧）；
+     `single_support` **324 帧**；`airborne_zero` 324 帧；
+  4. `single_support` 的 324 帧里：两侧几何都接触 0 帧；仅一侧 49 帧（右轮间隙最大 0.05713 m）；
+     两侧都无 275 帧（右轮间隙最大 0.14937 m，左轮 0.00002~0.00818 m）。
+     => 右轮是**真的**被抬起来了，不是误判；
+  5. 腿长不对称 dL = L_R - L_L 在其中起放大作用：
+
+     | | 触地前 \|dL\| 峰值 | 触地后 \|dL\| 峰值 | 末值 dL |
+     |---|---|---|---|
+     | LAND2B | 0.00003 | 0.01392 @ t=2.485（随后自愈回 0） | -0.00001 |
+     | LAND5  | 0.00003 | **0.16701 @ t=2.805** | -0.12628 |
+
+     => 触地前两腿是对称的（3e-5 m），不对称是**触地后才长出来的**。
+     LAND2B 里它自愈，LAND5 里它发散；
+  6. 腿长 0.30 -> **0.43572**（超 0.430 上限，254 帧）-> 几何破坏 -> 真离地
+     -> t=2.755 起 `airborne` 自锁复现 -> 零力矩自由倒 -> 末值 pitch -1.2707。
+
+  帧级任务证据（LAND5）：
+
+  | t | mode | motion | 现象 |
+  |---|---|---|---|
+  | 2.336 | ground | True | 8 个任务全在；pitch desired **-106.82**，`scaling=0.4379`；length_R desired -15.25 但 achieved 仅 -2.77（输给第 1 优先级 pitch）|
+  | 2.400 | single_support | False | 8 个任务里 **7 个 achieved=nan**，只剩 pitch |
+  | 2.700 | single_support | False | pitch desired +56.22、achieved -29.30、**`scaling=0.0000`**；ctrl[2]=+40.00（髋饱和）|
+
+  副产物：t=2.336 的 `sample` 为 `state[-0.2075,-0.7878,-0.432,0.7998,-0.0157,0.4716,-0.7434,-3.5274]`、
+  `acceleration[1.6337, **-99.2822**, 34.5914, 49.8936]`；实际 pitch -0.42683、pitch_rate +1.51249。
+  => MPC 的参考俯仰 -0.432 与实际几乎相等，俯仰需求 -106.8 里绝大部分来自它自己的
+     **俯仰角加速度前馈 -99.28**，不是增益放大。（该条待离线追查，不占测试轮次。）
+
+3.6 现有落地缓冲实际上没生效
+
+  `loop.py:339`：
+      landing_buffer = bool(jump_phase_value == "LANDING" and float(d.qvel[2]) < 0.0
+                           and min(leg_now[0], leg_now[2]) > compression_target)
+  LANDING 只有 18 帧，所以全 run `landing_buffer` = 18 帧。
+  `compression_target = nominal - (nominal - min)*0.5 = 0.28 - (0.28-0.114)*0.5 = 0.197`。
+
+================================================================
+4. 代码现状（2026-10-17 LAND5 后）
+================================================================
+
+4.1 关键常量（`control.py`）
+
+  FLIGHT_RETRACT_KP = 3000.0        # [N/m]
+  FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
+  FLIGHT_RETRACT_FLOOR = 0.16       # [m]（LAND2 改）
+  FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s]
+  FLIGHT_RETRACT_TORQUE_LIMIT = 36.0  # [N*m]
+  PHI_WORLD_REFERENCE = -0.1263     # [rad]
+  KP_PHI = 20.9 / KD_PHI = 1.67
+
+  腿长 PD：`_pd_force = 3000*(l_ref - L) - 150*Ldot`，`l_ref = 标称 0.28`。
+  摆角 PD：`_phi_force`，`phi_body_ref = phi_eq(l_ref) + pitch`（世界系）。
+
+4.2 本轮已改动文件（LAND5，提交前状态）
+
+  M Algorithm/contact_state.py    新增可选参数 geometry_contact=None
+  M gbc_mpc_wbc/sampling.py       传入几何接触
+  M gbc_mpc_wbc/loop.py           LAND2B 锁存 + LAND4 几何双确认 + flight_leg_ref 记录
+  M gbc_mpc_wbc/control.py        FLOOR=0.16（LAND2）
+  M tools/jump_diagnostic.py      扫描钩子
+
+================================================================
+5. 每轮共同的自检要求（硬性）
+================================================================
+
+1. `py_compile` 通过，贴出完整 diff（不截断）。
+2. 报 `leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+3. 同一结果**重复取数两次**，两次结果一致。
+4. 完整贴出运行当时的 `git_status_short_raw`（含未跟踪项；`results/` 可折叠说明）。
+5. 标注本轮是否为单变量对比；不是的话逐项列出改了哪几处。
+6. 判据只判本轮改动**能影响到的量**；不得设一条基线自己就不满足的回归阈值。
+7. **发方案前必须枚举**：把要改的那个量**所有**下游读取点列出，不得只看自己发现的那一处。
+8. **发方案前必须离线预演**：用已有结果文件按改后逻辑重放，证明它**会改变轨迹**；
+   若预演显示"逐位不变"，不提这个测试。预演脚本与结果必须写进方案。
+
+================================================================
+6. 下一轮方案（N1）——已定案（候选 A）
+================================================================
+
+6.1 原始设想（已作废）
+
+  最初设想：把 `landing_buffer` 的门控从 `phase == "LANDING"` 放宽到"几何接触 + 腿长仍长于
+  压缩目标"，让现有落地缓冲覆盖整个落地窗口。
+
+6.2 离线预演结果（否决了原始设想）
+
+  用 `results/LAND2B_baseline_run01.json.gz` 与 `LAND5_baseline_run01.json.gz` 重放：
+
+  | 量 | LAND2B | LAND5 |
+  |---|---|---|
+  | 现门控覆盖帧数（触地后） | 17 | 17 |
+  | 加宽门控覆盖帧数（几何接触 & minL>0.197） | **900**（t=1.748~2.999） | **539**（t=1.748~2.717） |
+  | 腿力 F_L = 3000*(0.28-L) - 150*Ldot 区间 R | [-501.0, +409.4] N | [-443.7, +409.4] N |
+  | 同上 L | [-472.1, +411.9] N | [-585.2, +411.9] N |
+  | 窗口内 Ldot 区间 | ±1.78 m/s | ±1.78 m/s |
+
+  两点否决理由：
+  (a) `KP=3000 [N/m]`、`KD=150 [N*s/m]` 是按**飞行段空载腿**定的；直接用到落地窗口
+      会要求 **500~585 N** 的腿力（机身重 142.7 N，即 3.5~4.1 倍体重），
+      在 L>0.28 时是把机体**往下狠拽**，属于硬砸。要改就得改这两个增益 —— 本方案不擅自改。
+  (b) `landing_buffer_torque` 的返回向量里**轮子通道恒为 0**（只写腿的 4 个执行器），
+      直接整条替换会让轮子在 900 帧里无控，俯仰跟着失控。
+
+  => 结论：**N1 不能用"加宽现有落地缓冲"这条路**。要解决的是同一个问题（落地窗口腿长必须有人管），
+     但机制要换。
+
+6.3 修订后的机制候选
+
+  候选 A（跳跃专属，不动共享层）：
+    在跳跃落地窗口内让 WBC 的 `motion` 组任务继续在场。因为 `motion_enabled` 是
+    `mode == GROUND` 的属性，需要在 `solve_wbc` 的调用链上开一个**显式开关**，
+    只在"已起跳 + 几何/估计器接触"的窗口内为真。
+
+  候选 B（改共享层，一行）：
+    `Algorithm/supervision.py:90` 改为
+        return self.mode in (ControlMode.GROUND, ControlMode.SINGLE_SUPPORT)
+    影响轮圈腿（APP）路径，属共享层改动，**必须用户明确同意**（工作区第 15.1 条）。
+
+  候选 C（先修不对称，不动门控）：
+    先查清"触地后腿长不对称从哪来"。证据：触地前 |dL|=3e-5（对称），触地后 LAND2B 峰
+    0.0139 自愈、LAND5 峰 0.167 发散。属**离线可查**，不占测试轮次。
+
+  推荐顺序：**先做候选 C（离线，零测试成本）-> 再按结果选 A 或 B**。
+
+  6.5 候选 C 结果（已在本次完成，零测试成本）：种子极小，放大器才是主因
+
+  | 量 | 值 |
+  |---|---|
+  | 触地前 \|dL\| 峰值 | 0.00003 m |
+  | t=1.940 dL | -0.00083 m（LAND2B/LAND5 逐位相同）|
+  | 同刻 R/L 髋指令差 | \|ctrl[0]\|=5.77 vs \|ctrl[2]\|=5.74；\|ctrl[1]\|=6.64 vs \|ctrl[3]\|=6.57（约 1%）|
+  | roll（qpos 四元数） | ±0.002 rad（无横滚）|
+  | 触地冲击法向力 | 263.0 / 265.5 N（对称）|
+  | LAND2B 触地后 \|dL\| 峰 | 0.01392 @2.485（随后自愈回 0）|
+  | LAND5 触地后 \|dL\| 峰 | 0.16701 @2.805（发散）|
+
+  结论：种子是约 1% 的左右指令差（数值/模型不对称），量级 1e-4 m，可忽略；
+  从 1e-4 涨到 0.167 是放大器造成的 —— 见 6.6。
+  => **不再为“找不对称种子”单独花测试轮次**。
+
+  6.6 放大器：t=2.148 的“假离地”
+
+  逐帧（LAND5，该段与 LAND2B 逐位相同）：
+
+  | t | mode | gapR | gapL | com_vz | nf_R/nf_L | ctrl[0,1,4,5] |
+  |---|---|---|---|---|---|---|
+  | 2.100 | ground | +0.00005 | +0.00001 | +0.2286 | 0 / 0 | [-0.76 -5.28 +3.71 +3.71] |
+  | 2.120 | ground | +0.00083 | +0.00075 | +0.1227 | 0 / 0 | [-0.39 -5.64 +4.41 +4.41] |
+  | 2.144 | ground | +0.00390 | +0.00417 | +0.0946 | 0 / 0 | [-0.32 -5.64 +5.23 +5.22] |
+  | 2.148 | airborne | +0.00476 | +0.00511 | +0.1027 | 0 / 0 | 全 0 |
+
+  事实：2.100~2.144 期间 mode 已经是 `ground`（两轮都算接触），但**法向力一直是 0**
+  （机器人靠腿连杆支撑，`contact_geometry_other`=8~12），轮子从 0 慢慢浮到 4.8 mm；
+  力连续为 0 达 ~50 ms 后估计器翻成无接触，几何也同意（gap>0），于是 2.148 进入 `airborne`。
+  之后的链条见 3.5 第 6 条。
+
+  另：落地后 pitch 在受控窗口里**是能收敛的**：
+  1.740 -0.7230 -> 1.960 -0.5243 -> 2.100 -0.3118。
+  说明现有控制器不是不能用，是**模式没保持住**。
+
+  6.7 N1 定案：候选 A（跳跃专属开关），已核实合法性
+
+  改动 3 个文件，共享层只加可选参数、默认不改变行为：
+
+  1. `Algorithm/supervision.py::solve_wbc` 加可选入参 `motion_override: bool | None = None`，
+     把 `tasks = list(balance_tasks) + (list(motion_tasks) if decision.motion_enabled else [])`
+     改为按 `decision.motion_enabled if motion_override is None else motion_override` 取值。
+     `None` 为默认 -> 轮圈腿（APP）与其它调用方行为**完全不变**。
+     这与现有的 `weight_overrides` 是同一套写法（既有先例，不新立机制）。
+
+  2. `gbc_mpc_wbc/control.py::wbc_stage` 加可选入参 `landing_window: bool = False`，
+     在 `jump_weight_overrides` 旁边算：`motion_override = True if landing_window else None`，
+     传给 `control.solve_wbc(..., motion_override=motion_override)`。
+
+  3. `gbc_mpc_wbc/loop.py` 把已有的 `jump_landed` 锁存传给 `wbc_stage(..., landing_window=jump_landed)`。
+
+  合法性已核实：`wbc.py::contact_blocks` 是**逐轮**建块（`wheels=(side,)`），
+  所以单支撑时 `solve_wbc` 的 `active` 非空、不会触发
+  “Supported mode requires its contact Jacobian blocks” 报错。“强制 motion”在单支撑下可执行。
+
+  本方案的已知局限（写清楚以便归因）：
+  - 窗口 = `jump_landed`（LANDING/RECOVER 置位、下一次 COMPRESS 清零），
+    所以**首次落地后本 run 剩余时间一直为真**。单跳 3 s 工况下符合预期；
+    连续多跳前需重新审视退出条件。
+  - 不动任何增益、不动门控阈值、不动估计器参数。
+  - 本轮**预期不再与 LAND2B/LAND5 逐位相同**，必须报首差时刻与通道。
+
+6.8 命令、判据与反馈格式
+
+命令：
+
+  tools/jump_diagnostic.py --stage N1 --case baseline --run-id run01 --duration 3.0 \
+      --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+      --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+对照：`results/LAND5_baseline_run01.json.gz`。
+
+| 类别 | 指标 | 目标 | LAND5 基线 |
+|---|---|---|---|
+| 主 | 触地后 `single_support` 帧数 | 明显下降 | 324 |
+| 主 | 触地后 `motion_enabled=True` 帧数 | 明显上升 | 205 |
+| 主 | 触地后 \|dL\| 峰值 | 不发散 | 0.16701 |
+| 主 | 末值 pitch 绝对值 | < 0.20 | 1.27071 |
+| 主 | 末值腿长 R/L | 0.28 ± 0.02 | 0.22387/0.32215 |
+| 回归 | 腿长越界帧（>0.430 或 <0.114） | 0 | 254 |
+| 回归 | 飞行段最大轮间隙 | >= 0.200 | 0.22153 |
+| 回归 | ABORT | 0 | 0 |
+| 验证 | 与 LAND5 首处差异 | 必须不再逐位相同；报首差时刻与通道 | — |
+
+反馈格式：
+
+VP编号：N1
+代码改动（3 个文件的完整 diff，不截断）：
+共同自检（py_compile / 执行器下标 / 重复取数一致 / git_status_short_raw 完整）：
+与 LAND5 的**首处差异时刻与通道**：
+触地后 single_support 帧数 / motion_enabled=True 帧数 / airborne_zero 帧数：
+触地后 supervisor mode 时间线（按变化点列出，含 contact 值）：
+触地后 \|dL\| 峰值及出现时刻；末值 dL：
+触地后最小腿长（右/左）：
+末值 pitch / 末值腿长 R、L：
+腿长越界帧数与峰值：
+飞行段最大轮间隙：
+触地后 max|pitch| / 反弹幅 / T_settle（与 SW1_f016_t36 / LAND2B / LAND5 四列对照）：
+ABORT / assertion_failures：
+额外发现（可选）：
+结论（只写数据支持的现象）：
+
+================================================================
+7. 交付队列
+================================================================
+
+| 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
+|---|---|---|---|---|
+| 1 | LAND0/1A | 已完成 | 落地接管范围（轮子是否写零）对照 | — |
+| 2 | OBS1 | 已完成 | 记录飞行段腿长参考内部量 | LAND0（逐位一致）|
+| 3 | RAMP1 | 已完成 | 飞行段速度参考与位置参考自洽 | LAND0 |
+| 4 | SW1 | 已完成 | FLOOR x TLIM 二维联合扫描 | — |
+| 5 | LAND2/2B | 已完成 | 收窄落地锁存到几何离地 | SW1_f016_t36 |
+| 6 | LAND4 | 已完成（无效） | airborne 加几何接触双确认；只改了标签 | LAND2B |
+| 7 | LAND5 | 已完成（暴露缺陷） | 几何接触作为估计器否决项 | LAND4 |
+| 8 | **N1-C** | **已完成（离线）** | 追查触地后腿长不对称来源；结论：种子 1e-4 m 可忽略，主因是放大器 | 零测试成本 |
+| 9 | **N1** | **可跑（候选 A 已定案）** | 落地窗口恢复腿长/腿角控制（`motion_override`） | LAND5 |
+| 10 | R1 | 排队 | 腿角换算集中到 `leg_angle_anchor.py`，删常量重影，不改行为 | 要求与 N1 全程逐位一致 |
+| 11 | LAND3 | 排队 | `wbc.py` 腿角任务目标改世界系投影 + 锁存触地世界系 phi | N1 |
+| 12 | 待定 | 排队 | 触地俯仰 -0.7332（缺陷 3） | 动飞行段，gap 有回退风险 |
+| 13 | 待定 | 落地稳定后 | 质心可行性模块（见 `docs/质心可行性模块_方案规划_待办.md`） | — |
+
+================================================================

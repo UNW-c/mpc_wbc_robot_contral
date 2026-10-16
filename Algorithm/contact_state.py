@@ -102,7 +102,8 @@ class GroundContactEstimator:
 
     def update(self, normals, dt: float, *, phase: JumpPhaseHint = JumpPhaseHint.NONE,
                hip_angle: float | None = None, specific_force_z: float | None = None,
-               trusted=(True, True), base_rise: float | None = None) -> ContactOutput:
+               trusted=(True, True), base_rise: float | None = None,
+               geometry_contact=None) -> ContactOutput:
         c = self.config
         normals = np.asarray(normals, dtype=float)
         if phase == JumpPhaseHint.LANDING:
@@ -137,6 +138,14 @@ class GroundContactEstimator:
                     proposed[i] = False
         else:
             self._flight_time = 0.0
+
+        # LAND5（2026-10-17，用户同意）：几何接触是“是否离地”的硬证据，与力矩无关，
+        # 用来否决法向力判据。力判据在“主动清零力矩”模式下会自证循环（离地档清零力矩
+        # -> 法向力 0 -> 判离地）。geometry_contact=None 时行为与改动前完全一致。
+        if geometry_contact is not None:
+            for i in range(2):
+                if bool(geometry_contact[i]):
+                    proposed[i] = True
 
         # R4：非跳跃相位，法向力判离地还要求运动学旁证（机身上升或接近失重），否则维持接地
         if (phase == JumpPhaseHint.NONE and c.lift_height is not None and base_rise is not None):

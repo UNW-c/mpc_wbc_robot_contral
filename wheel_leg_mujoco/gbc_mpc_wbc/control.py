@@ -43,7 +43,7 @@ JUMP_COM_VERTICAL_WEIGHT = 5000.0
 FLIGHT_RETRACT_KP = 3000.0        # [N/m]
 FLIGHT_RETRACT_KD = 150.0         # [N*s/m]
 # FL19（2026-10-10 用户指定）：飞行段收腿下限改为绝对腿长 0.20 m（每腿）。
-FLIGHT_RETRACT_FLOOR = 0.20       # [m]
+FLIGHT_RETRACT_FLOOR = 0.16       # [m] LAND2：0.20 -> 0.16（SW1 唯一过全硬约束且 T_settle 收敛组）
 # FL4（2026-10-09，用户批准）：上升收腿的参考速率限幅与力矩上限。
 FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s] 收腿参考速率上限
 FLIGHT_EXTEND_RATE_LIMIT = 1.5    # [m/s] 伸腿参考速率上限（FL9，与收腿同值同理由）
@@ -270,7 +270,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
               jump_config=None, leg_length_compression: bool = False,
-              leg_length_thrust: bool = False) -> WbcOutcome:
+              leg_length_thrust: bool = False, landing_window: bool = False) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -372,6 +372,9 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     if (jump is not None and jump.active
             and jump.phase.value in ("COMPRESS", "COMPRESS_BRAKE", "THRUST")):
         jump_weight_overrides = {"com_vertical": JUMP_COM_VERTICAL_WEIGHT}
+    # N1（2026-10-17，用户同意）：落地窗口内强制打开 motion 组（腿长/腿角/roll/yaw/前向速度），
+    # 使 single_support / recovery 下腿长仍有人管。landing_window=False 时行为与改动前完全一致。
+    motion_override = True if landing_window else None
     # VP1（2026-10-09）：等效力前馈。把 tau_ff 折进 dynamics_bias 与执行器限幅，
     # 而不是在 solve_wbc 之后直接叠加（否则限幅不自洽）。
     tau_ff = np.zeros(dynamics.model.nu)
@@ -391,7 +394,7 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics_bias_solve,
         contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=limits_solve,
         decision=feedback.decision, dt=timing.wbc_dt, external_force=external,
-        weight_overrides=jump_weight_overrides)
+        weight_overrides=jump_weight_overrides, motion_override=motion_override)
     if feedforward_active:
         torque = np.asarray(torque, dtype=float) + tau_ff
     raw_torque = np.asarray(torque, dtype=float).copy()

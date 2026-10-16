@@ -86,6 +86,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     previous_com_xz = None
     previous_com_time = None
     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+    jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
     feedback = None              # 采样级：最近一拍反馈
     solution = None              # MPC 级：最近一次解（WBC 与记录共用）
@@ -251,7 +252,19 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         # 依据（用户 2026-10-07）：力的判定会在轮子仍压地时误报离地，此时断开控制器会让
         # 机体在最需要控姿的时刻失控（实测俯仰冲到 -19.6 度）。
         jump_active_now = jump_command is not None and jump_command.active
+        # LAND2（2026-10-16，用户同意）：落地锁存。只看瞬时轮地间隙会把落地后任何一次
+        # 反弹（gap>1mm）当成再次离地，导致飞行档/离地档重入。ABORT 不置位（中止后
+        # 自由下落仍走离地档）。
+        _landed_phase = None if jump_command is None else jump_command.phase.value
+        if _landed_phase in ("LANDING", "RECOVER"):
+            jump_landed = True
+        elif _landed_phase == "COMPRESS":
+            jump_landed = False          # 新一跳开始，解锁
+        # LAND4（2026-10-17，用户同意）：离地判据改为“估计器无接触”且“几何也无接触”双确认，
+        # 避免“离地档清零力矩 -> 法向力 0 -> 估计器持续报无接触”的自锁。几何来源与 jump.py 一致。
+        _geometry_contact = tuple(bool(v) for v in sim.dyn.contact_geometry()[0])
         airborne = (feedback is not None and not any(feedback.decision.contact)
+                    and not any(_geometry_contact)
                     and not jump_active_now)
         if airborne and not airborne_active:
             airborne_since = float(d.time)
@@ -283,7 +296,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 jump_config=(None if sim.jump is None else sim.jump.config),
                 sample_override=(jump_reference if explicit_jump_reference
                                  and jump_command is not None and jump_command.active
-                                 else None))
+                                 else None),
+                landing_window=jump_landed)
             torque = outcome.torque
             reason = outcome.reason
             normal_violation_time = outcome.normal_violation_time
@@ -307,7 +321,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         # FL1（2026-10-09）：flight_zero_torque 打开时，相位为 FLIGHT 或“真几何离地”
         # （min wheel_gap > LIFTOFF_GAP）则输出显式零力矩，不再 zero_order_hold 保持地面力矩。
         # 默认 False 时行为与当前完全一致。
-        geometrically_airborne = bool(jump_wheel_gap is not None and jump_wheel_gap > LIFTOFF_GAP)
+        geometrically_airborne = bool(jump_wheel_gap is not None and jump_wheel_gap > LIFTOFF_GAP
+                                      and not jump_landed)
         flight_zero = bool(flight_zero_torque and jump_command is not None
                            and (jump_command.phase.value == "FLIGHT" or geometrically_airborne))
         jump_phase_value = None if jump_command is None else jump_command.phase.value

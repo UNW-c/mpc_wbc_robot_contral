@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from gbc_mpc_wbc.logging_setup import setup_logging
 from gbc_mpc_wbc.simulation import Disturbance, Gbc486MpcWbcSimulation, SimulationConfig, default_command
+from gbc_mpc_wbc import control as _control
 
 _LOGGER = logging.getLogger(__name__)
 RESULTS = ROOT / "results"
@@ -260,7 +261,16 @@ def main():
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
+    # SW1：仅覆盖飞行收腿的两个常量，默认 None 表示不改动任何行为。
+    parser.add_argument("--flight-retract-floor", type=float, default=None,
+                        help="SW1：只覆盖 control.FLIGHT_RETRACT_FLOOR，None=不改")
+    parser.add_argument("--flight-retract-torque-limit", type=float, default=None,
+                        help="SW1：只覆盖 control.FLIGHT_RETRACT_TORQUE_LIMIT，None=不改")
     args = parser.parse_args()
+    if args.flight_retract_floor is not None:
+        _control.FLIGHT_RETRACT_FLOOR = float(args.flight_retract_floor)
+    if args.flight_retract_torque_limit is not None:
+        _control.FLIGHT_RETRACT_TORQUE_LIMIT = float(args.flight_retract_torque_limit)
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
              args.jump_time, explicit_jump_reference=args.explicit_jump_reference,

@@ -8645,3 +8645,2773 @@ VP编号：RAMP1
 未自行更改任何参数。
 
 署名：测试agent-ds
+
+
+============================================================
+
+# 测试agent-ds：SW1（FLOOR x TORQUE_LIMIT 二维联合扫描）（2026-10-16）
+
+VP编号：SW1
+
+## 一、搜索空间（实际跑到的）
+
+- `FLIGHT_RETRACT_FLOOR`：0.16 / 0.18 / 0.19 / 0.20 m（4 档）
+- `FLIGHT_RETRACT_TORQUE_LIMIT`：36 / 38 / 40 N*m（3 档）
+- 共 12 组，逐组独立 run，组间只差这两个数值。
+
+## 二、诊断工具钩子 diff（只影响这两个常量）
+
+`git diff tools/jump_diagnostic.py`：
+
+```text
++from gbc_mpc_wbc import control as _control
+...
++    parser.add_argument("--flight-retract-floor", type=float, default=None,
++                        help="SW1：只覆盖 control.FLIGHT_RETRACT_FLOOR，None=不改")
++    parser.add_argument("--flight-retract-torque-limit", type=float, default=None,
++                        help="SW1：只覆盖 control.FLIGHT_RETRACT_TORQUE_LIMIT，None=不改")
+     args = parser.parse_args()
++    if args.flight_retract_floor is not None:
++        _control.FLIGHT_RETRACT_FLOOR = float(args.flight_retract_floor)
++    if args.flight_retract_torque_limit is not None:
++        _control.FLIGHT_RETRACT_TORQUE_LIMIT = float(args.flight_retract_torque_limit)
+```
+
+- 两个常量在 `control.py` 内以模块全局引用，钩子直接改模块属性即生效。
+- 控制律代码（`control.py` / `loop.py` / `jump.py` / `robot.xml` / 轮力矩 / 落地接管）本轮**未改**。
+
+### 不传参默认路径逐位一致（证明钩子零副作用）
+
+- 跑 `--stage SW1_default_check`（**不带**任何覆盖参数）与 RAMP1 比对：
+  `n=3000`，`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+- 即不传参时与今天完全一致。
+
+## 三、工具自检（工作区第 4 条）
+
+1. `py_compile tools/sw1_scan_eval.py` 通过。
+2. 口径与记录字段一致，字段样例（RAMP1，step 1435，t=1.435）：
+
+```text
+  leg_length_R       = 0.2946084629224238
+  leg_length_L       = 0.29460334591425646
+  leg_length_rate_R  = 0.2472117225362413
+  leg_length_rate_L  = 0.24558673729932334
+  pitch              = -0.0032849500614832504
+  wheel_gap          = [0.007393752543748078, 0.007391464792702779]
+  jump.phase          = FLIGHT
+  jump.flight_leg_ref = ['rising', 0.2664944063726489, -1.5, 0.2829944063726489, 16.159082125763938, 0.011]
+  ctrl                = [36.0, -36.0, -36.0, 36.0, 0.0, 0.0]
+```
+
+3. 用已有 RAMP1 冒烟评价（与本文第一节表对照）：
+
+```text
+gap_FLIGHT=0.19458  gap_all=0.19458  minL_R=0.19996  minL_L=0.19996
+max|pitch|_after=0.80144  pitch末=-0.04153  pp_R=0.10435  pp_L=0.10297
+T_settle=0.915  ABORT=0  min l_ref=0.20  max|ctrl|=36.0
+```
+
+   量级与文档第一节表（RAMP1 gap 0.19458、min 腿长 0.19996、|ctrl| 峰值 36.0）一致。
+
+4. 同一份输入重复评价两次，结果完全一致（`repeat_eval_consistent=True`）。
+
+## 四、参数生效自检（12 组）
+
+- 每组飞行段 `l_ref` 最小值 = 该组 `FLOOR`（0.16 / 0.18 / 0.19 / 0.20 全部对上）；
+- 每组上升段腿通道 `|ctrl|` 最大值 = 该组 `TORQUE_LIMIT`（36 / 38 / 40 全部对上）。
+- 12 组参数均生效，无作废组。
+
+## 五、完整 12 行结果表
+
+| stage | FLOOR | TLIM | gap_FLIGHT | gap_all | minL_R | minL_L | max|pitch|_after | pitch末值 | pp_R | pp_L | T_settle | ABORT | 越界 | 顶39 | 轮饱和 | min l_ref | max|ctrl| | 过H1-4 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SW1_f016_t36 | 0.16 | 36 | 0.22153 | 0.22153 | 0.15847 | 0.15847 | 0.79598 | +0.00476 | 0.17896 | 0.17900 | 1.124 | 0 | False | 0 | 56 | 0.16 | 36.00 | True |
+| SW1_f016_t38 | 0.16 | 38 | 0.22159 | 0.22159 | 0.15825 | 0.15825 | 0.79636 | +0.02402 | 0.19915 | 0.20060 | 999.0 | 0 | True | 0 | 164 | 0.16 | 38.00 | False |
+| SW1_f016_t40 | 0.16 | 40 | 0.22164 | 0.22164 | 0.15805 | 0.15805 | 0.79666 | -0.10962 | 0.19819 | 0.26010 | 999.0 | 0 | True | 48 | 87 | 0.16 | 40.00 | False |
+| SW1_f018_t36 | 0.18 | 36 | 0.20837 | 0.20837 | 0.17952 | 0.17952 | 0.99007 | -0.95554 | 0.12634 | 0.12511 | 999.0 | 0 | False | 0 | 134 | 0.18 | 36.00 | True |
+| SW1_f018_t38 | 0.18 | 38 | 0.20841 | 0.31631 | 0.17936 | 0.17936 | 1.55705 | +0.08219 | 0.26462 | 0.15762 | 999.0 | 0 | True | 0 | 248 | 0.18 | 38.00 | False |
+| SW1_f018_t40 | 0.18 | 40 | 0.20846 | 0.20846 | 0.17918 | 0.17918 | 0.79665 | -0.53366 | 0.21918 | 0.21890 | 999.0 | 0 | True | 48 | 200 | 0.18 | 40.00 | False |
+| SW1_f019_t36 | 0.19 | 36 | 0.20142 | 0.20142 | 0.18988 | 0.18988 | 0.79909 | +0.02336 | 0.20581 | 0.20703 | 999.0 | 0 | True | 0 | 197 | 0.19 | 36.00 | False |
+| SW1_f019_t38 | 0.19 | 38 | 0.20146 | 0.20146 | 0.18984 | 0.18984 | 0.79932 | +0.01947 | 0.15035 | 0.16206 | 999.0 | 0 | False | 0 | 116 | 0.19 | 38.00 | True |
+| SW1_f019_t40 | 0.19 | 40 | 0.20150 | 0.20438 | 0.18979 | 0.18979 | 1.56885 | -1.02889 | 0.13490 | 0.13234 | 999.0 | 0 | False | 50 | 220 | 0.19 | 40.00 | False |
+| SW1_f020_t36 | 0.20 | 36 | 0.19458 | 0.19458 | 0.19996 | 0.19996 | 0.80144 | -0.04153 | 0.10435 | 0.10297 | 0.915 | 0 | False | 0 | 0 | 0.20 | 36.00 | False |
+| SW1_f020_t38 | 0.20 | 38 | 0.19462 | 0.19462 | 0.19992 | 0.19992 | 0.80167 | -0.02694 | 0.10672 | 0.10499 | 0.927 | 0 | False | 0 | 0 | 0.20 | 38.00 | False |
+| SW1_f020_t40 | 0.20 | 40 | 0.19465 | 0.19465 | 0.19988 | 0.19988 | 0.80184 | -0.02694 | 0.10675 | 0.10502 | 0.927 | 0 | False | 50 | 0 | 0.20 | 40.00 | False |
+
+## 六、排序（只在过 H1~H4 的组之间，按顺序逐项比较）
+
+硬约束：H1 gap_FLIGHT>=0.200、H2 ABORT=0、H3 触地后腿长在 [0.114,0.430]、H4 触地后 max|pitch|<1.0。
+
+| 名次 | stage | FLOOR | TLIM | max\|pitch\|_after | pp_max | T_settle | 顶39 | gap_FLIGHT |
+|---|---|---|---|---|---|---|---|---|
+| 1 | SW1_f016_t36 | 0.16 | 36 | 0.79598 | 0.17900 | 1.124 | 0 | 0.22153 |
+| 2 | SW1_f019_t38 | 0.19 | 38 | 0.79932 | 0.16206 | 999（未收敛） | 0 | 0.20146 |
+| 3 | SW1_f018_t36 | 0.18 | 36 | 0.99007 | 0.12634 | 999（未收敛） | 0 | 0.20837 |
+
+## 七、最优解及其依据
+
+**SW1_f016_t36（FLOOR=0.16 m，TORQUE_LIMIT=36 N*m）**，依据（按文档顺序逐项比较）：
+
+1. 落地 max|pitch| = 0.79598，三个过约束组里最小；
+2. 落地腿长峰峰幅（R/L 取大）= 0.17900，小于 f018_t36 的 0.12634 的前项已由第 1 项分出；
+3. T_settle = 1.124 s，三个过约束组里唯一收敛的（另两组 999）。
+
+## 八、边界覆盖声明
+
+- `FLIGHT_RETRACT_FLOOR` 扫描范围 0.16~0.20 m。**最优解落在下边界 0.16**，
+  即搜索未覆盖边界，按文档要求下一轮必须向低延伸。
+- `FLIGHT_RETRACT_TORQUE_LIMIT` 扫描范围 36~40 N*m。**最优解落在下边界 36**，
+  同样未覆盖下边界。上边界 40 = 执行器实际限幅，已覆盖。
+- 结论：**两个参数的低侧边界都未覆盖**，当前最优解不是内部解。
+
+## 九、`SW1_f020_t36` 与 RAMP1 逐位比对
+
+- `n=3000`，`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`，全程一致。
+
+## 十、失败组与失败原因
+
+| stage | 未过的约束 | 实测 |
+|---|---|---|
+| SW1_f016_t38 | H3 | 触地后腿长最小 0.10654 < 0.114（t=2.518） |
+| SW1_f016_t40 | H3 | 触地后腿长最小 0.10353 < 0.114（t=2.429） |
+| SW1_f018_t38 | H3、H4 | 腿长最大 0.44298 > 0.430（t=2.615）；max\|pitch\|=1.55705 |
+| SW1_f018_t40 | H3 | 触地后腿长最小 0.10446 < 0.114（t=2.545） |
+| SW1_f019_t36 | H3 | 触地后腿长最小 0.10443 < 0.114（t=2.548） |
+| SW1_f019_t40 | H4 | max\|pitch\|=1.56885 |
+| SW1_f020_t36 | H1 | gap_FLIGHT=0.19458 < 0.200 |
+| SW1_f020_t38 | H1 | gap_FLIGHT=0.19462 < 0.200 |
+| SW1_f020_t40 | H1 | gap_FLIGHT=0.19465 < 0.200 |
+
+## 十一、`git_status_short_raw`（运行当时，完整）
+
+```text
+ M wheel_leg_mujoco/tools/jump_diagnostic.py
+?? MUJOCO_LOG.TXT
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _git_status_land0.txt
+?? _git_status_obs1.txt
+?? _git_status_ramp1.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.log
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.log
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.json
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.log
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.log
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.log
+?? wheel_leg_mujoco/results/FL10_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL10_baseline_run01.log
+?? wheel_leg_mujoco/results/FL11_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL11_baseline_run01.log
+?? wheel_leg_mujoco/results/FL12_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL12_baseline_run01.log
+?? wheel_leg_mujoco/results/FL13_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL13_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.log
+?? wheel_leg_mujoco/results/FL16_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL16_baseline_run01.log
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.log
+?? wheel_leg_mujoco/results/FL19_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL19_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.log
+?? wheel_leg_mujoco/results/FL20_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL20_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21_baseline_run01.log
+?? wheel_leg_mujoco/results/FL22_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL22_baseline_run01.log
+?? wheel_leg_mujoco/results/FL23_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL23_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run02.log
+?? wheel_leg_mujoco/results/FL25_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run01.log
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.log
+?? wheel_leg_mujoco/results/FL26_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL26_baseline_run01.log
+?? wheel_leg_mujoco/results/FL27_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL27_baseline_run01.log
+?? wheel_leg_mujoco/results/FL28_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL28_baseline_run01.log
+?? wheel_leg_mujoco/results/FL29_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL29_baseline_run01.log
+?? wheel_leg_mujoco/results/FL2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL30_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL30_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run02.log
+?? wheel_leg_mujoco/results/FL32_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL32_baseline_run01.log
+?? wheel_leg_mujoco/results/FL34_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL34_baseline_run01.log
+?? wheel_leg_mujoco/results/FL35_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL35_baseline_run01.log
+?? wheel_leg_mujoco/results/FL36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL36_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.log
+?? wheel_leg_mujoco/results/FL38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL38_baseline_run01.log
+?? wheel_leg_mujoco/results/FL39_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL39_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run02.log
+?? wheel_leg_mujoco/results/FL3_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run03.log
+?? wheel_leg_mujoco/results/FL40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL40_baseline_run01.log
+?? wheel_leg_mujoco/results/FL41_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL41_baseline_run01.log
+?? wheel_leg_mujoco/results/FL42_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL42_baseline_run01.log
+?? wheel_leg_mujoco/results/FL43_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL43_baseline_run01.log
+?? wheel_leg_mujoco/results/FL44_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL44_baseline_run01.log
+?? wheel_leg_mujoco/results/FL45_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL45_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL47_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL47_baseline_run01.log
+?? wheel_leg_mujoco/results/FL48_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL48_baseline_run01.log
+?? wheel_leg_mujoco/results/FL49_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL49_baseline_run01.log
+?? wheel_leg_mujoco/results/FL4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL4_baseline_run01.log
+?? wheel_leg_mujoco/results/FL51_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL51_baseline_run01.log
+?? wheel_leg_mujoco/results/FL53_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL53_baseline_run01.log
+?? wheel_leg_mujoco/results/FL54_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL54_baseline_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/FL5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL5_baseline_run01.log
+?? wheel_leg_mujoco/results/FL6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL6_baseline_run01.log
+?? wheel_leg_mujoco/results/FL7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL7_baseline_run01.log
+?? wheel_leg_mujoco/results/FL8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL8_baseline_run01.log
+?? wheel_leg_mujoco/results/FL9_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL9_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.log
+?? wheel_leg_mujoco/results/P0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_run01_inspect.log
+?? wheel_leg_mujoco/results/P0_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run02.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.log
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_run01.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/P6_key_events.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.log
+?? wheel_leg_mujoco/results/P6_qfrc_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_run01.log
+?? wheel_leg_mujoco/results/P6_transition_report.log
+?? wheel_leg_mujoco/results/P6_transition_report_compact.log
+?? wheel_leg_mujoco/results/Q1A_mpc_audit_default_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.log
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.log
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.json
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VMC_feasibility_20261009.json
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.log
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.log
+?? wheel_leg_mujoco/results/WP7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP7_baseline_run01.log
+?? wheel_leg_mujoco/results/WP8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP8_baseline_run01.log
+?? wheel_leg_mujoco/results/_backup_before_field/
+?? wheel_leg_mujoco/results/debug_zero_input/
+?? wheel_leg_mujoco/results/jump_test_airsign.json
+?? wheel_leg_mujoco/results/jump_test_baseline.json
+?? wheel_leg_mujoco/results/jump_test_cg.json
+?? wheel_leg_mujoco/results/jump_test_cg2.json
+?? wheel_leg_mujoco/results/jump_test_clean.json
+?? wheel_leg_mujoco/results/jump_test_comp0.json
+?? wheel_leg_mujoco/results/jump_test_comp1.json
+?? wheel_leg_mujoco/results/jump_test_crouch.json
+?? wheel_leg_mujoco/results/jump_test_crouch014.json
+?? wheel_leg_mujoco/results/jump_test_crouch014b.json
+?? wheel_leg_mujoco/results/jump_test_crouch020.json
+?? wheel_leg_mujoco/results/jump_test_cutforce.json
+?? wheel_leg_mujoco/results/jump_test_dbl.json
+?? wheel_leg_mujoco/results/jump_test_dbl0.json
+?? wheel_leg_mujoco/results/jump_test_dbl1.json
+?? wheel_leg_mujoco/results/jump_test_dblfix.json
+?? wheel_leg_mujoco/results/jump_test_decoup.json
+?? wheel_leg_mujoco/results/jump_test_deployed.json
+?? wheel_leg_mujoco/results/jump_test_diag.json
+?? wheel_leg_mujoco/results/jump_test_diag2.json
+?? wheel_leg_mujoco/results/jump_test_dualcut.json
+?? wheel_leg_mujoco/results/jump_test_event1.json
+?? wheel_leg_mujoco/results/jump_test_event2.json
+?? wheel_leg_mujoco/results/jump_test_event3.json
+?? wheel_leg_mujoco/results/jump_test_fix1.json
+?? wheel_leg_mujoco/results/jump_test_fix3.json
+?? wheel_leg_mujoco/results/jump_test_flight_angle.json
+?? wheel_leg_mujoco/results/jump_test_flightdiag.json
+?? wheel_leg_mujoco/results/jump_test_follow.json
+?? wheel_leg_mujoco/results/jump_test_gcheck.json
+?? wheel_leg_mujoco/results/jump_test_gcheck2.json
+?? wheel_leg_mujoco/results/jump_test_isolate.json
+?? wheel_leg_mujoco/results/jump_test_legchk.json
+?? wheel_leg_mujoco/results/jump_test_legrate.json
+?? wheel_leg_mujoco/results/jump_test_limit70.json
+?? wheel_leg_mujoco/results/jump_test_link.json
+?? wheel_leg_mujoco/results/jump_test_m0.json
+?? wheel_leg_mujoco/results/jump_test_m1.json
+?? wheel_leg_mujoco/results/jump_test_mergefix.json
+?? wheel_leg_mujoco/results/jump_test_mergefix2.json
+?? wheel_leg_mujoco/results/jump_test_mpcchk.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata2.json
+?? wheel_leg_mujoco/results/jump_test_normal1.json
+?? wheel_leg_mujoco/results/jump_test_planA5.json
+?? wheel_leg_mujoco/results/jump_test_planA6.json
+?? wheel_leg_mujoco/results/jump_test_planAB.json
+?? wheel_leg_mujoco/results/jump_test_planA_final.json
+?? wheel_leg_mujoco/results/jump_test_planB.json
+?? wheel_leg_mujoco/results/jump_test_planB2.json
+?? wheel_leg_mujoco/results/jump_test_planB3.json
+?? wheel_leg_mujoco/results/jump_test_planD2.json
+?? wheel_leg_mujoco/results/jump_test_planDA.json
+?? wheel_leg_mujoco/results/jump_test_planDA2.json
+?? wheel_leg_mujoco/results/jump_test_plan_a.json
+?? wheel_leg_mujoco/results/jump_test_plan_a2.json
+?? wheel_leg_mujoco/results/jump_test_policy.json
+?? wheel_leg_mujoco/results/jump_test_policy2.json
+?? wheel_leg_mujoco/results/jump_test_policy3.json
+?? wheel_leg_mujoco/results/jump_test_pre5.json
+?? wheel_leg_mujoco/results/jump_test_prechk.json
+?? wheel_leg_mujoco/results/jump_test_prehold.json
+?? wheel_leg_mujoco/results/jump_test_preload.json
+?? wheel_leg_mujoco/results/jump_test_probe_thrust.json
+?? wheel_leg_mujoco/results/jump_test_pscan.json
+?? wheel_leg_mujoco/results/jump_test_rate.json
+?? wheel_leg_mujoco/results/jump_test_rate0.json
+?? wheel_leg_mujoco/results/jump_test_rate1.json
+?? wheel_leg_mujoco/results/jump_test_ratechk.json
+?? wheel_leg_mujoco/results/jump_test_rchk.json
+?? wheel_leg_mujoco/results/jump_test_refonly.json
+?? wheel_leg_mujoco/results/jump_test_reverted.json
+?? wheel_leg_mujoco/results/jump_test_ronly2.json
+?? wheel_leg_mujoco/results/jump_test_scan.json
+?? wheel_leg_mujoco/results/jump_test_schedchk.json
+?? wheel_leg_mujoco/results/jump_test_signfix.json
+?? wheel_leg_mujoco/results/jump_test_signflip.json
+?? wheel_leg_mujoco/results/jump_test_signflip2.json
+?? wheel_leg_mujoco/results/jump_test_taskshare.json
+?? wheel_leg_mujoco/results/jump_test_vertical.json
+?? wheel_leg_mujoco/results/jump_test_vtor.json
+?? wheel_leg_mujoco/results/jump_test_wbc_angle.json
+?? wheel_leg_mujoco/results/jump_test_wbcmodel3.json
+?? wheel_leg_mujoco/results/m2_nullspace.json.gz
+?? wheel_leg_mujoco/results/m2_qp.json.gz
+?? wheel_leg_mujoco/results/m2_wls.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_backward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_forward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_stand30.json.gz
+?? wheel_leg_mujoco/results/m3_wls_backward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_forward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_wls_stand30.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_w1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_w1.0.json.gz
+?? wheel_leg_mujoco/results/view_test/
+?? "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy 2.pdf"
+```
+
+## 十二、结论（只写数据支持的现象）
+
+1. 12 组全部跑完，无 ABORT（H2 全过）；参数生效自检 12/12 对上。
+2. 只有 3 组过 H1~H4：SW1_f016_t36、SW1_f018_t36、SW1_f019_t38。
+3. 最优为 SW1_f016_t36（0.16 / 36），但落在两个参数的下侧边界上，搜索未覆盖。
+4. 下限 0.20 三组全部因 gap<0.200 未过 H1；下限 0.16/0.18/0.19 多组因触地后腿长越到 0.114 以下未过 H3；
+   力矩 40 的三组中两组 max|pitch| 超过 1.0。
+5. `SW1_f020_t36` 与 RAMP1 全程逐位一致。
+
+## 十三、结果文件
+
+- `results/SW1_f016_t36 ... SW1_f020_t40_baseline_run01.json.gz`（12 份）；
+  工具 `tools/sw1_scan_eval.py`；评价输出 `sw1_eval.json`。
+
+是否允许进入下一轮：3 组过约束，最优解落在边界，需向低侧延伸。
+
+署名：测试agent-ds
+
+
+============================================================
+
+# 测试agent-ds：LAND2（落地锁存，修落地后飞行档/离地档重入）（2026-10-17）
+
+VP编号：LAND2
+
+## 一、改动
+
+- `control.py`：`FLIGHT_RETRACT_FLOOR` 默认值 0.20 -> 0.16（做法 A）。
+- `loop.py`：加落地锁存 `jump_landed`（`LANDING`/`RECOVER` 置位、`COMPRESS` 清零、`ABORT` 不置位）；
+  `geometrically_airborne` 与 `airborne` 各加 `and not jump_landed`。
+- 未改：`jump.py` 状态机、任何增益、下落段、落地接管、轮力矩；`TLIM` 保持 36。
+- `py_compile` 通过。
+
+做法（A 改默认值 / B 用钩子）：**A（改默认值）**，不带扫描钩子。
+
+`FLIGHT_RETRACT_FLOOR` / `TLIM` 实际值；`min l_ref` / `max|ctrl|` 自检：
+
+- `FLIGHT_RETRACT_FLOOR=0.16`，`FLIGHT_RETRACT_TORQUE_LIMIT=36`。
+- 飞行段 rising `min l_ref=0.1600`，`max|ctrl|=36.00`，与该组设定一致。
+
+## 二、判据
+
+| 类别 | 指标 | 目标 | LAND2 | 结果 |
+| --- | --- | --- | --- | --- |
+| 主 | 触地后 `output_source==flight_leg_profile` 帧数 | = 0 | **0** | 通过 |
+| 主 | 触地后 `output_source==airborne_zero` 帧数 | = 0 | **0** | 通过 |
+| 主 | 触地后最小腿长 | >= 0.114 m | **0.09944 m** | **未通过** |
+| 主 | 飞行段最大轮间隙 | >= 0.200 m | **0.22153 m** | 通过 |
+| 一致性 | 地面段（t<=1.424）逐位比对 | 全 0.0 | 全 0.0 | 通过 |
+| 回归 | 触地后 `max|pitch|` / 末值 \|pitch\| / ABORT | 不得变差 | 见下 | 部分变差 |
+| 记录 | 反弹幅 / 反弹帧数 / 腿长峰峰幅 / T_settle | 只记录 | 见下 | 记录 |
+
+- 地面段逐位比对（n=1425）：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+- 附带核对飞行段（n=322）：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`，
+  即 LAND2 与 `SW1_f016_t36` 的差异只在落地锁存生效之后。
+- 触地首帧 `t=1.7470`。
+
+触地后 flight_leg_profile 帧数 / airborne_zero 帧数：**0 / 0**。
+
+触地后最小腿长（右/左）与时刻：右 **0.09944 m**（t=2.356），左 **0.09944 m**（t=2.354）。
+
+飞行段最大轮间隙：**0.22153 m**（与 SW1_f016_t36 相同，未回退）。
+
+触地后 max|pitch| / 末值 pitch / ABORT：**0.79675 / -0.10783 / 0**。
+
+## 三、与 SW1_f016_t36 逐项对照
+
+| 指标 | SW1_f016_t36 | LAND2 | 方向 |
+| --- | --- | --- | --- |
+| 触地后最小腿长 | 0.12269 | **0.09944** | 变差（跌破 0.114） |
+| 触地后最大轮间隙（反弹幅） | 0.07755 | **0.15447** | 变差（约 2 倍） |
+| 反弹帧数（gap>0.001） | — | **873** | 记录 |
+| 腿长峰峰幅 R / L | 0.17896 / 0.17900 | **0.20228 / 0.20313** | 变差 |
+| T_settle | 1.124 | **999（未收敛）** | 变差 |
+| 触地后 max\|pitch\| | 0.79598 | 0.79675 | 略变差 |
+| 末值 pitch | +0.00476 | -0.10783 | 变差 |
+| ABORT | 0 | 0 | 持平 |
+
+## 四、触地后逐拍（现象，每 40 帧采样）
+
+```text
+  t=1.747 LANDING landing_buffer L_R=0.29957 Ldot_R=+1.291 pitch=-0.7332 gap=-0.0003 ctrl4=0.00
+  t=1.787 IDLE    zero_order_hold L_R=0.25310 Ldot_R=-1.738 pitch=-0.7958 gap=-0.0108 ctrl4=-1.44
+  t=1.827 IDLE    zero_order_hold L_R=0.21573 Ldot_R=+0.065 pitch=-0.7578 gap=-0.0019 ctrl4=-1.99
+  t=1.907 IDLE    zero_order_hold L_R=0.23456 Ldot_R=+0.269 pitch=-0.6780 gap=-0.0002 ctrl4=-2.00
+  t=1.987 IDLE    zero_order_hold L_R=0.25541 Ldot_R=+0.252 pitch=-0.4323 gap=-0.0003 ctrl4=-1.77
+  t=2.067 IDLE    zero_order_hold L_R=0.27456 Ldot_R=+0.333 pitch=-0.3252 gap=-0.0000 ctrl4=-5.98
+  t=2.147 IDLE    zero_order_hold L_R=0.30067 Ldot_R=+0.031 pitch=-0.3747 gap=+0.0049 ctrl4=5.23
+  t=2.227 IDLE    zero_order_hold L_R=0.26416 Ldot_R=-0.848 pitch=-0.7871 gap=+0.0490 ctrl4=5.23
+  t=2.307 IDLE    zero_order_hold L_R=0.16128 Ldot_R=-1.666 pitch=-0.7417 gap=+0.1209 ctrl4=5.23
+  t=2.347 IDLE    zero_order_hold L_R=0.10107 Ldot_R=-0.456 pitch=-0.6907 gap=+0.1545 ctrl4=5.23
+  t=2.427 IDLE    zero_order_hold L_R=0.11274 Ldot_R=+0.194 pitch=-0.6833 gap=+0.1145 ctrl4=5.23
+  t=2.667 IDLE    zero_order_hold L_R=0.11302 Ldot_R=-0.481 pitch=-0.4102 gap=+0.0712 ctrl4=5.23
+  t=2.999 IDLE    zero_order_hold L_R=0.11002 Ldot_R=-0.057 pitch=-0.1078 gap=+0.0050 ctrl4=5.23
+```
+
+- 相位：IDLE 2234 / COMPRESS 157 / COMPRESS_BRAKE 159 / THRUST 109 / FLIGHT 322 /
+  LANDING 18 / RECOVER 1；无 ABORT；`assertion_failures=0`。
+- 触地后重入已消除（flight_leg_profile=0、airborne_zero=0），
+  但仿真中机器人整体再次弹起（gap 到 +0.1545 m），腿长在该弹起段跌到 0.0994 m。
+
+## 五、结论（只写数据支持的现象）
+
+1. 锁存生效：触地后 `flight_leg_profile` 与 `airborne_zero` 帧数都是 0，重入被消除。
+2. 地面段（含飞行段）与 `SW1_f016_t36` 逐位一致，锁存只作用于落地之后。
+3. 主判据未过：触地后最小腿长 0.09944 m，低于 0.114 m。
+4. 与 `SW1_f016_t36` 相比，反弹幅 0.15447 m（原 0.07755 m）、腿长峰峰幅 0.20228 m
+   （原 0.17896 m）、T_settle 999（原 1.124）都变差；`max|pitch|` 0.79675（原 0.79598）略变差。
+5. 飞行段最大轮间隙 0.22153 m，未回退。
+
+## 六、`git_status_short_raw`（运行当时，完整）
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/gbc_mpc_wbc/control.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/tools/jump_diagnostic.py
+?? MUJOCO_LOG.TXT
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _git_status_land0.txt
+?? _git_status_obs1.txt
+?? _git_status_ramp1.txt
+?? _git_status_sw1.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.log
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.log
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.json
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.log
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.log
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.log
+?? wheel_leg_mujoco/results/FL10_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL10_baseline_run01.log
+?? wheel_leg_mujoco/results/FL11_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL11_baseline_run01.log
+?? wheel_leg_mujoco/results/FL12_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL12_baseline_run01.log
+?? wheel_leg_mujoco/results/FL13_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL13_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.log
+?? wheel_leg_mujoco/results/FL16_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL16_baseline_run01.log
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.log
+?? wheel_leg_mujoco/results/FL19_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL19_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.log
+?? wheel_leg_mujoco/results/FL20_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL20_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21_baseline_run01.log
+?? wheel_leg_mujoco/results/FL22_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL22_baseline_run01.log
+?? wheel_leg_mujoco/results/FL23_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL23_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run02.log
+?? wheel_leg_mujoco/results/FL25_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run01.log
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.log
+?? wheel_leg_mujoco/results/FL26_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL26_baseline_run01.log
+?? wheel_leg_mujoco/results/FL27_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL27_baseline_run01.log
+?? wheel_leg_mujoco/results/FL28_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL28_baseline_run01.log
+?? wheel_leg_mujoco/results/FL29_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL29_baseline_run01.log
+?? wheel_leg_mujoco/results/FL2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL30_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL30_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run02.log
+?? wheel_leg_mujoco/results/FL32_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL32_baseline_run01.log
+?? wheel_leg_mujoco/results/FL34_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL34_baseline_run01.log
+?? wheel_leg_mujoco/results/FL35_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL35_baseline_run01.log
+?? wheel_leg_mujoco/results/FL36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL36_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.log
+?? wheel_leg_mujoco/results/FL38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL38_baseline_run01.log
+?? wheel_leg_mujoco/results/FL39_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL39_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run02.log
+?? wheel_leg_mujoco/results/FL3_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run03.log
+?? wheel_leg_mujoco/results/FL40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL40_baseline_run01.log
+?? wheel_leg_mujoco/results/FL41_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL41_baseline_run01.log
+?? wheel_leg_mujoco/results/FL42_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL42_baseline_run01.log
+?? wheel_leg_mujoco/results/FL43_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL43_baseline_run01.log
+?? wheel_leg_mujoco/results/FL44_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL44_baseline_run01.log
+?? wheel_leg_mujoco/results/FL45_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL45_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL47_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL47_baseline_run01.log
+?? wheel_leg_mujoco/results/FL48_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL48_baseline_run01.log
+?? wheel_leg_mujoco/results/FL49_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL49_baseline_run01.log
+?? wheel_leg_mujoco/results/FL4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL4_baseline_run01.log
+?? wheel_leg_mujoco/results/FL51_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL51_baseline_run01.log
+?? wheel_leg_mujoco/results/FL53_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL53_baseline_run01.log
+?? wheel_leg_mujoco/results/FL54_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL54_baseline_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/FL5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL5_baseline_run01.log
+?? wheel_leg_mujoco/results/FL6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL6_baseline_run01.log
+?? wheel_leg_mujoco/results/FL7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL7_baseline_run01.log
+?? wheel_leg_mujoco/results/FL8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL8_baseline_run01.log
+?? wheel_leg_mujoco/results/FL9_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL9_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.log
+?? wheel_leg_mujoco/results/P0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_run01_inspect.log
+?? wheel_leg_mujoco/results/P0_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run02.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.log
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_run01.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/P6_key_events.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.log
+?? wheel_leg_mujoco/results/P6_qfrc_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_run01.log
+?? wheel_leg_mujoco/results/P6_transition_report.log
+?? wheel_leg_mujoco/results/P6_transition_report_compact.log
+?? wheel_leg_mujoco/results/Q1A_mpc_audit_default_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.log
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.log
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.json
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VMC_feasibility_20261009.json
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.log
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.log
+?? wheel_leg_mujoco/results/WP7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP7_baseline_run01.log
+?? wheel_leg_mujoco/results/WP8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP8_baseline_run01.log
+?? wheel_leg_mujoco/results/_backup_before_field/
+?? wheel_leg_mujoco/results/debug_zero_input/
+?? wheel_leg_mujoco/results/jump_test_airsign.json
+?? wheel_leg_mujoco/results/jump_test_baseline.json
+?? wheel_leg_mujoco/results/jump_test_cg.json
+?? wheel_leg_mujoco/results/jump_test_cg2.json
+?? wheel_leg_mujoco/results/jump_test_clean.json
+?? wheel_leg_mujoco/results/jump_test_comp0.json
+?? wheel_leg_mujoco/results/jump_test_comp1.json
+?? wheel_leg_mujoco/results/jump_test_crouch.json
+?? wheel_leg_mujoco/results/jump_test_crouch014.json
+?? wheel_leg_mujoco/results/jump_test_crouch014b.json
+?? wheel_leg_mujoco/results/jump_test_crouch020.json
+?? wheel_leg_mujoco/results/jump_test_cutforce.json
+?? wheel_leg_mujoco/results/jump_test_dbl.json
+?? wheel_leg_mujoco/results/jump_test_dbl0.json
+?? wheel_leg_mujoco/results/jump_test_dbl1.json
+?? wheel_leg_mujoco/results/jump_test_dblfix.json
+?? wheel_leg_mujoco/results/jump_test_decoup.json
+?? wheel_leg_mujoco/results/jump_test_deployed.json
+?? wheel_leg_mujoco/results/jump_test_diag.json
+?? wheel_leg_mujoco/results/jump_test_diag2.json
+?? wheel_leg_mujoco/results/jump_test_dualcut.json
+?? wheel_leg_mujoco/results/jump_test_event1.json
+?? wheel_leg_mujoco/results/jump_test_event2.json
+?? wheel_leg_mujoco/results/jump_test_event3.json
+?? wheel_leg_mujoco/results/jump_test_fix1.json
+?? wheel_leg_mujoco/results/jump_test_fix3.json
+?? wheel_leg_mujoco/results/jump_test_flight_angle.json
+?? wheel_leg_mujoco/results/jump_test_flightdiag.json
+?? wheel_leg_mujoco/results/jump_test_follow.json
+?? wheel_leg_mujoco/results/jump_test_gcheck.json
+?? wheel_leg_mujoco/results/jump_test_gcheck2.json
+?? wheel_leg_mujoco/results/jump_test_isolate.json
+?? wheel_leg_mujoco/results/jump_test_legchk.json
+?? wheel_leg_mujoco/results/jump_test_legrate.json
+?? wheel_leg_mujoco/results/jump_test_limit70.json
+?? wheel_leg_mujoco/results/jump_test_link.json
+?? wheel_leg_mujoco/results/jump_test_m0.json
+?? wheel_leg_mujoco/results/jump_test_m1.json
+?? wheel_leg_mujoco/results/jump_test_mergefix.json
+?? wheel_leg_mujoco/results/jump_test_mergefix2.json
+?? wheel_leg_mujoco/results/jump_test_mpcchk.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata2.json
+?? wheel_leg_mujoco/results/jump_test_normal1.json
+?? wheel_leg_mujoco/results/jump_test_planA5.json
+?? wheel_leg_mujoco/results/jump_test_planA6.json
+?? wheel_leg_mujoco/results/jump_test_planAB.json
+?? wheel_leg_mujoco/results/jump_test_planA_final.json
+?? wheel_leg_mujoco/results/jump_test_planB.json
+?? wheel_leg_mujoco/results/jump_test_planB2.json
+?? wheel_leg_mujoco/results/jump_test_planB3.json
+?? wheel_leg_mujoco/results/jump_test_planD2.json
+?? wheel_leg_mujoco/results/jump_test_planDA.json
+?? wheel_leg_mujoco/results/jump_test_planDA2.json
+?? wheel_leg_mujoco/results/jump_test_plan_a.json
+?? wheel_leg_mujoco/results/jump_test_plan_a2.json
+?? wheel_leg_mujoco/results/jump_test_policy.json
+?? wheel_leg_mujoco/results/jump_test_policy2.json
+?? wheel_leg_mujoco/results/jump_test_policy3.json
+?? wheel_leg_mujoco/results/jump_test_pre5.json
+?? wheel_leg_mujoco/results/jump_test_prechk.json
+?? wheel_leg_mujoco/results/jump_test_prehold.json
+?? wheel_leg_mujoco/results/jump_test_preload.json
+?? wheel_leg_mujoco/results/jump_test_probe_thrust.json
+?? wheel_leg_mujoco/results/jump_test_pscan.json
+?? wheel_leg_mujoco/results/jump_test_rate.json
+?? wheel_leg_mujoco/results/jump_test_rate0.json
+?? wheel_leg_mujoco/results/jump_test_rate1.json
+?? wheel_leg_mujoco/results/jump_test_ratechk.json
+?? wheel_leg_mujoco/results/jump_test_rchk.json
+?? wheel_leg_mujoco/results/jump_test_refonly.json
+?? wheel_leg_mujoco/results/jump_test_reverted.json
+?? wheel_leg_mujoco/results/jump_test_ronly2.json
+?? wheel_leg_mujoco/results/jump_test_scan.json
+?? wheel_leg_mujoco/results/jump_test_schedchk.json
+?? wheel_leg_mujoco/results/jump_test_signfix.json
+?? wheel_leg_mujoco/results/jump_test_signflip.json
+?? wheel_leg_mujoco/results/jump_test_signflip2.json
+?? wheel_leg_mujoco/results/jump_test_taskshare.json
+?? wheel_leg_mujoco/results/jump_test_vertical.json
+?? wheel_leg_mujoco/results/jump_test_vtor.json
+?? wheel_leg_mujoco/results/jump_test_wbc_angle.json
+?? wheel_leg_mujoco/results/jump_test_wbcmodel3.json
+?? wheel_leg_mujoco/results/m2_nullspace.json.gz
+?? wheel_leg_mujoco/results/m2_qp.json.gz
+?? wheel_leg_mujoco/results/m2_wls.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_backward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_forward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_stand30.json.gz
+?? wheel_leg_mujoco/results/m3_wls_backward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_forward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_wls_stand30.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_w1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_w1.0.json.gz
+?? wheel_leg_mujoco/results/view_test/
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy 2.pdf"
+
+```
+
+## 七、结果文件
+
+- `results/LAND2_baseline_run01.json.gz`；对照 `results/SW1_f016_t36_baseline_run01.json.gz`。
+
+是否允许进入下一轮：**否**（主判据触地后最小腿长 0.09944 < 0.114；且反弹/腿长峰峰幅/T_settle 相对 SW1_f016_t36 变差）。
+
+署名：测试agent-ds
+
+
+============================================================
+
+# 测试agent-ds：LAND2B（只回退 airborne 的锁存）（2026-10-17）
+
+VP编号：LAND2B
+
+## 一、改动（相对 LAND2 只少一处）
+
+- `loop.py`：`airborne` 恢复原样（去掉 `and not jump_landed`）；
+  其余全部保留：`jump_landed` 的置位/清零、`geometrically_airborne` 的锁存。
+- `control.py`：`FLIGHT_RETRACT_FLOOR=0.16` 保留；`TLIM=36` 保留。
+- `py_compile` 通过。
+
+## 二、自检
+
+- `FLIGHT_RETRACT_FLOOR=0.16`、`FLIGHT_RETRACT_TORQUE_LIMIT=36`；
+  飞行段 rising `min l_ref=0.1600`、`max|ctrl|=36.00`，与设定一致。
+- 地面段（t<=1.424，n=1425）逐位比对：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+- 飞行段（n=322）逐位比对：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+  即与 `SW1_f016_t36` 的差异只在落地之后。
+
+## 三、判据
+
+| 判据 | 目标 | LAND2B | 结果 |
+| --- | --- | --- | --- |
+| 触地后最小腿长 | >= 0.114 m | 右 0.21558 / 左 0.21519 | **通过** |
+| 反弹幅不得比 SW1_f016_t36 差 | <= 0.07755 | **0.01137** | 通过（更好） |
+| 腿长峰峰幅不得变差 | <= 0.17896 / 0.17900 | **0.20397 / 0.20294** | **未通过** |
+| T_settle 不得变差 | <= 1.124 | **999（未收敛）** | **未通过** |
+| 末值 pitch 不得变差 | 接近 +0.00476 | **-0.52271** | **未通过** |
+
+触地首帧 `t=1.7470`。
+
+## 四、与 SW1_f016_t36 / LAND2 逐项对照
+
+| 指标 | SW1_f016_t36 | LAND2 | LAND2B |
+| --- | --- | --- | --- |
+| 触地后最小腿长 R/L | 0.12276 / 0.12269 | 0.09944 / 0.09944 | **0.21558 / 0.21519** |
+| 触地后 flight_leg_profile 帧 | 256 | 0 | **0** |
+| 触地后 airborne_zero 帧 | 12 | 0 | **695** |
+| 触地后最大轮间隙（反弹幅） | 0.07755 | 0.15447 | **0.01137** |
+| 反弹帧数（gap>0.001） | 258 | 873 | 341 |
+| 腿长峰峰幅 R/L | 0.17896 / 0.17900 | 0.20228 / 0.20313 | **0.20397 / 0.20294** |
+| 触地后 max\|pitch\| | 0.79598 | 0.79675 | **0.79598** |
+| 末值 pitch | +0.00476 | -0.10783 | **-0.52271** |
+| T_settle | 1.124 | 999 | **999** |
+| ABORT | 0 | 0 | 0 |
+| FLIGHT 段最大轮间隙 | 0.22153 | 0.22153 | 0.22153 |
+
+- 相位：IDLE 2234 / COMPRESS 157 / COMPRESS_BRAKE 159 / THRUST 109 / FLIGHT 322 /
+  LANDING 18 / RECOVER 1；无 ABORT；`assertion_failures=0`。
+- 全程 `max_leg_length=0.41956 m`（未超 0.430）。
+
+## 五、触地后逐拍（现象，每 40 帧采样）
+
+```text
+  t=1.747 LANDING landing_buffer L_R=0.29957 Ldot_R=+1.291 pitch=-0.7332 gap=-0.0003
+  t=1.827 IDLE    zero_order_hold L_R=0.21573 Ldot_R=+0.065 pitch=-0.7578 gap=-0.0019
+  t=1.947 IDLE    zero_order_hold L_R=0.24516 Ldot_R=+0.261 pitch=-0.5667 gap=-0.0003
+  t=2.067 IDLE    zero_order_hold L_R=0.27456 Ldot_R=+0.333 pitch=-0.3252 gap=-0.0000
+  t=2.147 IDLE    zero_order_hold L_R=0.30067 Ldot_R=+0.031 pitch=-0.3747 gap=+0.0049
+  t=2.267 IDLE    zero_order_hold L_R=0.22153 Ldot_R=-1.300 pitch=-0.7839 gap=+0.0083
+  t=2.387 IDLE    zero_order_hold L_R=0.10510 Ldot_R=+0.217 pitch=-0.6974 gap=-0.0000
+  t=2.507 IDLE    airborne_zero    L_R=0.13288 Ldot_R=+0.181 pitch=-0.6398 gap=+0.0845
+  t=2.627 IDLE    airborne_zero    L_R=0.12794 Ldot_R=-0.275 pitch=-0.4922 gap=+0.0702
+  t=2.747 IDLE    airborne_zero    L_R=0.11090 Ldot_R=+0.022 pitch=-0.2115 gap=+0.0271
+  t=2.867 IDLE    airborne_zero    L_R=0.13062 Ldot_R=-0.647 pitch=-0.1961 gap=+0.0233
+  t=2.999 IDLE    airborne_zero    L_R=0.11002 Ldot_R=-0.057 pitch=-0.5227 gap=+0.0050
+```
+
+## 六、结论（只写数据支持的现象）
+
+1. 触地后最小腿长 0.21558 m（右）/0.21519 m（左），不低于 0.114 m，该项通过。
+2. 反弹幅 0.01137 m，比 `SW1_f016_t36` 的 0.07755 m 小，该项不差。
+3. 但腿长峰峰幅 0.20397 / 0.20294，比 `SW1_f016_t36` 的 0.17896 / 0.17900 大。
+4. T_settle 999（未收敛），比 `SW1_f016_t36` 的 1.124 差。
+5. 末值 pitch -0.52271，比 `SW1_f016_t36` 的 +0.00476 差；触地后 max|pitch| 0.79598 与之持平。
+6. 地面段与飞行段逐位一致；无 ABORT；飞行段最大轮间隙 0.22153 m 未回退。
+
+## 七、`git_status_short_raw`（运行当时，完整）
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M "docs/\345\275\223\345\211\215\351\227\256\351\242\230\344\270\216\345\276\205\345\212\236.md"
+RM "docs/ZMP\345\271\263\350\241\241\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md" -> "docs/\350\264\250\345\277\203\345\217\257\350\241\214\346\200\247\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md"
+ M wheel_leg_mujoco/gbc_mpc_wbc/control.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/tools/jump_diagnostic.py
+?? MUJOCO_LOG.TXT
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _git_status_land0.txt
+?? _git_status_land2.txt
+?? _git_status_obs1.txt
+?? _git_status_ramp1.txt
+?? _git_status_sw1.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.log
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.log
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.json
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.log
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.log
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.log
+?? wheel_leg_mujoco/results/FL10_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL10_baseline_run01.log
+?? wheel_leg_mujoco/results/FL11_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL11_baseline_run01.log
+?? wheel_leg_mujoco/results/FL12_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL12_baseline_run01.log
+?? wheel_leg_mujoco/results/FL13_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL13_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.log
+?? wheel_leg_mujoco/results/FL16_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL16_baseline_run01.log
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.log
+?? wheel_leg_mujoco/results/FL19_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL19_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.log
+?? wheel_leg_mujoco/results/FL20_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL20_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21_baseline_run01.log
+?? wheel_leg_mujoco/results/FL22_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL22_baseline_run01.log
+?? wheel_leg_mujoco/results/FL23_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL23_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run02.log
+?? wheel_leg_mujoco/results/FL25_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run01.log
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.log
+?? wheel_leg_mujoco/results/FL26_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL26_baseline_run01.log
+?? wheel_leg_mujoco/results/FL27_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL27_baseline_run01.log
+?? wheel_leg_mujoco/results/FL28_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL28_baseline_run01.log
+?? wheel_leg_mujoco/results/FL29_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL29_baseline_run01.log
+?? wheel_leg_mujoco/results/FL2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL30_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL30_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run02.log
+?? wheel_leg_mujoco/results/FL32_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL32_baseline_run01.log
+?? wheel_leg_mujoco/results/FL34_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL34_baseline_run01.log
+?? wheel_leg_mujoco/results/FL35_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL35_baseline_run01.log
+?? wheel_leg_mujoco/results/FL36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL36_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.log
+?? wheel_leg_mujoco/results/FL38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL38_baseline_run01.log
+?? wheel_leg_mujoco/results/FL39_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL39_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run02.log
+?? wheel_leg_mujoco/results/FL3_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run03.log
+?? wheel_leg_mujoco/results/FL40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL40_baseline_run01.log
+?? wheel_leg_mujoco/results/FL41_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL41_baseline_run01.log
+?? wheel_leg_mujoco/results/FL42_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL42_baseline_run01.log
+?? wheel_leg_mujoco/results/FL43_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL43_baseline_run01.log
+?? wheel_leg_mujoco/results/FL44_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL44_baseline_run01.log
+?? wheel_leg_mujoco/results/FL45_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL45_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL47_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL47_baseline_run01.log
+?? wheel_leg_mujoco/results/FL48_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL48_baseline_run01.log
+?? wheel_leg_mujoco/results/FL49_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL49_baseline_run01.log
+?? wheel_leg_mujoco/results/FL4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL4_baseline_run01.log
+?? wheel_leg_mujoco/results/FL51_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL51_baseline_run01.log
+?? wheel_leg_mujoco/results/FL53_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL53_baseline_run01.log
+?? wheel_leg_mujoco/results/FL54_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL54_baseline_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/FL5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL5_baseline_run01.log
+?? wheel_leg_mujoco/results/FL6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL6_baseline_run01.log
+?? wheel_leg_mujoco/results/FL7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL7_baseline_run01.log
+?? wheel_leg_mujoco/results/FL8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL8_baseline_run01.log
+?? wheel_leg_mujoco/results/FL9_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL9_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.log
+?? wheel_leg_mujoco/results/P0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_run01_inspect.log
+?? wheel_leg_mujoco/results/P0_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run02.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.log
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_run01.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/P6_key_events.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.log
+?? wheel_leg_mujoco/results/P6_qfrc_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_run01.log
+?? wheel_leg_mujoco/results/P6_transition_report.log
+?? wheel_leg_mujoco/results/P6_transition_report_compact.log
+?? wheel_leg_mujoco/results/Q1A_mpc_audit_default_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.log
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.log
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.json
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VMC_feasibility_20261009.json
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.log
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.log
+?? wheel_leg_mujoco/results/WP7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP7_baseline_run01.log
+?? wheel_leg_mujoco/results/WP8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP8_baseline_run01.log
+?? wheel_leg_mujoco/results/_backup_before_field/
+?? wheel_leg_mujoco/results/debug_zero_input/
+?? wheel_leg_mujoco/results/jump_test_airsign.json
+?? wheel_leg_mujoco/results/jump_test_baseline.json
+?? wheel_leg_mujoco/results/jump_test_cg.json
+?? wheel_leg_mujoco/results/jump_test_cg2.json
+?? wheel_leg_mujoco/results/jump_test_clean.json
+?? wheel_leg_mujoco/results/jump_test_comp0.json
+?? wheel_leg_mujoco/results/jump_test_comp1.json
+?? wheel_leg_mujoco/results/jump_test_crouch.json
+?? wheel_leg_mujoco/results/jump_test_crouch014.json
+?? wheel_leg_mujoco/results/jump_test_crouch014b.json
+?? wheel_leg_mujoco/results/jump_test_crouch020.json
+?? wheel_leg_mujoco/results/jump_test_cutforce.json
+?? wheel_leg_mujoco/results/jump_test_dbl.json
+?? wheel_leg_mujoco/results/jump_test_dbl0.json
+?? wheel_leg_mujoco/results/jump_test_dbl1.json
+?? wheel_leg_mujoco/results/jump_test_dblfix.json
+?? wheel_leg_mujoco/results/jump_test_decoup.json
+?? wheel_leg_mujoco/results/jump_test_deployed.json
+?? wheel_leg_mujoco/results/jump_test_diag.json
+?? wheel_leg_mujoco/results/jump_test_diag2.json
+?? wheel_leg_mujoco/results/jump_test_dualcut.json
+?? wheel_leg_mujoco/results/jump_test_event1.json
+?? wheel_leg_mujoco/results/jump_test_event2.json
+?? wheel_leg_mujoco/results/jump_test_event3.json
+?? wheel_leg_mujoco/results/jump_test_fix1.json
+?? wheel_leg_mujoco/results/jump_test_fix3.json
+?? wheel_leg_mujoco/results/jump_test_flight_angle.json
+?? wheel_leg_mujoco/results/jump_test_flightdiag.json
+?? wheel_leg_mujoco/results/jump_test_follow.json
+?? wheel_leg_mujoco/results/jump_test_gcheck.json
+?? wheel_leg_mujoco/results/jump_test_gcheck2.json
+?? wheel_leg_mujoco/results/jump_test_isolate.json
+?? wheel_leg_mujoco/results/jump_test_legchk.json
+?? wheel_leg_mujoco/results/jump_test_legrate.json
+?? wheel_leg_mujoco/results/jump_test_limit70.json
+?? wheel_leg_mujoco/results/jump_test_link.json
+?? wheel_leg_mujoco/results/jump_test_m0.json
+?? wheel_leg_mujoco/results/jump_test_m1.json
+?? wheel_leg_mujoco/results/jump_test_mergefix.json
+?? wheel_leg_mujoco/results/jump_test_mergefix2.json
+?? wheel_leg_mujoco/results/jump_test_mpcchk.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata2.json
+?? wheel_leg_mujoco/results/jump_test_normal1.json
+?? wheel_leg_mujoco/results/jump_test_planA5.json
+?? wheel_leg_mujoco/results/jump_test_planA6.json
+?? wheel_leg_mujoco/results/jump_test_planAB.json
+?? wheel_leg_mujoco/results/jump_test_planA_final.json
+?? wheel_leg_mujoco/results/jump_test_planB.json
+?? wheel_leg_mujoco/results/jump_test_planB2.json
+?? wheel_leg_mujoco/results/jump_test_planB3.json
+?? wheel_leg_mujoco/results/jump_test_planD2.json
+?? wheel_leg_mujoco/results/jump_test_planDA.json
+?? wheel_leg_mujoco/results/jump_test_planDA2.json
+?? wheel_leg_mujoco/results/jump_test_plan_a.json
+?? wheel_leg_mujoco/results/jump_test_plan_a2.json
+?? wheel_leg_mujoco/results/jump_test_policy.json
+?? wheel_leg_mujoco/results/jump_test_policy2.json
+?? wheel_leg_mujoco/results/jump_test_policy3.json
+?? wheel_leg_mujoco/results/jump_test_pre5.json
+?? wheel_leg_mujoco/results/jump_test_prechk.json
+?? wheel_leg_mujoco/results/jump_test_prehold.json
+?? wheel_leg_mujoco/results/jump_test_preload.json
+?? wheel_leg_mujoco/results/jump_test_probe_thrust.json
+?? wheel_leg_mujoco/results/jump_test_pscan.json
+?? wheel_leg_mujoco/results/jump_test_rate.json
+?? wheel_leg_mujoco/results/jump_test_rate0.json
+?? wheel_leg_mujoco/results/jump_test_rate1.json
+?? wheel_leg_mujoco/results/jump_test_ratechk.json
+?? wheel_leg_mujoco/results/jump_test_rchk.json
+?? wheel_leg_mujoco/results/jump_test_refonly.json
+?? wheel_leg_mujoco/results/jump_test_reverted.json
+?? wheel_leg_mujoco/results/jump_test_ronly2.json
+?? wheel_leg_mujoco/results/jump_test_scan.json
+?? wheel_leg_mujoco/results/jump_test_schedchk.json
+?? wheel_leg_mujoco/results/jump_test_signfix.json
+?? wheel_leg_mujoco/results/jump_test_signflip.json
+?? wheel_leg_mujoco/results/jump_test_signflip2.json
+?? wheel_leg_mujoco/results/jump_test_taskshare.json
+?? wheel_leg_mujoco/results/jump_test_vertical.json
+?? wheel_leg_mujoco/results/jump_test_vtor.json
+?? wheel_leg_mujoco/results/jump_test_wbc_angle.json
+?? wheel_leg_mujoco/results/jump_test_wbcmodel3.json
+?? wheel_leg_mujoco/results/m2_nullspace.json.gz
+?? wheel_leg_mujoco/results/m2_qp.json.gz
+?? wheel_leg_mujoco/results/m2_wls.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_backward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_forward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_stand30.json.gz
+?? wheel_leg_mujoco/results/m3_wls_backward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_forward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_wls_stand30.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_w1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_w1.0.json.gz
+?? wheel_leg_mujoco/results/view_test/
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy 2.pdf"
+```
+
+## 八、结果文件
+
+- `results/LAND2B_baseline_run01.json.gz`；
+  对照 `results/SW1_f016_t36_baseline_run01.json.gz`、`results/LAND2_baseline_run01.json.gz`。
+
+是否允许进入下一轮：触地后最小腿长通过、反弹幅不差；但腿长峰峰幅、T_settle、末值 pitch 三项比 `SW1_f016_t36` 差，比较判据未全部通过。
+
+署名：测试agent-ds
+
+
+============================================================
+
+# 测试agent-ds：LAND4（airborne 加几何接触双确认）（2026-10-17）
+
+VP编号：LAND4
+
+## 一、代码改动（只给那一处 diff）
+
+`loop.py` 的 `airborne`：
+
+```text
++        _geometry_contact = tuple(bool(v) for v in sim.dyn.contact_geometry()[0])
+         airborne = (feedback is not None and not any(feedback.decision.contact)
++                    and not any(_geometry_contact)
+                     and not jump_active_now)
+```
+
+- `jump_landed` 锁存、`geometrically_airborne` 锁存、`FLOOR=0.16`、`TLIM=36` 保留未改。
+- `py_compile` 通过。
+- 本轮的对比是单变量：相对 LAND2B 只多了 `_geometry_contact` 这一条双确认。
+
+## 二、自检
+
+- `leg_actuators=(0, 1, 2, 3)`，`wheel_actuators=(4, 5)`。
+- 地面段（t<=1.424）逐位比对：全 0.0。
+- 飞行段逐位比对：全 0.0。
+- 同一份结果重复取数两次一致。
+
+## 三、判据
+
+| 类别 | 指标 | 目标 | LAND4 | 结果 |
+| --- | --- | --- | --- | --- |
+| 主 | 触地后 `airborne_zero` 帧数 | <= 100（LAND2B 695） | **252** | **未通过** |
+| 主 | 末值 pitch 绝对值 | < 0.20（LAND2B 0.52271） | **0.52271** | **未通过** |
+| 主 | 末值腿长 R / L | 0.28 ± 0.02 | **0.41427 / 0.41428** | **未通过** |
+| 主 | 触地后 `flight_leg_profile` 帧数 | = 0 | **0** | 通过 |
+| 主 | 飞行段最大轮间隙 | >= 0.200 | **0.22153** | 通过 |
+| 回归 | 触地后最小腿长 | >= 0.114 | 右 0.21558 / 左 0.21519 | 通过 |
+| 回归 | ABORT / 腿长越界 | 0 / 不越界 | 0 / 不越界 | 通过 |
+| 一致性 | 地面段 / 飞行段逐位比对 | 全 0.0 | 全 0.0 | 通过 |
+
+- 触地首帧 `t=1.7470`。
+- 触地后 flight_leg_profile 帧数 / airborne_zero 帧数：**0 / 252**。
+- 触地后最小腿长（右/左）：**0.21558（t=1.823）/ 0.21519（t=1.823）**。
+- 末值 pitch / 末值腿长 R、L：**-0.52271 / 0.41427 / 0.41428**。
+- 飞行段最大轮间隙：**0.22153 m**。
+
+## 四、三列对照
+
+| 指标 | SW1_f016_t36 | LAND2B | LAND4 |
+| --- | --- | --- | --- |
+| 触地后 airborne_zero 帧 | 12 | 695 | **252** |
+| 触地后 flight_leg_profile 帧 | 256 | 0 | **0** |
+| 触地后最小腿长 R/L | 0.12276 / 0.12269 | 0.21558 / 0.21519 | 0.21558 / 0.21519 |
+| 末值 pitch | +0.00476 | -0.52271 | **-0.52271** |
+| 末值腿长 R/L | 0.28394 / 0.28366 | 0.41427 / 0.41428 | **0.41427 / 0.41428** |
+| 触地后 max\|pitch\| | 0.79598 | 0.79598 | 0.79598 |
+| 腿长峰峰幅 R/L | 0.17896 / 0.17900 | 0.20397 / 0.20294 | 0.20397 / 0.20294 |
+| 反弹幅 | 0.07755 | 0.01137 | 0.01137 |
+| T_settle | 1.124 | 999 | 999 |
+| FLIGHT 最大轮间隙 | 0.22153 | 0.22153 | 0.22153 |
+
+## 五、LAND4 与 LAND2B 逐位比对（本轮关键）
+
+- **全程 3000 帧逐位相同**：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+- 两者只有 `output_source` 标签不同：**443 帧**由 `airborne_zero`（LAND2B）变为
+  `zero_order_hold`（LAND4），时间区间 t=2.2120~2.9990。
+- 这 443 帧里：几何接触为 True 的帧 **443/443**；`ctrl` 六通道非零的帧 **0/443**（全部为 0）。
+- 例（t=2.600）：几何接触 `[True, False]`，LAND4 `zero_order_hold`、LAND2B `airborne_zero`，
+  两轮 `ctrl=[0,0,0,0,0,0]`。
+- 即本轮改动只改变了那 443 帧的输出来源标签，没有改变任何已输出的力矩，也没有改变轨迹。
+
+## 六、ABORT / 越界 / assertion_failures
+
+- ABORT = 0；触地后腿长未越界（区间仍在 [0.114, 0.430] 内）；`phase_transition_assertion_failures=0`。
+- 相位：IDLE 2234 / COMPRESS 157 / COMPRESS_BRAKE 159 / THRUST 109 / FLIGHT 322 /
+  LANDING 18 / RECOVER 1。
+
+## 七、结论（只写数据支持的现象）
+
+1. 末值 pitch -0.52271、末值腿长 0.41427/0.41428，与 LAND2B 完全相同，没有改善。
+2. 触地后 `airborne_zero` 帧数从 695 降到 252，但仍大于 100。
+3. LAND4 与 LAND2B 的全程轨迹逐位相同（3000 帧全 0.0）；差异只是 443 帧的输出来源标签，
+   而这些帧的 `ctrl` 本来就是全 0。
+4. 触地后 `flight_leg_profile` 仍为 0；飞行段最大轮间隙 0.22153 m 未回退；无 ABORT。
+
+## 八、`git_status_short_raw`（运行当时，完整）
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M "docs/\345\275\223\345\211\215\351\227\256\351\242\230\344\270\216\345\276\205\345\212\236.md"
+RM "docs/ZMP\345\271\263\350\241\241\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md" -> "docs/\350\264\250\345\277\203\345\217\257\350\241\214\346\200\247\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md"
+ M wheel_leg_mujoco/gbc_mpc_wbc/control.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/tools/jump_diagnostic.py
+?? MUJOCO_LOG.TXT
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _git_status_land0.txt
+?? _git_status_land2.txt
+?? _git_status_land2b.txt
+?? _git_status_obs1.txt
+?? _git_status_ramp1.txt
+?? _git_status_sw1.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.log
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.log
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.json
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.log
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.log
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.log
+?? wheel_leg_mujoco/results/FL10_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL10_baseline_run01.log
+?? wheel_leg_mujoco/results/FL11_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL11_baseline_run01.log
+?? wheel_leg_mujoco/results/FL12_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL12_baseline_run01.log
+?? wheel_leg_mujoco/results/FL13_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL13_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.log
+?? wheel_leg_mujoco/results/FL16_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL16_baseline_run01.log
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.log
+?? wheel_leg_mujoco/results/FL19_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL19_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.log
+?? wheel_leg_mujoco/results/FL20_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL20_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21_baseline_run01.log
+?? wheel_leg_mujoco/results/FL22_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL22_baseline_run01.log
+?? wheel_leg_mujoco/results/FL23_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL23_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run02.log
+?? wheel_leg_mujoco/results/FL25_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run01.log
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.log
+?? wheel_leg_mujoco/results/FL26_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL26_baseline_run01.log
+?? wheel_leg_mujoco/results/FL27_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL27_baseline_run01.log
+?? wheel_leg_mujoco/results/FL28_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL28_baseline_run01.log
+?? wheel_leg_mujoco/results/FL29_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL29_baseline_run01.log
+?? wheel_leg_mujoco/results/FL2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL30_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL30_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run02.log
+?? wheel_leg_mujoco/results/FL32_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL32_baseline_run01.log
+?? wheel_leg_mujoco/results/FL34_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL34_baseline_run01.log
+?? wheel_leg_mujoco/results/FL35_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL35_baseline_run01.log
+?? wheel_leg_mujoco/results/FL36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL36_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.log
+?? wheel_leg_mujoco/results/FL38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL38_baseline_run01.log
+?? wheel_leg_mujoco/results/FL39_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL39_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run02.log
+?? wheel_leg_mujoco/results/FL3_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run03.log
+?? wheel_leg_mujoco/results/FL40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL40_baseline_run01.log
+?? wheel_leg_mujoco/results/FL41_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL41_baseline_run01.log
+?? wheel_leg_mujoco/results/FL42_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL42_baseline_run01.log
+?? wheel_leg_mujoco/results/FL43_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL43_baseline_run01.log
+?? wheel_leg_mujoco/results/FL44_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL44_baseline_run01.log
+?? wheel_leg_mujoco/results/FL45_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL45_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL47_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL47_baseline_run01.log
+?? wheel_leg_mujoco/results/FL48_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL48_baseline_run01.log
+?? wheel_leg_mujoco/results/FL49_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL49_baseline_run01.log
+?? wheel_leg_mujoco/results/FL4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL4_baseline_run01.log
+?? wheel_leg_mujoco/results/FL51_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL51_baseline_run01.log
+?? wheel_leg_mujoco/results/FL53_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL53_baseline_run01.log
+?? wheel_leg_mujoco/results/FL54_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL54_baseline_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/FL5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL5_baseline_run01.log
+?? wheel_leg_mujoco/results/FL6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL6_baseline_run01.log
+?? wheel_leg_mujoco/results/FL7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL7_baseline_run01.log
+?? wheel_leg_mujoco/results/FL8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL8_baseline_run01.log
+?? wheel_leg_mujoco/results/FL9_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL9_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.log
+?? wheel_leg_mujoco/results/P0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_run01_inspect.log
+?? wheel_leg_mujoco/results/P0_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run02.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.log
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_run01.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/P6_key_events.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.log
+?? wheel_leg_mujoco/results/P6_qfrc_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_run01.log
+?? wheel_leg_mujoco/results/P6_transition_report.log
+?? wheel_leg_mujoco/results/P6_transition_report_compact.log
+?? wheel_leg_mujoco/results/Q1A_mpc_audit_default_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.log
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.log
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.json
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VMC_feasibility_20261009.json
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.log
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.log
+?? wheel_leg_mujoco/results/WP7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP7_baseline_run01.log
+?? wheel_leg_mujoco/results/WP8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP8_baseline_run01.log
+?? wheel_leg_mujoco/results/_backup_before_field/
+?? wheel_leg_mujoco/results/debug_zero_input/
+?? wheel_leg_mujoco/results/jump_test_airsign.json
+?? wheel_leg_mujoco/results/jump_test_baseline.json
+?? wheel_leg_mujoco/results/jump_test_cg.json
+?? wheel_leg_mujoco/results/jump_test_cg2.json
+?? wheel_leg_mujoco/results/jump_test_clean.json
+?? wheel_leg_mujoco/results/jump_test_comp0.json
+?? wheel_leg_mujoco/results/jump_test_comp1.json
+?? wheel_leg_mujoco/results/jump_test_crouch.json
+?? wheel_leg_mujoco/results/jump_test_crouch014.json
+?? wheel_leg_mujoco/results/jump_test_crouch014b.json
+?? wheel_leg_mujoco/results/jump_test_crouch020.json
+?? wheel_leg_mujoco/results/jump_test_cutforce.json
+?? wheel_leg_mujoco/results/jump_test_dbl.json
+?? wheel_leg_mujoco/results/jump_test_dbl0.json
+?? wheel_leg_mujoco/results/jump_test_dbl1.json
+?? wheel_leg_mujoco/results/jump_test_dblfix.json
+?? wheel_leg_mujoco/results/jump_test_decoup.json
+?? wheel_leg_mujoco/results/jump_test_deployed.json
+?? wheel_leg_mujoco/results/jump_test_diag.json
+?? wheel_leg_mujoco/results/jump_test_diag2.json
+?? wheel_leg_mujoco/results/jump_test_dualcut.json
+?? wheel_leg_mujoco/results/jump_test_event1.json
+?? wheel_leg_mujoco/results/jump_test_event2.json
+?? wheel_leg_mujoco/results/jump_test_event3.json
+?? wheel_leg_mujoco/results/jump_test_fix1.json
+?? wheel_leg_mujoco/results/jump_test_fix3.json
+?? wheel_leg_mujoco/results/jump_test_flight_angle.json
+?? wheel_leg_mujoco/results/jump_test_flightdiag.json
+?? wheel_leg_mujoco/results/jump_test_follow.json
+?? wheel_leg_mujoco/results/jump_test_gcheck.json
+?? wheel_leg_mujoco/results/jump_test_gcheck2.json
+?? wheel_leg_mujoco/results/jump_test_isolate.json
+?? wheel_leg_mujoco/results/jump_test_legchk.json
+?? wheel_leg_mujoco/results/jump_test_legrate.json
+?? wheel_leg_mujoco/results/jump_test_limit70.json
+?? wheel_leg_mujoco/results/jump_test_link.json
+?? wheel_leg_mujoco/results/jump_test_m0.json
+?? wheel_leg_mujoco/results/jump_test_m1.json
+?? wheel_leg_mujoco/results/jump_test_mergefix.json
+?? wheel_leg_mujoco/results/jump_test_mergefix2.json
+?? wheel_leg_mujoco/results/jump_test_mpcchk.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata2.json
+?? wheel_leg_mujoco/results/jump_test_normal1.json
+?? wheel_leg_mujoco/results/jump_test_planA5.json
+?? wheel_leg_mujoco/results/jump_test_planA6.json
+?? wheel_leg_mujoco/results/jump_test_planAB.json
+?? wheel_leg_mujoco/results/jump_test_planA_final.json
+?? wheel_leg_mujoco/results/jump_test_planB.json
+?? wheel_leg_mujoco/results/jump_test_planB2.json
+?? wheel_leg_mujoco/results/jump_test_planB3.json
+?? wheel_leg_mujoco/results/jump_test_planD2.json
+?? wheel_leg_mujoco/results/jump_test_planDA.json
+?? wheel_leg_mujoco/results/jump_test_planDA2.json
+?? wheel_leg_mujoco/results/jump_test_plan_a.json
+?? wheel_leg_mujoco/results/jump_test_plan_a2.json
+?? wheel_leg_mujoco/results/jump_test_policy.json
+?? wheel_leg_mujoco/results/jump_test_policy2.json
+?? wheel_leg_mujoco/results/jump_test_policy3.json
+?? wheel_leg_mujoco/results/jump_test_pre5.json
+?? wheel_leg_mujoco/results/jump_test_prechk.json
+?? wheel_leg_mujoco/results/jump_test_prehold.json
+?? wheel_leg_mujoco/results/jump_test_preload.json
+?? wheel_leg_mujoco/results/jump_test_probe_thrust.json
+?? wheel_leg_mujoco/results/jump_test_pscan.json
+?? wheel_leg_mujoco/results/jump_test_rate.json
+?? wheel_leg_mujoco/results/jump_test_rate0.json
+?? wheel_leg_mujoco/results/jump_test_rate1.json
+?? wheel_leg_mujoco/results/jump_test_ratechk.json
+?? wheel_leg_mujoco/results/jump_test_rchk.json
+?? wheel_leg_mujoco/results/jump_test_refonly.json
+?? wheel_leg_mujoco/results/jump_test_reverted.json
+?? wheel_leg_mujoco/results/jump_test_ronly2.json
+?? wheel_leg_mujoco/results/jump_test_scan.json
+?? wheel_leg_mujoco/results/jump_test_schedchk.json
+?? wheel_leg_mujoco/results/jump_test_signfix.json
+?? wheel_leg_mujoco/results/jump_test_signflip.json
+?? wheel_leg_mujoco/results/jump_test_signflip2.json
+?? wheel_leg_mujoco/results/jump_test_taskshare.json
+?? wheel_leg_mujoco/results/jump_test_vertical.json
+?? wheel_leg_mujoco/results/jump_test_vtor.json
+?? wheel_leg_mujoco/results/jump_test_wbc_angle.json
+?? wheel_leg_mujoco/results/jump_test_wbcmodel3.json
+?? wheel_leg_mujoco/results/m2_nullspace.json.gz
+?? wheel_leg_mujoco/results/m2_qp.json.gz
+?? wheel_leg_mujoco/results/m2_wls.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_backward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_forward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_stand30.json.gz
+?? wheel_leg_mujoco/results/m3_wls_backward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_forward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_wls_stand30.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_w1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_w1.0.json.gz
+?? wheel_leg_mujoco/results/view_test/
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy 2.pdf"
+
+```
+
+## 九、结果文件
+
+- `results/LAND4_baseline_run01.json.gz`；
+  对照 `results/LAND2B_baseline_run01.json.gz`、`results/SW1_f016_t36_baseline_run01.json.gz`。
+
+是否允许进入下一轮：**否**（airborne_zero 252 > 100、末值 pitch 0.52271、末值腿长 0.41427，三条主判据未过；且轨迹与 LAND2B 逐位相同）。
+
+署名：测试agent-ds
+
+
+============================================================
+
+# 测试agent-ds：LAND5（几何接触作为估计器否决项）（2026-10-17）
+
+VP编号：LAND5
+
+## 一、代码改动（两个文件）
+
+`Algorithm/contact_state.py::GroundContactEstimator.update`：新增可选入参 `geometry_contact=None`，
+在“相位门控”之后、R4/IMU 与“回写检测器”之前加入否决：
+
+```text
++               geometry_contact=None) -> ContactOutput:
+...
++        if geometry_contact is not None:
++            for i in range(2):
++                if bool(geometry_contact[i]):
++                    proposed[i] = True
+```
+
+`wheel_leg_mujoco/gbc_mpc_wbc/sampling.py`：传入几何接触：
+
+```text
+         contact = self.contact_estimator.update(
+-            tuple(forces[:, 2]), self.dt, phase=phase_hint).contact
++            tuple(forces[:, 2]), self.dt, phase=phase_hint,
++            geometry_contact=tuple(bool(v) for v in self.dynamics.contact_geometry()[0])).contact
+```
+
+- `off_force/on_force/off_duration/on_duration` 一个未动；`geometry_contact=None` 默认时不改变行为。
+- `jump_landed`、`geometrically_airborne`、LAND4 几何双确认、`FLOOR=0.16`、`TLIM=36` 保留未改。
+- `py_compile` 通过。相对 LAND4 是单变量（只多了估计器否决这一条）。
+
+## 二、判据
+
+| 类别 | 指标 | 目标 | LAND5 | 结果 |
+| --- | --- | --- | --- | --- |
+| 主 | 触地后 `airborne_zero` 帧数 | <= 100（LAND4 252） | **324** | **未通过** |
+| 主 | 末值 pitch 绝对值 | < 0.20（LAND4 0.52271） | **1.27071** | **未通过** |
+| 主 | 末值腿长 R / L | 0.28 ± 0.02 | **0.22387 / 0.32215** | **未通过** |
+| 主 | 触地后 `flight_leg_profile` 帧数 | = 0 | **0** | 通过 |
+| 主 | 飞行段最大轮间隙 | >= 0.200 | **0.22153** | 通过 |
+| 回归 | 触地后最小腿长 | >= 0.114 | 右 0.20641 / 左 0.21519 | 通过 |
+| 回归 | ABORT / 腿长越界 | 0 / 不越界 | 0 / **越界** | **未通过** |
+| 验证 | 与 LAND2B 首处差异 | 应不再逐位相同 | 有差异（见下） | 通过 |
+
+- 地面段逐位比对（与 LAND4）：`max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`（全 0.0）。
+- 与 LAND2B 的**首处差异**：**t=2.2120（step 2212）**，通道 **0,1,2,3,4,5 全部**，
+  `max|dctrl|=13.3529`、`max|dqpos|=max|dqvel|=0`（首差拍只差力矩）。
+  与 LAND4 的首差也是同一拍 t=2.2120。
+- 触地后 flight_leg_profile 帧数 / airborne_zero 帧数：**0 / 324**。
+- 触地后最小腿长（右/左）：**0.20641（t=2.935）/ 0.21519（t=1.823）**。
+- 末值 pitch / 末值腿长 R、L：**-1.27071 / 0.22387 / 0.32215**。
+- 飞行段最大轮间隙：**0.22153 m**。
+- 腿长越界：触地后 **254 帧**越界（首帧 t=2.4450，L_L=0.43030 > 0.430），
+  峰值 **0.43572 m（t=2.6810）**。
+- ABORT = 0；`phase_transition_assertion_failures=0`。
+
+## 三、触地后 supervisor mode / contact 时间线
+
+```text
+   t=1.7470 contact=(True, True)   mode=recovery
+   t=2.1480 contact=(False, False) mode=airborne
+   t=2.2120 contact=(True, False)  mode=single_support
+   t=2.2160 contact=(True, True)   mode=recovery
+   t=2.3680 contact=(False, True)  mode=single_support
+   t=2.5450 contact=(True, True)   mode=recovery
+   t=2.5970 contact=(False, True)  mode=single_support
+   t=2.5990 contact=(False, False) mode=airborne
+   t=2.6140 contact=(False, True)  mode=single_support
+   t=2.7550 contact=(False, False) mode=airborne（到 t=2.999 结束）
+```
+
+- 与 LAND4 的“末段一路 airborne 自锁”不同：LAND5 中间确实多次进入
+  `recovery`/`single_support`（contact 至少一侧为 True），但末段 t=2.755 起又回到 `airborne`。
+- 离线预演预期“末段 ground 2.742~2.999”，实测末段是 `airborne` 2.755~2.999，未达成。
+
+## 四、四列对照
+
+| 指标 | SW1_f016_t36 | LAND2B | LAND4 | LAND5 |
+| --- | --- | --- | --- | --- |
+| 触地后 airborne_zero 帧 | 12 | 695 | 252 | **324** |
+| 触地后 flight_leg_profile 帧 | 256 | 0 | 0 | 0 |
+| 触地后最小腿长 R/L | 0.12276 / 0.12269 | 0.21558 / 0.21519 | 0.21558 / 0.21519 | 0.20641 / 0.21519 |
+| 末值 pitch | +0.00476 | -0.52271 | -0.52271 | **-1.27071** |
+| 末值腿长 R/L | 0.28394 / 0.28366 | 0.41427 / 0.41428 | 0.41427 / 0.41428 | **0.22387 / 0.32215** |
+| 触地后 max\|pitch\| | 0.79598 | 0.79598 | 0.79598 | **1.27071** |
+| 腿长峰峰幅 R/L | 0.17896 / 0.17900 | 0.20397 / 0.20294 | 0.20397 / 0.20294 | **0.21274 / 0.22053** |
+| 反弹幅 | 0.07755 | 0.01137 | 0.01137 | **0.21693** |
+| T_settle | 1.124 | 999 | 999 | 999 |
+| FLIGHT 最大轮间隙 | 0.22153 | 0.22153 | 0.22153 | 0.22153 |
+
+## 五、结论（只写数据支持的现象）
+
+1. 否决确实生效：与 LAND2B/LAND4 的首处差异在 t=2.2120，六个通道力矩同时改变（13.3529），
+   地面段仍逐位一致。
+2. 触地后 mode 不再永久自锁，中间多次进入 `recovery`/`single_support`；
+   但末段 t=2.755 起仍回到 `airborne`。
+3. 主判据三条未过：`airborne_zero` 324（>100）、末值 pitch -1.27071（>0.20）、
+   末值腿长 0.22387/0.32215（不在 0.28±0.02）。
+4. 触地后腿长出现越界：254 帧，峰值 0.43572 m（t=2.6810），超过 0.430 m。
+5. 飞行段最大轮间隙 0.22153 m 未回退；无 ABORT；`assertion_failures=0`。
+
+## 六、`git_status_short_raw`（运行当时，完整）
+
+```text
+ M Algorithm/contact_state.py
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_WBC\350\267\263\350\267\203_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M "docs/\345\275\223\345\211\215\351\227\256\351\242\230\344\270\216\345\276\205\345\212\236.md"
+RM "docs/ZMP\345\271\263\350\241\241\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md" -> "docs/\350\264\250\345\277\203\345\217\257\350\241\214\346\200\247\346\250\241\345\235\227_\346\226\271\346\241\210\350\247\204\345\210\222_\345\276\205\345\212\236.md"
+ M wheel_leg_mujoco/gbc_mpc_wbc/control.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+ M wheel_leg_mujoco/tools/jump_diagnostic.py
+?? MUJOCO_LOG.TXT
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _git_status_land0.txt
+?? _git_status_land2.txt
+?? _git_status_land2b.txt
+?? _git_status_obs1.txt
+?? _git_status_ramp1.txt
+?? _git_status_sw1.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009.log
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.json
+?? wheel_leg_mujoco/results/E1_com_vertical_check_20261009_run02.log
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.json
+?? wheel_leg_mujoco/results/E2_com_vertical_task_20261009_run01.log
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_brake_baseline_run01.log
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/E3_compress_fix_full_baseline_run01.log
+?? wheel_leg_mujoco/results/FL10_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL10_baseline_run01.log
+?? wheel_leg_mujoco/results/FL11_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL11_baseline_run01.log
+?? wheel_leg_mujoco/results/FL12_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL12_baseline_run01.log
+?? wheel_leg_mujoco/results/FL13_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL13_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15A_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B1probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run01.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run02.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run03.log
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.json.gz
+?? wheel_leg_mujoco/results/FL15B2probe_baseline_run04.log
+?? wheel_leg_mujoco/results/FL16_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL16_baseline_run01.log
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL17B_baseline_run01.log
+?? wheel_leg_mujoco/results/FL19_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL19_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_baseline_run01.log
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL1_selfcheck_baseline_run01.log
+?? wheel_leg_mujoco/results/FL20_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL20_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21L_baseline_run01.log
+?? wheel_leg_mujoco/results/FL21_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL21_baseline_run01.log
+?? wheel_leg_mujoco/results/FL22_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL22_baseline_run01.log
+?? wheel_leg_mujoco/results/FL23_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL23_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run01.log
+?? wheel_leg_mujoco/results/FL24_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL24_baseline_run02.log
+?? wheel_leg_mujoco/results/FL25_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run01.log
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.json.gz
+?? wheel_leg_mujoco/results/FL25_baseline_run03_nolog.log
+?? wheel_leg_mujoco/results/FL26_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL26_baseline_run01.log
+?? wheel_leg_mujoco/results/FL27_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL27_baseline_run01.log
+?? wheel_leg_mujoco/results/FL28_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL28_baseline_run01.log
+?? wheel_leg_mujoco/results/FL29_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL29_baseline_run01.log
+?? wheel_leg_mujoco/results/FL2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL2_baseline_run01.log
+?? wheel_leg_mujoco/results/FL30_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL30_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run01.log
+?? wheel_leg_mujoco/results/FL31_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL31_baseline_run02.log
+?? wheel_leg_mujoco/results/FL32_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL32_baseline_run01.log
+?? wheel_leg_mujoco/results/FL34_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL34_baseline_run01.log
+?? wheel_leg_mujoco/results/FL35_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL35_baseline_run01.log
+?? wheel_leg_mujoco/results/FL36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL36_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor020_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor030_baseline_run01.log
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL37_floor034_baseline_run01.log
+?? wheel_leg_mujoco/results/FL38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL38_baseline_run01.log
+?? wheel_leg_mujoco/results/FL39_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL39_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run01.log
+?? wheel_leg_mujoco/results/FL3_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run02.log
+?? wheel_leg_mujoco/results/FL3_baseline_run03.json.gz
+?? wheel_leg_mujoco/results/FL3_baseline_run03.log
+?? wheel_leg_mujoco/results/FL40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL40_baseline_run01.log
+?? wheel_leg_mujoco/results/FL41_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL41_baseline_run01.log
+?? wheel_leg_mujoco/results/FL42_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL42_baseline_run01.log
+?? wheel_leg_mujoco/results/FL43_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL43_baseline_run01.log
+?? wheel_leg_mujoco/results/FL44_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL44_baseline_run01.log
+?? wheel_leg_mujoco/results/FL45_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL45_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor024_baseline_run01.log
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL46_floor026_baseline_run01.log
+?? wheel_leg_mujoco/results/FL47_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL47_baseline_run01.log
+?? wheel_leg_mujoco/results/FL48_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL48_baseline_run01.log
+?? wheel_leg_mujoco/results/FL49_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL49_baseline_run01.log
+?? wheel_leg_mujoco/results/FL4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL4_baseline_run01.log
+?? wheel_leg_mujoco/results/FL51_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL51_baseline_run01.log
+?? wheel_leg_mujoco/results/FL53_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL53_baseline_run01.log
+?? wheel_leg_mujoco/results/FL54_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL54_baseline_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/FL5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL5_baseline_run01.log
+?? wheel_leg_mujoco/results/FL6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL6_baseline_run01.log
+?? wheel_leg_mujoco/results/FL7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL7_baseline_run01.log
+?? wheel_leg_mujoco/results/FL8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL8_baseline_run01.log
+?? wheel_leg_mujoco/results/FL9_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL9_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_A_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_B_baseline_run01.log
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NEWDEP_single_step_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_default_smoke02.log
+?? wheel_leg_mujoco/results/P0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run01.log
+?? wheel_leg_mujoco/results/P0_baseline_run01_inspect.log
+?? wheel_leg_mujoco/results/P0_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_run02.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke01.log
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/P0_baseline_smoke02.log
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_default_run01.log
+?? wheel_leg_mujoco/results/P6_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/P6_baseline_run01.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_default_run02.log
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/P6_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/P6_key_events.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_extended_run01.log
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_default_run02.log
+?? wheel_leg_mujoco/results/P6_qfrc_run01.json.gz
+?? wheel_leg_mujoco/results/P6_qfrc_run01.log
+?? wheel_leg_mujoco/results/P6_transition_report.log
+?? wheel_leg_mujoco/results/P6_transition_report_compact.log
+?? wheel_leg_mujoco/results/Q1A_mpc_audit_default_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_GEOM_audit_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke05.log
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.json.gz
+?? wheel_leg_mujoco/results/Q1B_GEOM_baseline_smoke06.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_run02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke01.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke02.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke03.log
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/Q1B_baseline_smoke04.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run01.log
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.json
+?? wheel_leg_mujoco/results/Q1B_wbc_audit_run02.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run01.log
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.json
+?? wheel_leg_mujoco/results/SIGN_MAPPING_run02.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke01.log
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/STATE_HINT_baseline_smoke02.log
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_default_check_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f018_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f019_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t38_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f020_t40_baseline_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run01.log
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/TR2a_baseline_run02.log
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.json
+?? wheel_leg_mujoco/results/V4_FINAL_MOTOR_AUDIT_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke01.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke02.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke03.log
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.json.gz
+?? wheel_leg_mujoco/results/V4_JUMP_baseline_smoke04.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VMC_feasibility_20261009.json
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP3_smoke_baseline_run01.log
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP5_compression_only_baseline_run01.log
+?? wheel_leg_mujoco/results/WP7_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP7_baseline_run01.log
+?? wheel_leg_mujoco/results/WP8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WP8_baseline_run01.log
+?? wheel_leg_mujoco/results/_backup_before_field/
+?? wheel_leg_mujoco/results/debug_zero_input/
+?? wheel_leg_mujoco/results/jump_test_airsign.json
+?? wheel_leg_mujoco/results/jump_test_baseline.json
+?? wheel_leg_mujoco/results/jump_test_cg.json
+?? wheel_leg_mujoco/results/jump_test_cg2.json
+?? wheel_leg_mujoco/results/jump_test_clean.json
+?? wheel_leg_mujoco/results/jump_test_comp0.json
+?? wheel_leg_mujoco/results/jump_test_comp1.json
+?? wheel_leg_mujoco/results/jump_test_crouch.json
+?? wheel_leg_mujoco/results/jump_test_crouch014.json
+?? wheel_leg_mujoco/results/jump_test_crouch014b.json
+?? wheel_leg_mujoco/results/jump_test_crouch020.json
+?? wheel_leg_mujoco/results/jump_test_cutforce.json
+?? wheel_leg_mujoco/results/jump_test_dbl.json
+?? wheel_leg_mujoco/results/jump_test_dbl0.json
+?? wheel_leg_mujoco/results/jump_test_dbl1.json
+?? wheel_leg_mujoco/results/jump_test_dblfix.json
+?? wheel_leg_mujoco/results/jump_test_decoup.json
+?? wheel_leg_mujoco/results/jump_test_deployed.json
+?? wheel_leg_mujoco/results/jump_test_diag.json
+?? wheel_leg_mujoco/results/jump_test_diag2.json
+?? wheel_leg_mujoco/results/jump_test_dualcut.json
+?? wheel_leg_mujoco/results/jump_test_event1.json
+?? wheel_leg_mujoco/results/jump_test_event2.json
+?? wheel_leg_mujoco/results/jump_test_event3.json
+?? wheel_leg_mujoco/results/jump_test_fix1.json
+?? wheel_leg_mujoco/results/jump_test_fix3.json
+?? wheel_leg_mujoco/results/jump_test_flight_angle.json
+?? wheel_leg_mujoco/results/jump_test_flightdiag.json
+?? wheel_leg_mujoco/results/jump_test_follow.json
+?? wheel_leg_mujoco/results/jump_test_gcheck.json
+?? wheel_leg_mujoco/results/jump_test_gcheck2.json
+?? wheel_leg_mujoco/results/jump_test_isolate.json
+?? wheel_leg_mujoco/results/jump_test_legchk.json
+?? wheel_leg_mujoco/results/jump_test_legrate.json
+?? wheel_leg_mujoco/results/jump_test_limit70.json
+?? wheel_leg_mujoco/results/jump_test_link.json
+?? wheel_leg_mujoco/results/jump_test_m0.json
+?? wheel_leg_mujoco/results/jump_test_m1.json
+?? wheel_leg_mujoco/results/jump_test_mergefix.json
+?? wheel_leg_mujoco/results/jump_test_mergefix2.json
+?? wheel_leg_mujoco/results/jump_test_mpcchk.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata.json
+?? wheel_leg_mujoco/results/jump_test_mpcdata2.json
+?? wheel_leg_mujoco/results/jump_test_normal1.json
+?? wheel_leg_mujoco/results/jump_test_planA5.json
+?? wheel_leg_mujoco/results/jump_test_planA6.json
+?? wheel_leg_mujoco/results/jump_test_planAB.json
+?? wheel_leg_mujoco/results/jump_test_planA_final.json
+?? wheel_leg_mujoco/results/jump_test_planB.json
+?? wheel_leg_mujoco/results/jump_test_planB2.json
+?? wheel_leg_mujoco/results/jump_test_planB3.json
+?? wheel_leg_mujoco/results/jump_test_planD2.json
+?? wheel_leg_mujoco/results/jump_test_planDA.json
+?? wheel_leg_mujoco/results/jump_test_planDA2.json
+?? wheel_leg_mujoco/results/jump_test_plan_a.json
+?? wheel_leg_mujoco/results/jump_test_plan_a2.json
+?? wheel_leg_mujoco/results/jump_test_policy.json
+?? wheel_leg_mujoco/results/jump_test_policy2.json
+?? wheel_leg_mujoco/results/jump_test_policy3.json
+?? wheel_leg_mujoco/results/jump_test_pre5.json
+?? wheel_leg_mujoco/results/jump_test_prechk.json
+?? wheel_leg_mujoco/results/jump_test_prehold.json
+?? wheel_leg_mujoco/results/jump_test_preload.json
+?? wheel_leg_mujoco/results/jump_test_probe_thrust.json
+?? wheel_leg_mujoco/results/jump_test_pscan.json
+?? wheel_leg_mujoco/results/jump_test_rate.json
+?? wheel_leg_mujoco/results/jump_test_rate0.json
+?? wheel_leg_mujoco/results/jump_test_rate1.json
+?? wheel_leg_mujoco/results/jump_test_ratechk.json
+?? wheel_leg_mujoco/results/jump_test_rchk.json
+?? wheel_leg_mujoco/results/jump_test_refonly.json
+?? wheel_leg_mujoco/results/jump_test_reverted.json
+?? wheel_leg_mujoco/results/jump_test_ronly2.json
+?? wheel_leg_mujoco/results/jump_test_scan.json
+?? wheel_leg_mujoco/results/jump_test_schedchk.json
+?? wheel_leg_mujoco/results/jump_test_signfix.json
+?? wheel_leg_mujoco/results/jump_test_signflip.json
+?? wheel_leg_mujoco/results/jump_test_signflip2.json
+?? wheel_leg_mujoco/results/jump_test_taskshare.json
+?? wheel_leg_mujoco/results/jump_test_vertical.json
+?? wheel_leg_mujoco/results/jump_test_vtor.json
+?? wheel_leg_mujoco/results/jump_test_wbc_angle.json
+?? wheel_leg_mujoco/results/jump_test_wbcmodel3.json
+?? wheel_leg_mujoco/results/m2_nullspace.json.gz
+?? wheel_leg_mujoco/results/m2_qp.json.gz
+?? wheel_leg_mujoco/results/m2_wls.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_backward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_forward.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_nullspace_stand30.json.gz
+?? wheel_leg_mujoco/results/m3_wls_backward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_forward.json.gz
+?? wheel_leg_mujoco/results/m3_wls_lateral.json.gz
+?? wheel_leg_mujoco/results/m3_wls_stand30.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_nullspace_w1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v-1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m4_wls_v2.0.json.gz
+?? wheel_leg_mujoco/results/m4_wls_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_held_leg_w1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_fwd.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_push_lat.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_stand30.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v1.0w0.5.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_v2.0.json.gz
+?? wheel_leg_mujoco/results/m5_leg_input_w1.0.json.gz
+?? wheel_leg_mujoco/results/view_test/
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy 2.pdf"
+
+```
+
+## 七、结果文件
+
+- `results/LAND5_baseline_run01.json.gz`；
+  对照 `results/LAND4_baseline_run01.json.gz`、`results/LAND2B_baseline_run01.json.gz`。
+
+是否允许进入下一轮：**否**（airborne_zero 324 > 100、末值 pitch 1.27071、末值腿长 0.22387/0.32215、
+且触地后腿长越界 254 帧峰值 0.43572 m，主判据与回归均未过）。
+
+署名：测试agent-ds

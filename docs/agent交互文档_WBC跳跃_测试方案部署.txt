@@ -8114,3 +8114,494 @@ VP编号：SW1
 失败组与失败原因：
 
 ============================================================
+
+LAND2：修“落地后飞行档/离地档重入”（loop.py 加落地锁存）（问题排查agent，2026-10-16）
+
+一、依据（SW1 12 组，按 floor 分组后一眼即知）
+
+| floor | 触地后 max gap（反弹幅） | 飞行剖面重入帧 | airborne_zero 帧 | 触地后 minL | 跌破 0.114 |
+|---|---|---|---|---|---|
+| 0.20（3 组） | **-0.0001（不反弹）** | **0** | **0** | 0.2095~0.2119 | 无 |
+| <=0.19（9 组） | 0.0465~0.3163 | 110~559 | 0~709 | 0.1035~0.1936 | 4 组 |
+
+“触地后 minL 崩到 0.114 以下”不是阻尼问题。具体证据（`SW1_f016_t36`，逐拍）：
+
+| t | phase | output_source | L_R | gap |
+|---|---|---|---|---|
+| 2.140 | **IDLE** | **flight_leg_profile** | 0.2812 | +0.0181 |
+| 2.220 | **IDLE** | **flight_leg_profile** | 0.1534 | +0.0750 |
+| 2.300 | **IDLE** | **flight_leg_profile** | 0.1249 | +0.0731 |
+| 2.380 | **IDLE** | airborne_zero | 0.1848 | +0.0021 |
+
+跳跃状态机已经回到 **IDLE**（跳完了），飞行收腿剖面却又跑了一遍，把腿从 0.281 收到 0.125；
+随后离地档把力矩清零。
+
+代码位置（`loop.py`）：
+
+```text
+geometrically_airborne = bool(jump_wheel_gap is not None and jump_wheel_gap > LIFTOFF_GAP)
+flight_profile = bool(flight_leg_extend and sim.jump is not None
+                      and (jump_phase_value == "FLIGHT" or geometrically_airborne))
+airborne = (feedback is not None and not any(feedback.decision.contact) and not jump_active_now)
+```
+
+`geometrically_airborne` 只看瞬时轮地间隙，**没有任何“这一跳已经落地”的记忆**。
+所以落地后任何一次反弹（间隙 > 1 mm）都会被当成又一次离地。
+
+二、改动（`loop.py` 一处，加落地锁存）
+
+1. 循环前加 `jump_landed = False`（放在 `flight_leg_ref = None` 附近）。
+2. 每步在算 `geometrically_airborne` 之前更新：
+
+```text
+if jump_command is not None and jump_command.phase.value in ("LANDING", "RECOVER"):
+    jump_landed = True
+if jump_command is not None and jump_command.phase.value == "COMPRESS":
+    jump_landed = False          # 新一跳开始，解锁
+```
+
+3. `geometrically_airborne` 增加 `and not jump_landed`。
+4. `airborne` 增加 `and not jump_landed`。
+
+未改：`jump.py` 状态机、任何增益、任何参数、下落段、落地接管、轮力矩、`IDLE` 后是否回 WBC。
+
+注意保留：`ABORT` 不置位锁存，所以中途中止后的自由下落仍走离地档（这是需要的）。
+
+三、参数配置（**本轮已定：做法 A**，用户 2026-10-16 同意）
+
+本轮要在“会反弹的配置”上验证，否则测不到东西。SW1 里同时过 H1~H4 且 T_settle 收敛的只有
+`FLIGHT_RETRACT_FLOOR=0.16 / TLIM=36`。
+
+采用**做法 A**：把 `control.py` 的 `FLIGHT_RETRACT_FLOOR` 默认值改成 0.16（TLIM 保持 36）。
+依据：SW1 12 组实测，0.16/36 是唯一过全部硬约束且 T_settle 收敛的一组（gap 0.22153 m）。
+本轮代码改动是**两个文件、两处**（`control.py` 常量默认值 + `loop.py` 锁存）。
+常量那一处只影响阈值、不影响锁存逻辑；对比对象 `SW1_f016_t36` 是同参数旧逻辑，仍是单变量。
+
+（备选做法 B，本轮不用：默认值不动，用扫描钩子传 `--retract-floor 0.16`。）
+
+本次运行的 `FLOOR/TLIM` 必须是 0.16/36，并在报告的“参数生效自检”里报出
+`min l_ref = 0.16`、`max|ctrl| = 36`。
+
+四、命令
+
+```text
+tools/jump_diagnostic.py --stage LAND2 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/SW1_f016_t36_baseline_run01.json.gz`（同参数、锁存之前的代码）。
+
+五、判定
+
+| 类别 | 指标 | 目标 | 不合格就停 |
+|---|---|---|---|
+| 主 | 触地后 `output_source == "flight_leg_profile"` 的帧数 | **= 0** | 不为 0 就报实际帧数与时刻 |
+| 主 | 触地后 `output_source == "airborne_zero"` 的帧数 | **= 0** | 同上 |
+| 主 | 触地后最小腿长 | **>= 0.114 m** | 跌破就报最小值与时刻 |
+| 主 | 飞行段最大轮间隙 | **>= 0.200 m** | 不得回退 |
+| 一致性 | 地面段（t <= 1.424）与 `SW1_f016_t36` 逐位比对 `qpos/qvel/ctrl` | 全 0.0 | 不为 0 就停 |
+| 回归 | 触地后 `max|pitch|` / 末值 \|pitch\| < 0.20 / ABORT = 0 | 与 SW1_f016_t36 对比不得变差 | — |
+| 记录 | 触地后最大轮间隙（反弹幅）、反弹帧数、腿长峰峰幅、T_settle | 只记录 | — |
+
+**本轮的限定**：反弹（间隙变正）本身发生在重入之前，所以本轮**不保证消除反弹**，
+只消除“重入造成的收腿与丢控”。若反弹幅仍与 SW1_f016_t36 相当，下一次再查反弹本身。
+
+六、取材要求
+
+1. 触地后逐拍输出 `phase`、`output_source`、`leg_length_R/L`、`leg_length_rate_R/L`、`pitch`、
+   `pitch_rate`、`wheel_gap`、`ctrl[0..5]`，按每 4 帧（WBC 节拍）采样，从触地首帧到仿真结束。
+2. `T_settle` 沿用 SW1 口径（不自创）：触地起，`|pitch|<=0.10` 且两条腿长均在标称 ±0.02 m 内
+   连续保持 0.2 s；到 t=3.0 未满足则记 999。
+3. 自检：同一份结果重复取数两次一致；`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+4. `git_status_short_raw` 完整贴出，并报出实际 `FLIGHT_RETRACT_FLOOR` / `FLIGHT_RETRACT_TORQUE_LIMIT`。
+
+七、反馈格式
+
+VP编号：LAND2
+做法（A 改默认值 / B 用钩子）：
+`FLIGHT_RETRACT_FLOOR` / `TLIM` 实际值；`min l_ref` / `max|ctrl|` 自检：
+地面段逐位比对 max|dqpos|/max|dqvel|/max|dctrl|：
+触地后 flight_leg_profile 帧数 / airborne_zero 帧数：
+触地后最小腿长（右/左）与时刻：
+飞行段最大轮间隙：
+触地后 max|pitch| / 末值 pitch / ABORT：
+触地后最大轮间隙（反弹幅）/ 反弹帧数 / 腿长峰峰幅 / T_settle（与 SW1_f016_t36 逐项对照）：
+结论（只写数据支持的现象）：
+
+后续（已与用户 2026-10-16 确认，写在这里备查）
+
+LAND2 之后不再动飞行段，转落地。两步走：
+
+- **R1（纯重构，不改行为）**：把 `control.py` 的 `_phi_eq` 搬进 `leg_angle_anchor.py`，
+  删掉 `control.PHI_WORLD_REFERENCE` 与 `leg_angle_anchor.WORLD_TARGET_DEFAULT` 的重影，
+  `_phi_force` 改走统一接口；补 `world_from_body(phi_body, pitch)`。
+  验证：与 `SW1_f016_t36` 全程逐位一致。
+- **LAND3（改行为）**：`wbc.py` 的腿角任务目标改成世界系投影 + 锁存触地世界系 phi。
+
+LAND3 的依据（已实测，供两份文档口径一致）：
+
+1. 12 组全部在触地后 ~55 ms 出现腿连杆接触地面（`contact_geometry_other` 4~12）；
+   floor=0.20 的三组是 4，不反弹；`other>=8` 的九组全部反弹。
+2. `SW1_f016_t36` t=2.050 那一拍：`normal_forces=[820.2, 0.0]`、`contact_counts=[2, 0]`、`other=8`，
+   `com_vz` 1 ms 内从 -0.477 跳到 -0.082（Δv=+0.40 m/s）。这个冲量不可能来自轮子。
+3. world phi（`leg_angle − pitch`）在触地时是 +0.003（竖直，连杆 0 接触），压缩中涨到 +0.170
+   时连杆首次进接触（t=1.810），到 t=2.05 涨到 +0.717。
+4. 推动者是 `wbc.py:231/242` 的机体系常数目标：它把 `phi_body` 拉向 -0.1263，
+   换算到世界系是 `-0.1263 - pitch`，在 `pitch=-0.78` 时等于 **+0.654 rad（37.5 度）**。
+5. 所以这不是调参问题，是参考系用错。ZMP 不能修这个（连杆多点受力 + 5.7 倍重量冲击，
+   单点轮接触的前提不成立）；详见 `docs/质心可行性模块_方案规划_待办.md`。
+
+LAND3 锁存值取法：默认取**触地实测世界系 phi**（约 +0.003），不取 0。
+理由：不改动落地时的几何，好归因；若后续要推到严格 0，另开一轮。
+
+============================================================
+
+LAND2B：把落地锁存的适用范围收窄到几何离地（问题排查agent，2026-10-17）
+
+一、LAND2 结果判读
+
+| 指标 | SW1_f016_t36 | LAND2 | 判定 |
+|---|---|---|---|
+| 触地后 `flight_leg_profile` 帧数 | 256 | **0** | 目标达成 |
+| 触地后 `airborne_zero` 帧数 | 12 | **0** | — |
+| 飞行段最大轮间隙 | 0.22153 | 0.22153 | 无回退 |
+| 地面段逐位比对 | — | 全 0.0 | 通过 |
+| 飞行段逐位比对 | — | 全 0.0 | 通过 |
+| 触地后最小腿长 | 0.12269 | **0.09944** | 变差（跌破 0.114） |
+| 反弹幅 | 0.07755 | **0.15447** | 变差约 2 倍 |
+| 腿长峰峰幅 R | 0.17896 | **0.20228** | 变差 |
+| T_settle | 1.124 | **999** | 变差 |
+| 末值 pitch | +0.00476 | -0.10783 | 变差 |
+
+二、我规格里的错误（先认）
+
+LAND2 规格里写了“`airborne` 增加 `and not jump_landed`”。**这一条是错的。**
+
+`airborne` 是“意外离地 -> 力矩清零”的保护档。把它在落地后永久关掉，等于让 WBC 在
+**弹起、轮子离地**的时候继续按“有接触”的假设输出。证据：LAND2 从 t=2.147 到 t=2.999
+的 `ctrl[4]` 恒为 **+5.23 N*m**，持续约 850 ms，而同期 gap 在 +0.005~+0.155 之间来回。
+轮子一直在转，反作用一直打进机体，把反弹从 0.078 放大到 0.154。
+
+而 `SW1_f016_t36` 在弹起段是 `airborne_zero`（力矩 0），轮子通道本来就是 0。
+即 SW1 的轮子在弹起段是“松的”，LAND2 是“顶着的”。
+
+正确的最小改法：**只锁 `geometrically_airborne`，`airborne` 不动。**
+
+- `geometrically_airborne` 是“重新打开飞行收腿剖面”的触发器 -> 必须锁；
+- `airborne` 是落地弹起时的保护档 -> 不能锁。
+
+三、改动（`loop.py`，只去掉一处）
+
+LAND2 里的这一句：
+
+```text
+airborne = (feedback is not None and not any(feedback.decision.contact)
+            and not jump_active_now and not jump_landed)
+```
+
+改回原样（去掉 `and not jump_landed`）：
+
+```text
+airborne = (feedback is not None and not any(feedback.decision.contact) and not jump_active_now)
+```
+
+`jump_landed` 的置位/清零逻辑、以及 `geometrically_airborne` 的 `and not jump_landed`
+**全部保留**（LAND2 里那两处是对的）。`FLIGHT_RETRACT_FLOOR=0.16` 也保留。
+
+未改：`jump.py`、任何增益、任何参数、下落段、落地接管、轮力矩。
+
+四、命令
+
+```text
+tools/jump_diagnostic.py --stage LAND2B --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/SW1_f016_t36_baseline_run01.json.gz`。
+
+五、判定
+
+| 类别 | 指标 | 目标 |
+|---|---|---|
+| 主 | 触地后 `flight_leg_profile` 帧数 | = 0 |
+| 主 | 触地后最小腿长 | >= 0.114 m |
+| 主 | 飞行段最大轮间隙 | >= 0.200 m |
+| 主 | 触地后 `airborne_zero` 帧数 | 记录（预期 > 0，与 SW1 同量级 12） |
+| 回归 | 反弹幅 / 腿长峰峰幅 / T_settle / 末值 pitch | 与 `SW1_f016_t36` 对比**不得变差** |
+| 一致性 | 地面段（t <= 1.424）逐位比对 | 全 0.0 |
+| 记录 | 触地后 `ctrl[4]`/`ctrl[5]` 是否存在 >100 ms 的恒定段 | 只记录 |
+
+**限定**：反弹（连杆砸地引起）本身不在本轮范围内，仍留给 LAND3。
+LAND2B 只要求“不比 SW1_f016_t36 差”，不要求消除反弹。
+
+六、反馈格式
+
+VP编号：LAND2B
+代码改动（只需给出删除 `and not jump_landed` 的 diff）：
+地面段逐位比对：
+触地后 flight_leg_profile 帧数 / airborne_zero 帧数：
+触地后最小腿长（右/左）与时刻：
+飞行段最大轮间隙：
+触地后 max|pitch| / 末值 pitch / ABORT：
+反弹幅 / 反弹帧数 / 腿长峰峰幅 / T_settle（与 SW1_f016_t36 逐项对照）：
+触地后 ctrl[4]/[5] 最长恒定段时长：
+结论（只写数据支持的现象）：
+
+============================================================
+
+LAND4：`airborne` 判据要求估计器与几何接触双确认（问题排查agent，2026-10-17）
+
+一、依据（LAND2B 实测）
+
+`airborne_active` 从 t=2.432 一路到 t=2.999（**567 帧，0.57 s**）都没退出，同期：
+
+| 项 | 值 |
+|---|---|
+| `wheel_gap` 范围 | -0.0002 ~ +0.0114 m |
+| 几何接触（`contact_geometry`）为 True 的帧数 | **422 / 567（74%）** |
+| 估计器接触（`decision.contact`）为 True 的帧数 | **0 / 567** |
+| 该段内法向力 > 1 N 的帧数 | **0** |
+
+t=2.68 到 2.999 的 `wheel_gap` 恒为 -0.0002（轮子压在地上 0.2 mm），估计器仍报无接触。
+
+自锁机制：
+
+```text
+airborne(离地档) -> 力矩清零 -> 腿不推地 -> 法向力 0
+                 -> 估计器确认“无接触” -> airborne 保持
+```
+
+自己造证据，出不来了。末态被冻结在 `L_R=0.4143`、`pitch=-0.5227`，全程无控制。
+
+二、改动（`loop.py`，一处）
+
+`airborne` 增加几何接触的双确认（`sim.dyn.contact_geometry()[0]`，与 `jump.py` 用的是同一来源）：
+
+```text
+        _geometry_contact = tuple(bool(v) for v in sim.dyn.contact_geometry()[0])
+        airborne = (feedback is not None and not any(feedback.decision.contact)
+                    and not any(_geometry_contact)
+                    and not jump_active_now)
+```
+
+方向说明：这是**更保守**的判据——只有“估计器说无接触”**且**“几何也说无接触”才算离地。
+与用户 2026-10-07 的原始意图一致（当时就是因为“力的判定会在轮子仍压地时误报离地”
+才改成估计器）；现在两边都要同意，误报离地的概率只会更低。
+
+未改：`jump_landed` 锁存、`geometrically_airborne` 锁存、`FLOOR=0.16`、`TLIM=36`、
+`jump.py`、任何增益、任何参数、落地接管、轮力矩。
+
+三、命令
+
+```text
+tools/jump_diagnostic.py --stage LAND4 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/LAND2B_baseline_run01.json.gz`。
+
+四、判定
+
+| 类别 | 指标 | 目标 |
+|---|---|---|
+| 主 | 触地后 `airborne_zero` 帧数 | 从 695 降到与 `SW1_f016_t36` 同量级（<= 100） |
+| 主 | 末值 pitch 绝对值 | 从 0.52271 显著减小（目标 < 0.20） |
+| 主 | 末值腿长 R / L | 回到标称邻域（0.28 ± 0.02） |
+| 主 | 触地后 `flight_leg_profile` 帧数 | 仍为 0 |
+| 主 | 飞行段最大轮间隙 | >= 0.200 不回退 |
+| 回归 | 触地后最小腿长 | >= 0.114（LAND2B 是 0.21558） |
+| 回归 | ABORT / 腿长越界 | 0 / 不越界 |
+| 一致性 | 地面段与飞行段逐位比对 | 全 0.0 |
+| 记录 | 触地后 max\|pitch\| / 腿长峰峰幅 / 反弹幅 / T_settle | 只记录 |
+
+五、反馈格式
+
+VP编号：LAND4
+代码改动（只给那一处 diff）：
+地面段 / 飞行段逐位比对：
+触地后 flight_leg_profile 帧数 / airborne_zero 帧数：
+触地后最小腿长（右/左）：
+末值 pitch / 末值腿长 R、L：
+飞行段最大轮间隙：
+触地后 max|pitch| / 腿长峰峰幅 / 反弹幅 / T_settle（与 LAND2B、SW1_f016_t36 三列对照）：
+ABORT / 越界 / assertion_failures：
+结论（只写数据支持的现象）：
+
+============================================================
+
+LAND5：把几何接触作为估计器的否决项（问题排查agent，2026-10-17）
+
+一、LAND4 判读（未达成，且轨迹与 LAND2B 逐位相同）
+
+LAND4 与 LAND2B 全程 3000 帧 `max|dqpos|=max|dqvel|=max|dctrl|=0.000e+00`。
+只有 443 帧（t=2.2120~2.9990）的 `output_source` 标签从 `airborne_zero` 变成 `zero_order_hold`；
+而那 443 帧里 ctrl 六通道本来就全为 0。**所以 LAND4 只改了标签，没改任何力矩。**
+
+二、我上一轮漏了两个门（先认）
+
+`airborne` 只是三道门里的第一道，三道全挂在同一个 `feedback.decision.contact` 上：
+
+| 门 | 位置 | 作用 | LAND4 |
+|---|---|---|---|
+| 1 | `loop.py:262` `airborne` | 力矩清零 | 已改 |
+| 2 | `loop.py:279` `contact_available` | 不调 WBC | **未改** |
+| 3 | `sampling.py:122` supervisor | `mode=airborne`、`motion_enabled/balance_enabled=False` | **未改** |
+
+LAND4 实测 `decision = {'mode':'airborne','contact':[False,False],'motion_enabled':False,
+'balance_enabled':False}`。所以就算第 1 道放开，第 2、3 道仍然让 WBC 不求解、任务全禁用。
+
+三、根因：估计器是纯力判据，而力矩是它自己清掉的
+
+`Algorithm/contact_state.py`：`off_force=5 N` / `on_force=15 N` 双阈值滞回，输入是**法向力**；
+`sampling.py:115` 只传了 `(forces[:,2], dt, phase)`。
+
+```text
+airborne -> 力矩清零 -> 腿不推地 -> 法向力=0 -> 估计器判离地 -> airborne 保持
+```
+
+法向力是控制输出的后果。用它当“是否离地”的判据，在“主动清零力矩”的模式下必然自证循环。
+LAND2B 实测：那 567 帧里**几何接触为 True 的有 422 帧（74%）**，而法向力 >1 N 的 **0 帧**。
+
+四、改动（2 个文件；新参数可选，默认不改变任何现有行为）
+
+1. `Algorithm/contact_state.py::GroundContactEstimator.update` 增加可选入参 `geometry_contact=None`，
+   在“相位门控”之后、回写检测器之前加入否决：
+
+```text
+        if geometry_contact is not None:
+            for i in range(2):
+                if bool(geometry_contact[i]):
+                    proposed[i] = True      # 几何接触与力矩无关，是否决“离地”的硬证据
+```
+
+   放在“相位门控”之后、“回写检测器”之前，让否决也能回写，避免下一拍立即翻回。
+
+2. `wheel_leg_mujoco/gbc_mpc_wbc/sampling.py:115` 传入几何接触：
+
+```text
+        geometry_contact = tuple(bool(v) for v in self.dynamics.contact_geometry()[0])
+        contact = self.contact_estimator.update(
+            tuple(forces[:, 2]), self.dt, phase=phase_hint,
+            geometry_contact=geometry_contact).contact
+```
+
+`geometry_contact=None` 是默认值，所以**轮圈腿（APP）路径与其它调用方行为完全不变**。
+估计器放在 `Algorithm/` 共享，但本次只加可选参数，不做任何默认行为变更。
+
+未改：`jump_landed` 锁存、`geometrically_airborne` 锁存、`FLOOR=0.16`、`TLIM=36`、
+LAND4 的几何双确认（保留）、任何增益、任何阀值、落地接管、轮力矩。
+
+注意：估计器里的 `off_force/on_force/off_duration/on_duration` **一个都不动**。
+
+五、命令
+
+```text
+tools/jump_diagnostic.py --stage LAND5 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/LAND4_baseline_run01.json.gz`。
+
+六、判定
+
+| 类别 | 指标 | 目标 |
+|---|---|---|
+| 主 | 触地后 `airborne_zero` 帧数 | <= 100（LAND4 是 252） |
+| 主 | 末值 pitch 绝对值 | < 0.20（LAND4 是 0.52271） |
+| 主 | 末值腿长 R / L | 0.28 ± 0.02（LAND4 是 0.41427） |
+| 主 | 触地后 `flight_leg_profile` 帧数 | = 0 |
+| 主 | 飞行段最大轮间隙 | >= 0.200 不回退 |
+| 回归 | 触地后最小腿长 | >= 0.114 |
+| 回归 | ABORT / 腿长越界 | 0 / 不越界 |
+| 记录 | 触地后 supervisor `mode` 时间线、`decision.contact` 时间线 | 只记录 |
+| 验证 | 与 LAND2B 的**第一处**逐位差异 | 本轮预期不再逐位相同；必须报出首差时刻与通道 |
+
+七、反馈格式
+
+VP编号：LAND5
+代码改动（两个文件的 diff）：
+地面段逐位比对（应与 LAND4 全 0.0）：
+与 LAND2B 的**首处差异时刻与通道**：
+触地后 flight_leg_profile 帧数 / airborne_zero 帧数：
+触地后 supervisor mode 时间线（按相位变化点列出）：
+触地后最小腿长（右/左）：
+末值 pitch / 末值腿长 R、L：
+飞行段最大轮间隙：
+触地后 max|pitch| / 腿长峰峰幅 / 反弹幅 / T_settle（与 LAND4、LAND2B、SW1 四列对照）：
+ABORT / 越界 / assertion_failures：
+结论（只写数据支持的现象）：
+
+八、发方案前的离线预演（用户 2026-10-17 起强制）
+
+用 `results/LAND2B_baseline_run01.json.gz` 的记录，按 LAND5 的否决位置复现估计器，
+再串上 `ControlSupervisor(touchdown_dwell=0.1)` 与 `pitch_limit=0.785` 全链重放：
+
+| 量 | 现状（无否决） | LAND5（有否决） |
+|---|---|---|
+| 触地后“任一轮判离地”帧数 | 706 | **110** |
+| 触地后“双方接地”帧数 | 542 | **1042** |
+| `balance_enabled` 帧数 | 547 | **1143** |
+| `motion_enabled` 帧数 | 304 | **626** |
+| 末段 mode | `airborne` 2.432~2.999 | `ground` **2.742~2.999** |
+
+现状末段：`airborne` 2.432~2.999（0.57 s 永久自锁）。
+LAND5 末段：只 `airborne` 2.432~2.477（0.045 s），中间在 `single_support`/`recovery`
+之间摆动（两者 `balance_enabled` 均为 True），**2.742 起进入 `ground`，balance 与 motion 全开**。
+
+预测：自锁解开；末段进入 `ground`，腿长会被腿长任务拉回标称，pitch 应收敛。
+
+限定：这是**开环重放**（法向力与几何来自旧控制器）。WBC 真正跑起来后力与几何会变，
+实际 mode 时间线会与上表不同。上表只用来证明“门会开、能走到 ground”，不当作结果预测。
+
+九、枚举（本轮已完成）
+
+`decision.contact` / `feedback.contact` 的下游读取点共 **8 处**（`loop.py` 6 处、`supervision.py` 2 处，
+另 `sampling.py` 构造 supervisor 时传入）。所以改点必须在估计器这一层（最早），
+在 `loop.py` 里局部覆写只能骗过第 1 道门，不管用。
+
+============================================================
+
+交付队列（问题排查agent，2026-10-17）
+
+本节是给测试agent的总目录，避免翻长文档。每一轮的完整规格在上面各自的条目里，
+本节只列顺序、状态与一句话目标。
+
+**当前优先级（用户 2026-10-17）：落地姿态优先，跳跃高度/间隙暂缓。**
+
+| 顺序 | 轮次 | 状态 | 一句话目标 | 改动文件 | 对照 |
+|---|---|---|---|---|---|
+| 1 | LAND2B | 已完成 | 收窄落地锁存到几何离地 | `loop.py` | `SW1_f016_t36` |
+| 2 | LAND4 | 已完成（无效） | `airborne` 加几何接触双确认；只改了标签，轨迹位一致 | `loop.py` | LAND2B |
+| 3 | **LAND5** | **可跑** | 把几何接触作为估计器的否决项，破掉离地档自锁 | `Algorithm/contact_state.py` / `sampling.py` | LAND4 |
+| 4 | **R1** | 等 LAND5 | 腿角换算集中到 `leg_angle_anchor.py`，删常量重影，不改行为 | `control.py` / `leg_angle_anchor.py` | 要求与 LAND5 **全程逐位一致** |
+| 5 | **LAND3** | 等 R1 | `wbc.py` 腿角任务目标改世界系投影 + 锁存触地世界系 phi | `wbc.py` | LAND5 |
+| 6 | 待定 | 等 LAND3 | 落地反弹（连杆砸地）的几何清除 | 待定 | LAND5 |
+| 7 | 待定 | 落地稳定后 | 质心可行性模块（见 `docs/质心可行性模块_方案规划_待办.md`） | 待定 | — |
+
+**落地姿态的三个独立缺陷**（依 LAND2B / SW1 实测，按现有优先级排序）：
+
+1. **离地档自锁，落地后 0.57 s 无控制**（LAND2B：`airborne_zero` 695 帧，末态冻结在
+   `L_R=0.4143` / `pitch=-0.5227`）-> **LAND4**。不先修这个，后面任何姿态改动都测不出来。
+2. **腿在世界系里被推歪，连杆砸地**（SW1：world phi 触地 +0.003 -> 压缩中 +0.170（首次磕）
+   -> +0.717；`contact_geometry_other` 4->8->12）-> **R1 + LAND3**。
+3. **触地俯仰 ≈ -0.74 rad（42 度）**：由飞行段 phi/pitch 交换线决定，属于“跳跃”那一侧；
+   本优先级下暂缓，待 1、2 做定后再评估。
+
+已完成的轮次（备查）：LAND0、LAND1A、OBS1、RAMP1、SW1（12 组）、LAND2。
+
+**LAND3 的锁存值口径**：默认取**触地实测世界系 phi**（约 +0.003），不取 0；
+若要推到严格 0，另开一轮。
+
+**每轮共同的自检要求**（不再逐轮重写）：
+
+1. 改完先 `py_compile`，并把 diff 完整贴进反馈；
+2. 报出 `leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)` 的实际值；
+3. 同一份结果重复取数两次，数值必须一致；
+4. `git_status_short_raw` 完整贴出；
+5. 标注“是否为单变量对比”，不一致就写明不一致在哪里；
+6. 判据只判本轮改动**能影响到的量**；不得设一条基线自己就不满足的回归阀值
+   （LAND1A 那轮把腿长峰峰幅阀值设成 0.03 m，而基线是 0.104 m，已作废）。
+7. **发方案前必须枚举**：把要改的那个量**所有**下游读取点列出来（`decision.contact` 有 8 处），
+   不得只看自己发现的那一处。
+8. **发方案前必须离线预演**：用已有结果文件按改后逻辑重放，证明它**会改变轨迹**；
+   若预演显示“逐位不变”，不提这个测试。预演脚本与结果必须写进方案。
+   反例（2026-10-17）：LAND4 只改了 3 道门里的 1 道，轨迹与 LAND2B 逐位相同，纯浪费一轮；
+   而 LAND2B 的记录里 `src=zero_order_hold`（= `wbc_called=False`）本就能推出第 2 道门关着。
+
+============================================================

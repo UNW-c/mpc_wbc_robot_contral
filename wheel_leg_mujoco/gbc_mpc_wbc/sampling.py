@@ -113,7 +113,8 @@ class FeedbackSampler:
         else:
             self.last_forces = forces
         contact = self.contact_estimator.update(
-            tuple(forces[:, 2]), self.dt, phase=phase_hint).contact
+            tuple(forces[:, 2]), self.dt, phase=phase_hint,
+            geometry_contact=tuple(bool(v) for v in self.dynamics.contact_geometry()[0])).contact
         state, rows = chassis_state(
             dynamics=self.dynamics, data=self.data, contact=contact, forces=forces,
             distance=distance, equilibrium_pitch=self.equilibrium_pitch,
