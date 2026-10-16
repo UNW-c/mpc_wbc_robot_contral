@@ -394,6 +394,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "wheel_torque": float(jump_command.wheel_torque),
                 "desired_com_acceleration_z": (None if jump_command.desired_com_acceleration_z is None
                                                else float(jump_command.desired_com_acceleration_z)),
+                "flight_leg_ref": (None if flight_leg_ref is None
+                                   else [str(flight_leg_ref[0])]
+                                        + [float(v) for v in flight_leg_ref[1:]]),
             }
             sample = None if outcome is None else outcome.sample
             sample_raw = None if outcome is None else outcome.sample_raw

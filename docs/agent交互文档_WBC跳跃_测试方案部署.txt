@@ -7805,3 +7805,312 @@ FL55 期的 `control.py` / `simulation.py` 从未提交，回退后不可恢复�
 否则归因只能靠重跑。是否加这个流程由你定。
 
 ============================================================
+
+OBS1：只加记录、不改控制律（取飞行剖面的 l_ref / v_ref）（问题排查agent，2026-10-16）
+
+一、这一轮要回答的唯一问题
+
+LAND0/LAND1A 的飞行段最小腿长只到 0.2078 m，轮间隙 0.1886 m，差 11 mm 到 200 mm 下限。
+上升段腿通道 `|ctrl|` 峰值只有 13.2（限幅 36/40，**未饱和**），而同口径下 FL55 达 34.85。
+所以瓶颈到底是“参考给得不够”还是“腿跟不上参考”，必须分清。而现在**记录里没有 `l_ref` / `v_ref`**，
+这两个正是飞行剖面 `flight_leg_profile_torque` 的内部状态（frame 的 `jump` 子键只有
+`phase / active / disconnect / hold_torque / leg_force / leg_length_target / wheel_torque /
+desired_com_acceleration_z`）。
+
+二、本轮只加记录，不改控制律（不加任何参数、不改任何公式）
+
+文件：`wheel_leg_mujoco/gbc_mpc_wbc/loop.py`。
+
+`flight_leg_ref` 是 loop.py:88 的局部变量，在 loop.py:342 由
+`torque, flight_leg_ref = flight_leg_profile_torque(...)` 赋值，**目前没有被写进记录**。
+
+改法：在 `trace_sink` 那一段（loop.py:382 起，`jump_payload` 附近）按帧写进 frame：
+
+```text
+            "flight_leg_ref": (None if flight_leg_ref is None
+                               else [str(flight_leg_ref[0])]
+                                    + [float(v) for v in flight_leg_ref[1:]]),
+```
+
+即 `[mode, l_ref, v_ref, l_entry, ref_accel, phi_elapsed]`；非飞行段为 null。
+
+控制律、参数、公式一个字节都不改；返回的力矩必须与改动前逐位相同，下面的一致性判据就是证这个。
+
+三、命令
+
+```text
+tools/jump_diagnostic.py --stage OBS1 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/LAND0_baseline_run01.json.gz`。
+
+四、判定
+
+| 类别 | 指标 | 目标 |
+|---|---|---|
+| 一致性（主） | OBS1 与 LAND0 全程逐位比对（`qpos`/`qvel`/`ctrl`，t=0 起全部 3000 帧） | **全 0.0**；不为 0 就说明记录改动影响了行为，本轮报告作废 |
+| 记录 | 飞行段每帧 `mode / l_ref / v_ref / phi_elapsed` | 必须存在且非空 |
+| 记录 | 轮间隙 FLIGHT 段 / 整轮 | 应仍为 0.1886 |
+
+五、取数要求（这是本轮的重点）
+
+以右腿为例，取下列五个量：
+
+1. `v_ref` 由正变负的时刻，以及 `v_ref` 首次到达 −1.5 的时刻；与顶点（LAND0 的 com_z 最高点 t=1.591）比较先后。
+2. `l_ref` 首次到达 0.20（`FLIGHT_RETRACT_FLOOR`）的时刻。
+3. `l_ref − leg_length_R` 与 `v_ref − leg_length_rate_R` 在上升段的时间曲线。
+4. 把腿长 PD 拆成两项：`kp*(l_ref − L_R)`（kp=3000）与 `kd*(v_ref − Ldot_R)`（kd=150），
+   分别给出上升段的最大幅值与峰值时刻。
+5. 自检：先确认 `leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`；同一份结果重复取数两次结果一致；
+   若某帧 `flight_leg_ref` 为 null，如实报 null，不要用相邻帧代替。
+
+六、结论只能从上面五个量里下
+
+本轮不解释、不归因，只给数据。问题排查agent据这些数决定杠杆：
+
+- 若 `v_ref` 到顶点时仍为正或刚过零 -> 瓶颈是**参考速率**（改反转斜坡）；
+- 若 `v_ref` 已明显为负而 `l_ref − L` 一直很大 -> 瓶颈是**跟踪**（只能改 kp，而 kp 是增益，需要依据）。
+
+七、反馈格式
+
+VP编号：OBS1
+git_status_short_raw：
+逐位比对 max|dqpos| / max|dqvel| / max|dctrl|（全程 3000 帧）：
+v_ref 变号时刻 / 首次到 −1.5 时刻（对照顶点 t=1.591）：
+l_ref 首次到 0.20 时刻：
+上升段 max|kp*(l_ref−L_R)| 及峰值时刻：
+上升段 max|kd*(v_ref−Ldot_R)| 及峰值时刻：
+轮间隙 FLIGHT 段 / 整轮：
+相位 / 中止 / assertion_failures：
+结论（只写数据支持的现象）：
+
+============================================================
+
+RAMP1：把上升段 v_ref 改成与 l_ref 的斜率一致（不动任何增益）（问题排查agent，2026-10-16）
+
+一、依据（OBS1 实测，右腿）
+
+`l_ref` 已经压在 0.20 下限之后的 112 帧里，腿长 PD 两项的**净力均值 = −0.9 N**：
+
+| t | L_R | Ldot_R | l_ref | v_ref | kp项 | kd项 | 净力 |
+|---|---|---|---|---|---|---|---|
+| 1.480 | 0.3212 | −0.761 | 0.2000 | +1.368 | −363.6 | +319.2 | −44.4 |
+| 1.510 | 0.2925 | −0.979 | 0.2000 | +0.883 | −277.6 | +279.2 | **+1.6** |
+| 1.550 | 0.2555 | −0.885 | 0.2000 | +0.236 | −166.5 | +168.2 | **+1.8** |
+| 1.610 | 0.2099 | −0.334 | 0.1975 | +0.107 | −37.2 | +66.2 | **+29.0** |
+
+控制器在这段时间实际在命令腿**伸出去**，腿是被惯性拖着收的。所以飞行段最小腿长只到
+0.2078 m，轮间隙 0.1886 m。
+
+根因：`v_ref` 进入飞行时取的是**实测腿速 +2.272**，再按 `ref_accel = (|v_ref| + 1.5)/t_apex`
+往 −1.5 斜坡，反转时间正好等于整个上升段；而 `l_ref` 是以 `l_ref −= RATE*dt` 直接 1.5 m/s
+下降的，**55 ms 就到底**。位置参考已在全速收腿，速度参考还在命令伸腿，两者从第一帧起就不自洽。
+（另：腿在反转前过冲，L_R 从 0.2852 伸到 **0.3283**（t=1.463）才开始收，多伸 0.043 m。）
+
+二、改动（只改上升段，不动下落段，不动任何增益）
+
+文件：`wheel_leg_mujoco/gbc_mpc_wbc/control.py`，`flight_leg_profile_torque` 里 `mode == "rising"` 那一段。
+
+原：
+
+```text
+    if mode == "rising":
+        delta = -FLIGHT_RETRACT_RATE_LIMIT - v_ref
+        if abs(delta) <= step_limit:
+            v_ref = -FLIGHT_RETRACT_RATE_LIMIT
+        else:
+            v_ref += step_limit * (1.0 if delta > 0 else -1.0)
+        l_ref = max(target_retract, l_ref - FLIGHT_RETRACT_RATE_LIMIT * float(dt))
+```
+
+新：
+
+```text
+    if mode == "rising":
+        l_ref = max(target_retract, l_ref - FLIGHT_RETRACT_RATE_LIMIT * float(dt))
+        # RAMP1：速度参考必须等于位置参考的斜率，否则 kd 项与 kp 项对消（OBS1 实测净力均值 −0.9 N）
+        v_ref = (-FLIGHT_RETRACT_RATE_LIMIT
+                 if l_ref > target_retract + 1.0e-9 else 0.0)
+```
+
+依据：`l_ref` 本身就是按 −RATE 生成的，它的精确导数就是 −RATE（到位后为 0）。
+参考速度必须等于位置参考的导数。**这不是调参：`kp/kd/RATE/FLOOR` 一个都不动。**
+
+预期副作用（要求记录，不预防）：进入飞行第一帧 `v_ref` 从上一拍的实测值跳到 −1.5，
+力矩会瞬间顶限幅（`clip ±36`）。这是预期内，看实测顶了几帧。
+
+未改：下落段（`else` 分支）、`LANDING/RECOVER`、`_pd_force_v`、所有增益、`jump.py`、`robot.xml`、
+`landing_buffer`、轮力矩。
+
+三、命令
+
+```text
+tools/jump_diagnostic.py --stage RAMP1 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+对照：`results/OBS1_baseline_run01.json.gz`。
+
+四、判定
+
+| 类别 | 指标 | 目标 | 不合格就停 |
+|---|---|---|---|
+| 主 | 轮最大离地间隙（FLIGHT 段） | **>= 0.200 m** | < 0.200 m 就报实际值，不要自己改任何参数 |
+| 一致性 | 地面段（t <= 1.424，即 IDLE/COMPRESS/COMPRESS_BRAKE/THRUST）与 OBS1 逐位比对 `qpos/qvel/ctrl` | **全 0.0** | 不为 0 说明改动泄到了飞行剖面之外，本轮作废 |
+| 回归（必过） | 触地后腿长是否越界（限 0.114~0.430） | 不越界 | 越界就停 |
+| 回归（必过） | 触地后腿长是否振荡（峰峰幅 < 0.03 m） | 不振荡 | 振荡就停 |
+| 回归（必过） | 触地后 pitch 是否收敛（末值 \|pitch\| < 0.20 rad，且不再单调增大） | 收敛 | 不收敛就停 |
+| 回归（必过） | ABORT 帧数 | 0 | 不为 0 就停 |
+| 记录 | 飞行段最小腿长（看 0.20 下限是否变成约束） | 只记录 | — |
+| 记录 | 上升段腿通道 \|ctrl\| 峰值与顶 36 的帧数 | 只记录 | — |
+| 记录 | 触地首帧世界系 phi / pitch、pitch 峰值、轮间隙整轮最大 | 只记录 | — |
+
+预期：min 腿长压到 0.20 附近，按两轮对照换算 `Δgap ≈ −1.57*ΔminL`，gap 约 **0.2008 m**，
+**只有 0.8 mm 余量**。所以本轮若刚好过线，不算稳，下一步十有八九要把 `FLIGHT_RETRACT_FLOOR`
+从 0.20 往下调（那是参数，必须另给依据、另开一轮）。
+
+五、取材要求
+
+1. 一致性比对取 `t <= 1.424` 的全部帧（地面段），报 `max|dqpos|`/`max|dqvel|`/`max|dctrl|`。
+2. 飞行段最小腿长要报 `leg_length_R` 与 `leg_length_L` 两个，不要只报右腿。
+3. 顶限幅帧数按腿通道 ch0..ch3 分别报（阈值 35）。
+4. `flight_leg_ref` 继续记录，并校验：上升段 `v_ref` 只应取 −1.5 或 0 两个值；
+   若出现其他值，如实报出。
+5. 自检同上轮：`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`；重复取数两次一致。
+
+六、反馈格式
+
+VP编号：RAMP1
+git_status_short_raw：
+地面段逐位比对 max|dqpos| / max|dqvel| / max|dctrl|：
+轮最大离地间隙（FLIGHT 段 / 整轮）：
+飞行段最小腿长（右/左）：
+上升段腿通道 |ctrl| 峰值（ch0..ch3）/ 顶 35 的帧数：
+v_ref 取值集合（是否只有 −1.5 与 0）：
+触地首帧世界系 phi / pitch：
+触地后 pitch 峰值 / 末值；腿长区间；峰峰幅；是否振荡：
+相位 / 中止 / assertion_failures：
+结论（只写数据支持的现象）：
+
+============================================================
+
+SW1：二维联合扫描 FLIGHT_RETRACT_FLOOR × FLIGHT_RETRACT_TORQUE_LIMIT（问题排查agent，2026-10-16）
+
+一、为什么要联合扫（依据）
+
+LAND0 -> RAMP1 的实测：
+
+| run | FLIGHT 段 max gap | 该帧 L_R | 飞行段 min 腿长 | 上升段腿通道 \|ctrl\| 峰值 |
+|---|---|---|---|---|
+| LAND0 | 0.18858 | 0.20994 | 0.20784 | 13.2 |
+| RAMP1 | 0.19458 | 0.20004 | **0.19996**（被 0.20 下限顶住） | **36.0 全通道**（顶限幅） |
+
+两个上限同时变成约束：下限决定腿能收到哪，力矩上限决定它能不能及时收到。它们是一对耦合参数，
+工作区第 3 条要求成对联合扫描、禁止单项微调，所以本轮一次扫二维。
+
+二、搜索空间
+
+| 参数 | 位置 | 取值 |
+|---|---|---|
+| `FLIGHT_RETRACT_FLOOR` | `control.py` 常量 | **0.16 / 0.18 / 0.19 / 0.20** [m] |
+| `FLIGHT_RETRACT_TORQUE_LIMIT` | `control.py` 常量 | **36 / 38 / 40** [N*m] |
+
+共 **4 x 3 = 12 组**。边界说明：下限侧 0.16 距机械下限 `leg_length_min=0.114` 还有余量；
+力矩上限 40 等于执行器实际限幅（`ctrlrange ±40`），无法再高。
+若最优解落在 0.16，则搜索未覆盖边界，下一轮必须向低延伸。
+
+三、每个格点只允许改这两个常量
+
+除 `FLIGHT_RETRACT_FLOOR` 与 `FLIGHT_RETRACT_TORQUE_LIMIT` 两个数值外，**不得改任何代码**
+（包括 `kp/kd/RATE`、下落段、`loop.py`、`jump.py`、`robot.xml`、轮力矩、落地接管）。
+每个格点一条独立 run，一条一条跑，不许同时改两组以上。
+
+为了让 12 组能一次跑完，允许在诊断工具里加一个**仅影响这两项常量的命令行覆盖钩子**
+（不改变默认行为）。若加这个钩子，必须在报告里贴出 diff，并证明不传参时与今天逐位一致。
+
+四、评价口径
+
+**硬约束（不过则否决，不得参与排序）**
+
+| 编号 | 约束 |
+|---|---|
+| H1 | 飞行段最大轮间隙 `gap_FLIGHT >= 0.200 m` |
+| H2 | ABORT 帧数 = 0 |
+| H3 | 触地后腿长全程在 `[0.114, 0.430]` 内 |
+| H4 | 触地后 `max|pitch| < 1.0 rad` |
+
+**排序（只在过 H1~H4 的格点之间比，按顺序逐项比较）**
+
+1. 落地安全裕度：触地后 `max|pitch|` 小者优
+2. 落地腿长振荡：触地后腿长峰峰幅（R、L 取大者）小者优
+3. 收敛时间 `T_settle` 小者优
+4. 控制代价：上升段腿通道 `|ctrl| >= 39` 的帧数（四通道求和）少者优
+5. 间隙余量：`gap_FLIGHT - 0.200` 大者优
+
+不造加权和，是因为权重没有依据，会给排序引入不存在的自由度。若要求加权评分，请给权重依据。
+
+**`T_settle` 定义（必须按此口径）**
+
+从触地首帧起算，到“`|pitch| <= 0.10 rad` 且 `|L_R - 0.28| <= 0.02 m` 且 `|L_L - 0.28| <= 0.02 m`
+同时连续保持 0.2 s”为止的时间。若不满足一直延续到仿真结束（t=3.0），
+`T_settle = 999` 并标记“未收敛”。
+
+五、工具自检（工作区第 4 条，必须先做并写进报告）
+
+1. 扫描/评价脚本 `py_compile` 通过；
+2. 口径与记录字段一致：报出 `leg_length_R/L`、`leg_length_rate_R/L`、`pitch`、`wheel_gap`、
+   `jump.flight_leg_ref`、`jump.phase`、`ctrl` 的实际取值样例；
+3. 先用已有的 `RAMP1_baseline_run01.json.gz` 冒烟跑一遍评价，各指标量级应符合本文第一节的表；
+4. 同一份输入重复评价两次，结果完全一致；
+5. 若某组结果异常，先查工具口径，不得用调整阀值/加滤波绕过。
+
+六、逐格点的“参数已生效”自检
+
+每一条 run 必须报出下面两个量，并与该组设定值对得上：
+
+1. 飞行段 `l_ref` 的最小值（来自 `jump.flight_leg_ref[1]`）应等于该组的 `FLOOR`
+   （若大于 FLOOR，说明腿没收到位，也如实报）；
+2. 上升段腿通道 `|ctrl|` 的最大值应等于该组的 `TORQUE_LIMIT`。
+
+对不上就说明参数没生效，该组作废，不得当成结果。
+
+七、报告格式（工作区第 5、6 条）
+
+必须给出**完整 12 行结果表**，每行至少包含：
+
+```text
+stage | FLOOR | TLIM | gap_FLIGHT | gap_all | minL_R | minL_L | max|pitch|_after | pitch末值 |
+腿长峰峰幅_R | 腿长峰峰幅_L | T_settle | ABORT帧 | 腿越界 | 顶39帧数 | 轮力矩饱和帧 |
+min l_ref(自检) | max|ctrl|(自检) | 过 H1~H4 |
+```
+
+外加：排序表、最优解及其依据、**搜索是否已覆盖边界的声明**、以及失败组的失败原因。
+禁止只报单个代表点。
+
+八、命令与命名
+
+每条命令只有 `--stage` 不同，其余参数完全一致：
+
+```text
+tools/jump_diagnostic.py --stage SW1_f020_t36 --case baseline --run-id run01 --duration 3.0 --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+十二个 stage 名：`SW1_f016_t36 / SW1_f016_t38 / SW1_f016_t40 / SW1_f018_t36 / SW1_f018_t38 /`
+`SW1_f018_t40 / SW1_f019_t36 / SW1_f019_t38 / SW1_f019_t40 / SW1_f020_t36 / SW1_f020_t38 / SW1_f020_t40`
+
+其中 `SW1_f020_t36` 应与 RAMP1 逐位一致（RAMP1 就是 0.20/36）。这一条是本轮的一致性自检，
+必须报逐位比对结果（`qpos`/`qvel`/`ctrl` 全程）。
+
+九、反馈格式
+
+VP编号：SW1
+搜索空间（实际跑到的）：
+工具自检输出（含用 RAMP1 冒烟的评价结果与重复性）：
+参数生效自检（12 组的 min l_ref / max|ctrl| 对照）：
+完整 12 行结果表：
+排序表：
+最优解及其依据：
+边界覆盖声明：
+`SW1_f020_t36` 与 RAMP1 逐位比对：
+失败组与失败原因：
+
+============================================================

@@ -178,12 +178,10 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
         mode = want_mode
     step_limit = ref_accel * float(dt)
     if mode == "rising":
-        delta = -FLIGHT_RETRACT_RATE_LIMIT - v_ref
-        if abs(delta) <= step_limit:
-            v_ref = -FLIGHT_RETRACT_RATE_LIMIT
-        else:
-            v_ref += step_limit * (1.0 if delta > 0 else -1.0)
         l_ref = max(target_retract, l_ref - FLIGHT_RETRACT_RATE_LIMIT * float(dt))
+        # RAMP1：速度参考必须等于位置参考的斜率，否则 kd 项与 kp 项对消（OBS1 实测净力均值 −0.9 N）
+        v_ref = (-FLIGHT_RETRACT_RATE_LIMIT
+                 if l_ref > target_retract + 1.0e-9 else 0.0)
     else:
         delta = FLIGHT_EXTEND_RATE_LIMIT - v_ref
         if abs(delta) <= step_limit:
