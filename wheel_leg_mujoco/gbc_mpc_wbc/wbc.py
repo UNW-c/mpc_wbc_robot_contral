@@ -33,6 +33,7 @@ from Algorithm.supervision import ContactBlock  # noqa: E402
 from Algorithm.wbc import TaskLevel  # noqa: E402
 from Algorithm.wbc.schedule import height_task_activation_from_factor, roll_gain_scale_from_factor  # noqa: E402
 from Algorithm.wbc.task_qp import task_qp_resolver_factory  # noqa: E402
+from .leg_angle_anchor import WORLD_TARGET_DEFAULT, phi_body_reference  # noqa: E402
 from Algorithm.wbc.weighted import WeightedSaturationResolver  # noqa: E402
 from Algorithm.wbc.sns import NullSpaceHierarchy, SaturationResolver  # noqa: E402
 from .wbc_limited import LimitedWeightedResolver  # noqa: E402
@@ -156,7 +157,8 @@ class Gbc486Tasks:
     def tasks(self, state: ChassisState, rows: RowSet, sample=None,
               desired_com_acceleration_z: float | None = None,
               pitch_reference: float | None = None, roll_reference: float | None = None,
-              angle_R_reference: float | None = None, angle_L_reference: float | None = None):
+              angle_R_reference: float | None = None, angle_L_reference: float | None = None,
+              world_angle_anchor: bool = False):
         """返回 ``(balance_tasks, motion_tasks)``。顺序与 circleg 完全一致：
 
         ``(pitch, hip_tasks[-1], roll)`` + ``(yaw, height, forward_velocity) + hip_tasks[:-1]``，
@@ -189,6 +191,14 @@ class Gbc486Tasks:
         diff = 0.5 * (leg[[0, 1]] - leg[[2, 3]])
         diff_rate = diff_rows @ data.qvel
         n = self.nominal
+        # LAND3（2026-10-17，用户同意）：腿角默认目标改世界系锚定。
+        # world_angle_anchor=True 时，机体系目标 = phi_body_reference(WORLD_TARGET_DEFAULT, pitch)
+        # = WORLD_TARGET_DEFAULT + pitch；任务量是 n.leg_angle - phi_body，所以参考取两者之差。
+        # False（默认）时保持原有的机体系常数目标（参考 0.0），行为与改动前一致。
+        if world_angle_anchor:
+            angle_reference_default = n.leg_angle - phi_body_reference(WORLD_TARGET_DEFAULT, pitch)
+        else:
+            angle_reference_default = 0.0
 
         reference = (state.vector(self.state_dim) if sample is None else sample.state)
         acceleration = (np.zeros(self.state_dim) if sample is None else sample.acceleration)
@@ -239,7 +249,7 @@ class Gbc486Tasks:
                                 + kp_r * (reference[6] - angle_measured)
                                 + kd_r * (reference[7] - angle_rate))
             else:
-                angle_target = kp_r * (0.0 - angle_measured) - kd_r * angle_rate
+                angle_target = kp_r * (angle_reference_default - angle_measured) - kd_r * angle_rate
             leg_tasks.append((
                 TaskLevel(leg_rows[[length_index]], np.array([length_target]),
                           leg_bias[[length_index]], name=f"length_{suffix}",

@@ -27,7 +27,7 @@ import numpy as np
 
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
-from .leg_angle_anchor import phi_body_reference  # noqa: E402
+from .leg_angle_anchor import WORLD_TARGET_DEFAULT, phi_body_reference, phi_eq  # noqa: E402
 from .jump import GRAVITY  # noqa: E402
 from Algorithm.wbc import ActuatorLimits  # noqa: E402
 
@@ -49,24 +49,16 @@ FLIGHT_RETRACT_RATE_LIMIT = 1.5   # [m/s] 收腿参考速率上限
 FLIGHT_EXTEND_RATE_LIMIT = 1.5    # [m/s] 伸腿参考速率上限（FL9，与收腿同值同理由）
 FLIGHT_RETRACT_TORQUE_LIMIT = 36.0  # [N*m] 上升收腿力矩上限（=40 的 90%）
 # FL10（2026-10-10）：phi 参考改世界系。物理含义：与站立静平衡一致（质心落在轮接触点上）。
-PHI_WORLD_REFERENCE = -0.1263   # [rad] 世界系摆角参考（=phi_eq(0.28)）
+# R1（2026-10-17）：世界系摆角常量与 phi_eq 已并入 leg_angle_anchor.py（唯一来源），此处不再定义。
 KP_PHI = 20.9             # [N*m/rad] FL12 新增益（用户批准）
 KD_PHI = 1.67             # [N*m*s/rad] FL12 新增益（用户批准）
 # FL13（2026-10-10）：启用耦合前馈，c 取测试agent专项实测值（对称双施加、共模 phidd 过零）。
 # 实测 c_opt 区间 -0.037~-0.063，取 -0.052；文档原 +0.15（单腿口径）作废。
 FEEDFORWARD_COUPLING = -0.052    # [-] F_phi += c*F_L（仅飞行下落段）
-PHI_EQ_SLOPE = 0.97             # [rad/m] phi_eq 斜率（文档离线拟合）
-PHI_EQ_ANCHOR_LENGTH = 0.28     # [m] phi_eq 锚点腿长
 # FL21（2026-10-12 用户批准）：上升->下落交接处的 F_phi 启用斜坡（单点）。
 # 依据：phi 环带宽 omega=25 rad/s -> 时间常数 1/25 = 40 ms（部署文档 FL21 三）。
 # 计时起点为“进入 falling 的那一刻”；切换后前 T_ramp 内 F_phi 乘 (0->1)。FL22 起上升段也启用。
 FLIGHT_PHI_RAMP = 0.040    # [s]
-
-
-def _phi_eq(l_ref) -> float:
-    """静平衡摆角（世界系）随腿长参考：``phi_eq(L) = PHI_WORLD_REFERENCE + 0.97*(L-0.28)``。
-    拟合区间只到 L=0.14；L=0.119 属外推（已知限制）。"""
-    return PHI_WORLD_REFERENCE + PHI_EQ_SLOPE * (float(l_ref) - PHI_EQ_ANCHOR_LENGTH)
 
 
 def _leg_axis_torque(dynamics, force_per_leg) -> np.ndarray:
@@ -114,8 +106,8 @@ def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
-    ``l_ref=None`` 时退回常数 ``PHI_WORLD_REFERENCE``。"""
-    world_ref = PHI_WORLD_REFERENCE if l_ref is None else _phi_eq(l_ref)
+    ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
+    world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
     phi_body_ref = phi_body_reference(world_ref, pitch)
     forces = []
     for side in range(2):
@@ -308,7 +300,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
                                   pitch_reference=holds.get("pitch"),
                                   roll_reference=holds.get("roll"),
                                   angle_R_reference=holds.get("angle_R"),
-                                  angle_L_reference=holds.get("angle_L"))
+                                  angle_L_reference=holds.get("angle_L"),
+                                  world_angle_anchor=landing_window)
     # (b) 腿长任务参考跟跳跃：wbc.py::tasks 里该任务参考标称 L0，跳跃期必须换成跳跃给出的目标腿长，
     #     否则 WBC 会把正在伸长的腿拉回去（与蹬伸力对撞，第 32 次排查 bug#1 的机理）。
     if jump is not None and jump.active and jump.leg_length_target is not None:

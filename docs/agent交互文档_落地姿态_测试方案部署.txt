@@ -337,7 +337,161 @@ ABORT / assertion_failures：
 结论（只写数据支持的现象）：
 
 ================================================================
-7. 交付队列
+7. 下一轮方案（R1 + LAND3）—— 用户三步顺序的第 2 步，合并为一轮
+
+7.1 证据（N1 数据，已复核）
+
+  a) 触地帧 t=1.7470：`phi_body = -0.7302`、`pitch = -0.7332`、`phi_world = +0.0030`，
+     即**腿部在世界系本来就是竖直的**；但 `wbc.py` 的腿角任务目标是机体系常数 `-0.1263`，
+     任务误差 **0.6039 rad（34.6 度）** —— 控制器会白转 34.6 度。
+
+  b) 恒等式：腿角任务在机体系收敛时，`phi_world - phi_eq(L) == -pitch`。
+     N1 末值验证：`pitch=-0.0577`、`world_err=+0.0659`（t=2.910，差 0.0083）；
+     `pitch=-0.0697`、`world_err=+0.0832`（t=2.999，差 0.0135）。
+     => “让 phi 在世界系接近垂直”与“把 pitch 压到 0”在**机体系参考下是同一件事**，
+        分开调没有意义。这是 R1+LAND3 的直接依据。
+
+  c) N1 实测：触地后 `|world_err|` 峰值 **0.3184 rad（18.2 度）** @ t=1.859；
+     末值 **+0.0832 rad（4.8 度）**。末值 `phi_body=-0.1123` vs 机体系目标 -0.1263，差 +0.0140
+     （说明任务在机体系已经收敛，误差全来自参考系）。
+
+  d) 现状三处口径不一致（这也是本节的枚举清单）：
+     - `leg_angle_anchor.py`：世界系，唯一换算函数 `phi_body_reference(world_target, pitch)`；
+     - `control.py::_phi_force`：世界系，但自带 `_phi_eq` 与 `PHI_WORLD_REFERENCE`；
+     - `wbc.py`（约 231/242 行）：机体系常数 `nominal.leg_angle = -0.1263`，**没有换算**。
+     重影常量：`control.PHI_WORLD_REFERENCE` 与 `leg_angle_anchor.WORLD_TARGET_DEFAULT` 同值分居两模块；
+     `_phi_eq(L) = -0.1263 + 0.97*(L-0.28)` 住在 `control.py`。
+
+7.2 两处口径已定（2026-10-17 回答测试agent的提问）
+
+  7.2.1 世界系目标取哪个值 -> 用**已有的 -0.1263**，不新增常量、不锁存实测值
+
+  证据：
+  - `pose.angle`、`control.PHI_WORLD_REFERENCE`、`leg_angle_anchor.WORLD_TARGET_DEFAULT`
+    三个都是同一个数 -0.1263，它就是**站立静平衡的世界系腿摆角**
+    （`leg_angle_anchor.py` 模块注释原文：“默认 -0.1263 = 站立静平衡 phi_world”；
+     `control.py:52` 注释 “=phi_eq(0.28)”）。
+  - 所以机体系目标的本意本来就是“站立腿角”，错的只是参考系。把**同一个数**放到世界系用，
+    就是最小、最有依据的修法（工作区第 5 条：参数要有来源）。
+  - 触地实测的 +0.0030 **不是**触地腿长下的静平衡：触地帧 `L=0.2996`，
+    `phi_eq(0.2996) = -0.1073`，而实测世界系 phi = +0.0030，两者差 0.11 rad。
+    锁存它会命令腿停在非静平衡角上。
+  - 锁存还需要一个状态持有者（loop.py），与文件清单矛盾（就是你指出的那处）。
+    改用已有常量后，本方案**不需要改 loop.py**。
+  - `WORLD_TARGET_DEFAULT` 目前**全工程无人引用**（死的）；活的只有 `control.PHI_WORLD_REFERENCE`。
+    R1 把两者并成一个名字，LAND3 引用那一个。
+
+  7.2.2 作用范围 -> 只在落地窗口生效（选项 B），复用 N1 已加好的 `landing_window`
+
+  先确认你对代码的核对是对的：`model_variant=held_leg` 使 `self.leg_input=False`；
+  且 N1 全程 `explicit_jump_reference_active=False` -> `jump_holds=None` -> `holds={}` ->
+  `angle_R_reference=None`，所以确实走到 `wbc.py` 最后的 `else` 默认分支，且所有相位都走。
+
+  但 A 也**动不到飞行段**，它只动起跳段，而那个量很小：
+
+  | 相位 | 帧数 | `max|pitch|` | `wbc_called` | 世界系 phi 范围 |
+  |---|---|---|---|---|
+  | COMPRESS | 157 | 0.000215 | 40 | -0.1264 ~ -0.1258 |
+  | COMPRESS_BRAKE | 159 | 0.001102 | 39 | -0.1258 ~ -0.1247 |
+  | THRUST | 109 | 0.002012 | 28 | -0.1248 ~ -0.1221 |
+  | FLIGHT | 322 | 0.731778 | **0** | -0.1221 ~ +0.0980 |
+  | LANDING | 18 | 0.766274 | 5 | +0.0029 ~ +0.0224 |
+  | IDLE | 2234 | 0.796140 | 558 | -0.1801 ~ +0.1300 |
+
+  - FLIGHT 里 `wbc_called = 0`（`loop.py:280` 的条件含 `jump_phase_now != "FLIGHT"`），
+    且飞行段腿力矩由 `flight_leg_profile_torque` 整条覆盖，它的 `_phi_force` 本来就是世界系。
+    => 间隙 0.22153 不受影响。
+  - 起跳段的目标差异上界 = `max|pitch|` <= 0.0020 rad（0.115 度）——**很小但不是零**。
+  - 选 B 的收益是**归因**：触地前整条轨迹与 N1 逐位相同，飞行段间隙的回归检查就从
+    “论证”变成硬证据 `max|dqpos| = max|dqvel| = max|dctrl| = 0`（t < 1.7470）。
+
+7.3 R1（纯重构，零行为改动）
+
+  改动文件：`wheel_leg_mujoco/gbc_mpc_wbc/leg_angle_anchor.py`、`.../control.py`。
+
+  `leg_angle_anchor.py`（成为唯一来源）：
+  - 保留 `phi_body_reference(world_target, pitch)`；
+  - 迁入 `phi_eq(l_ref)` 及它依赖的 `PHI_EQ_SLOPE = 0.97`、`PHI_EQ_ANCHOR_LENGTH = 0.28`
+    （从 `control.py` 搬来，数值一字不改）；
+  - 保留唯一的数值字面量 -0.1263（名字用 `WORLD_TARGET_DEFAULT`）；
+  - 新增 `world_from_body(phi_body, pitch) -> phi_body - pitch`。
+
+  `control.py`：
+  - 删 `PHI_WORLD_REFERENCE`（52 行）与 `_phi_eq`（66-69 行）及随迁的两个常量；
+  - `_phi_force` 改调 `leg_angle_anchor.phi_eq` / `phi_body_reference`；
+  - 行为逐字不变。
+
+7.4 LAND3（改行为）
+
+  改动文件：`wheel_leg_mujoco/gbc_mpc_wbc/wbc.py`、`.../control.py`。
+
+  `wbc.py::tasks`：
+  - 新增关键字参数 `world_angle_anchor: bool = False`（默认 False -> 行为与改动前一字不差）；
+  - 在 `roll, pitch, yaw = self.dyn.attitude()` 之后算：
+
+    若 `world_angle_anchor` 为真：
+    `angle_reference_default = n.leg_angle - phi_body_reference(WORLD_TARGET_DEFAULT, pitch)`
+    否则：`angle_reference_default = 0.0`
+
+  - 把腿角任务的**最后一个 `else` 默认分支**改为
+    `angle_target = kp_r * (angle_reference_default - angle_measured) - kd_r * angle_rate`
+    （原式为 `kp_r * (0.0 - angle_measured) - kd_r * angle_rate`，只把 0.0 换成它）。
+    这样就保持了现有符号代数不动：物理目标 = `world_target + pitch`
+    （验算：`angle_measured = n.leg_angle - phi_body`，目标任务误差归零即
+     `phi_body = n.leg_angle - angle_reference_default = world_target + pitch`）。
+  - **不动** `angle_R_reference/angle_L_reference` 那一支，**不动** `self.leg_input` 那一支。
+  - `wbc.py` 只从 `.leg_angle_anchor` 引纯函数与常量，不依赖 `control.py`。
+
+  `control.py::wbc_stage`：
+  - 调用 `tasks.tasks(...)` 时传 `world_angle_anchor=landing_window`
+    （`landing_window` 是 N1 已加的参数，来自 `loop.py` 的 `jump_landed` 锁存；本方案不新增参数）。
+
+  不动：`kp_r`/`kd_r`、`PHI_EQ_SLOPE`/`PHI_EQ_ANCHOR_LENGTH`、`WORLD_TARGET_DEFAULT` 的数值、
+  任何门控阈值、估计器参数、执行器限幅。
+
+7.5 R1 的离线数值等价自检（实现前先跑，零测试成本）
+
+  脚本对 `leg_angle_anchor` 重构前后的 `phi_eq / phi_body_reference / world_from_body`
+  在 `(world_target, pitch)` 与 `(l_ref, phi_body)` 网格上逐点比较，
+  要求最大逐点差 = 0.0。网格范围与逐点差都要写进报告。
+  本轮与 LAND3 合并，所以不用“整条轨迹逐位一致”占一轮（触地段的逐位比对已放在 7.6 的验证行）。
+
+7.6 命令与判据
+
+  命令同模板，`--stage R1_LAND3`。
+
+  | 类别 | 指标 | 目标 | N1 基线 |
+  |---|---|---|---|
+  | 主 | 触地后 `\|world_err\|` 峰值 | 由 0.3184 下降 | 0.3184 |
+  | 主 | 末值 `world_err` 绝对值 | 由 0.0832 下降 | 0.0832 |
+  | 回归 | 末值 pitch 绝对值 | <= 0.10 | 0.06973 |
+  | 回归 | 触地后 `single_support` / `airborne_zero` 帧 | 0 / 0 | 0 / 0 |
+  | 回归 | 末值腿长 R/L | 0.28 正负 0.02 | 0.28056/0.27881 |
+  | 回归 | 腿长越界帧 | 0 | 0 |
+  | 回归 | FLIGHT 最大轮间隙 | >= 0.200 | 0.22153 |
+  | 回归 | ABORT / T_settle | 0 / <= 0.6 s | 0 / 0.5410 |
+  | 验证 | **触地段（t < 1.7470）与 N1 逐位比对** | 必须全 0.0（7.2.2 选 B 的目的） | — |
+  | 验证 | 与 N1 首处差异 | 必须在 t >= 1.7470；报首差时刻与通道 | — |
+
+  反馈格式：
+
+  VP编号：R1_LAND3
+  R1 离线数值等价自检（网格范围与最大逐点差，要求 0.0）：
+  代码改动（三个文件完整 diff，不截断）：
+  共同自检（py_compile / 执行器下标 / 重复取数一致 / git_status_short_raw 完整）：
+  触地段（t < 1.7470）与 N1 的 max|dqpos| / max|dqvel| / max|dctrl|：
+  与 N1 的首处差异时刻与通道：
+  触地帧与交出帧的 phi_body / pitch / phi_world：
+  触地后 |world_err| 峰值（含时刻）与末值：
+  末值 pitch / 末值腿长 R、L / 末值 dL：
+  触地后 single_support / motion_enabled / airborne_zero 帧数：
+  触地后腿长最大 / 最小腿长（右/左）/ 越界帧数：
+  FLIGHT 最大轮间隙 / ABORT / T_settle：
+  额外发现（可选）：
+  结论（只写数据支持的现象）：
+
+================================================================
+8. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -350,10 +504,9 @@ ABORT / assertion_failures：
 | 6 | LAND4 | 已完成（无效） | airborne 加几何接触双确认；只改了标签 | LAND2B |
 | 7 | LAND5 | 已完成（暴露缺陷） | 几何接触作为估计器否决项 | LAND4 |
 | 8 | **N1-C** | **已完成（离线）** | 追查触地后腿长不对称来源；结论：种子 1e-4 m 可忽略，主因是放大器 | 零测试成本 |
-| 9 | **N1** | **可跑（候选 A 已定案）** | 落地窗口恢复腿长/腿角控制（`motion_override`） | LAND5 |
-| 10 | R1 | 排队 | 腿角换算集中到 `leg_angle_anchor.py`，删常量重影，不改行为 | 要求与 N1 全程逐位一致 |
-| 11 | LAND3 | 排队 | `wbc.py` 腿角任务目标改世界系投影 + 锁存触地世界系 phi | N1 |
-| 12 | 待定 | 排队 | 触地俯仰 -0.7332（缺陷 3） | 动飞行段，gap 有回退风险 |
-| 13 | 待定 | 落地稳定后 | 质心可行性模块（见 `docs/质心可行性模块_方案规划_待办.md`） | — |
+| 9 | **N1** | **已完成（全部判据通过）** | 落地窗口恢复腿长/腿角控制（`motion_override`） | LAND5 |
+| 10 | **R1 + LAND3** | **可跑（合并一轮）** | 腿角换算集中到 `leg_angle_anchor.py` + 腿角目标改世界系投影 | N1 |
+| 11 | 待定 | 排队 | 触地俯仰 -0.7332（飞行段决定，动它有 gap 回退风险） | N1 |
+| 12 | 待定 | 落地稳定后 | 质心可行性模块（见 `docs/质心可行性模块_方案规划_待办.md`） | — |
 
 ================================================================
