@@ -299,6 +299,7 @@ class VelocityPlanner:
         if not np.all(np.isfinite([speed, yaw_rate, position or 0.0, yaw or 0.0])):
             raise ValueError("Reference reset must be finite")
         self._forward = _RampState(position or 0.0, speed)
+        self._reference_frozen = False
         self._yaw = _RampState(yaw or 0.0, yaw_rate)
         self._initialized = position is not None and yaw is not None
         self.mode = ReferenceMode.RESET
@@ -329,12 +330,30 @@ class VelocityPlanner:
         _LOGGER.info("参考软重锚: reset_position=%s s=%.4f yaw=%.4f measured=%.4f",
                      reset_position, self._forward.position, yaw, position)
 
+    def reanchor_from_measurement(self, position: float, yaw: float, speed: float,
+                                  yaw_rate: float, reason: str = "jump_landing") -> None:
+        """用**实测速度**重新播种斜坡（参考可能被冻结过时用）。
+
+        与 ``soft_reanchor`` 的区别：位置、偏航、速度、角速度全部取自同一时刻的实测，
+        不保留斜坡旧值。轮圈腿的 ``_align`` 就是这个语义（内部直接调用，不复制逻辑）。
+        """
+        self._align(float(position), float(yaw), float(speed), float(yaw_rate), reason)
+
+    def mark_reference_frozen(self) -> None:
+        """记录"参考斜坡被冻结过"（跳跃期 motion_enabled=False，斜坡不再推进）。"""
+        self._reference_frozen = True
+
+    @property
+    def reference_frozen(self) -> bool:
+        return bool(self._reference_frozen)
+
     def _align(self, position: float, yaw: float, speed: float, yaw_rate: float, reason: str,
                reset_position: bool = True) -> None:
         # reset_position=False keeps the travel target where it was: a pure
         # velocity hold must not move the position goal away from the origin.
         self._forward = _RampState(position if reset_position else self._forward.position, speed)
         self._yaw = _RampState(yaw, yaw_rate)
+        self._reference_frozen = False
         self._initialized = True
         self._hold_time = 0.0
         self._commanded = False

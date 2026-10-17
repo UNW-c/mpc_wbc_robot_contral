@@ -12611,3 +12611,591 @@ pynput 送的是 `Key.space`，`_key_name()` 先取 `key.char`（`Key.space` 没
    按字面实现会让空格静默失效。
 
 ================================================================
+
+
+================================================================
+25 排查：落地位置收敛（P1）+ 起跳偏航归零（P2）
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：S25-P1/P2
+
+## 零、先说明本轮代码状态（影响下文能给出哪些列）
+
+| 节 | 内容 | 当前工作区 | 证据 |
+|---|---|---|---|
+| 25.3 | planner 只读 property + trace 5 字段（`planner_forward_pos/vel`、`planner_yaw_pos/vel`、`landing_window`、`command_yaw_rate`） | **已不在**（被回退） | `grep planner_forward_pos loop.py` -> 0 命中；`grep forward_position planner.py` -> 0 命中；`CASE-A` 帧字段清单里无这些键 |
+| 25.4 | `--command-yaw-rate/--command-yaw-hold` | **已不在** | `--help` 回采里无这两个参数（`error: unrecognized arguments`） |
+| 24 节 | `request_jump` / 触发 OR 分支 / R 复位 / view 5 开关 / 空格触发 | **在 HEAD** | `git log -1` = `1e18f95`；`grep request_jump simulation.py` 有命中 |
+
+因此本节要求的 **T1 的 `landing_window` 列、T2 的 `planner_forward_pos` 列、T3 的 `planner_yaw_pos` 列、
+T4 的 `wbc_result.scaling` 列**都无法给出（这些量在本批数据里不存在），下文用**已有字段**替代并逐处标注。
+`CASE-B/CASE-C` 因缺 25.4 入口**未跑**。
+
+本轮唯一的工作区改动是 `tools/video.py` 加了两个只用于回放的参数（`--replay`、`--jump-times`），
+不参与控制，diff 见末尾。
+
+## 一、数据源（全部为已有结果，未新增控制改动）
+
+| 文件 | 工况 | 采样率/时长 | 对应 |
+|---|---|---|---|
+| `results/CASE-A_command_velocity_run01.json.gz` | `--command-velocity 0.5 --command-hold 2.0 --jump-time 1.0`，5 个跳跃开关全开 | 1 kHz / 8.0 s | **P1**（落地时已无前进指令） |
+| `results/MANUAL_keys_run06.json.gz` + `.log` | 你的手测会话（键盘：9 段指令、4 次空格起跳、无 R） | 250 Hz / 19.456 s | **P2**（转向后起跳） |
+| `results/MANUAL_keys_run03.log` | 另一次手测会话（1 跳） | 日志 | 你说的"落地劣化"那次 |
+
+## 二、P1 数据（CASE-A）
+
+触地 **t=1.767 s**；FLIGHT 最大轮间隙 **0.22985 m**；相位帧数
+`IDLE 6905 / COMPRESS 153 / COMPRESS_BRAKE 171 / THRUST 113 / FLIGHT 330 / LANDING 19 / RECOVER 309`（落地后 buffer 期较长）。
+
+### T1/T2（起跳前 0.5 s ~ 落地后 3 s，抽点 4 Hz 以上）
+
+| t [s] | `jump.phase` | `decision.mode` | `distance` | `sample.state[0]` | `com_x` | `com_vx` |
+|---|---|---|---|---|---|---|
+| 0.50 | IDLE | ground | +0.07199 | +0.07199 | +0.01493 | +0.49227 |
+| 1.00 | COMPRESS | ground | +0.31994 | （jump.active -> sample=None） | +0.27078 | +0.49834 |
+| 1.30 | COMPRESS_BRAKE | ground | +0.45284 | - | +0.40529 | +0.37226 |
+| 1.50 | FLIGHT | airborne | +0.52388 | - | +0.47515 | +0.34438 |
+| 1.75 | FLIGHT | airborne | +0.66739 | - | +0.56018 | +0.34418 |
+| 1.80 | RECOVER | recovery | +0.68814 | - | +0.57711 | +0.21068 |
+| 2.00 | RECOVER | recovery | +0.62509 | - | +0.55012 | -0.09146 |
+| 2.20 | IDLE | ground | +0.67243 | +0.67243 | +0.61797 | +0.56313 |
+| 2.50 | IDLE | ground | +0.70150 | +0.70150 | +0.65634 | -0.11033 |
+| 3.00 | IDLE | ground | +0.69560 | +0.69560 | +0.64694 | -0.00135 |
+| 3.50 | IDLE | ground | +0.69551 | +0.69551 | +0.64656 | +0.00010 |
+| 4.00 | IDLE | ground | +0.69550 | +0.69550 | +0.64653 | -0.00001 |
+| 5.00~7.99 | IDLE | ground | +0.69550 | +0.69550 | +0.64653 | -0.00000 |
+
+`landing_window` 列缺失（见第 0 节）。`planner_forward_pos` 列缺失，可用 `sample.state[0]` 与
+`distance` 的关系代替：落地后两者逐点相等（见上表），即 WBC 吃的位置目标就是当前实测位置。
+
+### 25.6 要求额外给出的量（P1）
+
+| 项 | 实测 |
+|---|---|
+| `distance` 极大 | **+0.70178 m @ t=2.470 s**（稳态 +0.69550，过冲 **+6.28 mm**） |
+| `distance` 极小（落地后） | +0.61531 m @ t=2.068 s（落地缓冲段） |
+| `com_x` 极大 | **+0.66260 m @ t=2.407 s**（稳态 +0.64653，过冲 **+16.07 mm**） |
+| 位置符号翻转拐点 | **0 处**（全程 `distance>=0`，从未回到负值） |
+| `sample.state[0]` 跳变 > 0.01 m | **0 处**（逐帧差最大远小于 0.01 m，见下方判读） |
+| `com_vx` 转向 | +0.56313（t=2.20）-> **-0.11033（t=2.50）** -> -0.00135（t=3.00）-> 0 |
+
+### T4 控制（CASE-A）
+
+| t [s] | `ctrl[0:4]`（N·m） | `ctrl[4:6]`（N·m） | `pitch` [rad] |
+|---|---|---|---|
+| 1.767（触地） | +37.240 / -37.188 / -31.515 / +31.894 | +0.000 / +0.000 | -0.74910 |
+| 1.80 | -20.330 / +21.457 / +19.684 / -20.770 | -4.874 / -4.862 | -0.80941 |
+| 1.90 | -10.409 / +9.232 / +10.184 / -9.153 | -0.394 / -0.416 | -0.50510 |
+| 2.00 | -9.201 / +7.461 / +9.024 / -7.419 | +1.792 / +1.770 | -0.14515 |
+| 2.20 | +0.151 / +6.960 / +0.013 / -7.403 | -2.302 / -2.398 | -0.11269 |
+| 2.40 | -7.109 / +7.736 / +7.522 / -7.245 | -1.245 / -0.962 | -0.00108 |
+| 2.60 | -7.975 / +7.959 / +7.937 / -7.962 | +0.502 / +0.487 | -0.00006 |
+| 3.00~6.00 | 约 -7.5 / +7.55 / +7.5 / -7.54 | ≈0 | ≈0 |
+
+`wbc_result` 实际字段为 `feasible / fallback_used / clip_applied / dynamics_residual_norm`，
+**没有 `scaling` 字段**（25.6 的 T4 该列无法给出）。
+范围：`max|ctrl[0:4]|=37.240`（限 40），`max|ctrl[4:6]|=6.000`（触到 MJCF ±6）；
+瞬态后（t>=1.967）`max|pitch|=0.24693 rad`。
+
+### T5 事件（CASE-A）
+
+```text
+t=1.000  跳跃开始
+t=1.153  进入压缩制动（右 0.2201/-0.776，左 0.2201/-0.776）
+t=1.324  压缩完成且下降已制动（右 0.1527/+0.001，左 0.1527/+0.001）
+t=1.437  推离完成（腿到达释放上限 0.2800 m，gap=-0.14 mm）
+t=1.767  几何接触恢复（落地腿长 0.3039 m，间隙 -2.74 mm，姿态 -42.92 deg）
+t=1.786  腿长回到标称邻域（0.2898 m）
+t=2.095  姿态与腿长进入正常包线（俯仰 2.86 deg），交还控制器
+```
+
+### P1 判读（按 25.7，只报数据）
+
+- **"目标跳变"：不成立** —— `sample.state[0]` 全程 **0 处** >0.01 m 的跳变（落地后它与 `distance` 逐点相等）。
+- **"闭环动态/过冲"：成立** —— `distance` 走 0.61531（缓冲底）-> **0.70178（t=2.470 过冲 +6.28 mm）** -> 0.69550；
+  `com_x` 走 0.66260（过冲 +16.07 mm）-> 0.64653；`com_vx` 由 +0.563 变 -0.110 再归零。
+  形态是**前进-后退-稳定**，但幅度只有 **6.3 mm / 16.1 mm**，没有米级"先前进一段再后退一段"。
+
+## 三、P2 数据（你的手测会话 run06，转向后起跳）
+
+### 输入时序（从 `cmd_v/cmd_w` 记录读出）
+
+| t [s] | 指令 |
+|---|---|
+| 0.000 | v=0, w=0 |
+| 0.600 | **v=1.5** |
+| 1.960 | v=0 |
+| 6.900 | **w=-9.6** |
+| 7.260 | w=0 |
+| 9.500 | **v=1.5** |
+| 10.560 | v=0 |
+| 14.500 | **v=1.5** |
+| 15.520 | v=0 |
+
+4 次空格起跳的触发时刻（由日志相位时刻反推并对齐 4 ms 网格）：**1.873 / 7.817 / 10.546 / 15.404 s**；
+全程**无 R 复位**。
+
+### T3（偏航；`sample.state[4]` 即 `ref[4]`，`planner_yaw_pos` 列缺失）
+
+| t [s] | 实测 yaw | `sample.state[4]` | `yaw_rate` | `cmd_w` |
+|---|---|---|---|---|
+| 6.00 | -0.04144 | -0.04144 | +0.1017 | +0.00 |
+| 6.90 | -0.00621 | -0.00621 | +0.0075 | **-9.60** |
+| 7.00 | -0.03081 | -0.03081 | -0.5597 | -9.60 |
+| 7.20 | -0.26685 | -0.26685 | -1.7047 | -9.60 |
+| 7.26 | -0.37530 | -0.37530 | -1.8911 | +0.00 |
+| 7.40 | -0.59911 | -0.59911 | -1.1907 | +0.00 |
+| 7.60 | -0.72448 | -0.72448 | -0.1801 | +0.00 |
+| **7.82（跳前）** | **-0.73201** | **-0.73201** | +0.0164 | +0.00 |
+| 8.00（FLIGHT） | -0.27852 | 记录为 None（`jump.active`） | **+3.1588** | +0.00 |
+| 8.24（FLIGHT） | +0.07838 | 记录为 None | +0.0047 | +0.00 |
+| 8.58（落地后） | +0.18126 | 记录为 None（落地瞬间 buffer） | +0.2811 | +0.00 |
+| 8.87 | +0.00449 | +0.00451 | -0.72（8.80） | +0.00 |
+| 9.20 | -0.02254 | -0.02254 | +0.0391 | +0.00 |
+
+- 转向段 yaw 峰值 **-0.73288 @ t=7.82**（记为 Y）；`cmd_w` 在 7.26 归零后 yaw 仍继续转到 -0.733。
+- 第 2 跳：触发 7.817，FLIGHT **8.245 -> 8.573**，落地 8.573。
+- `max|sample.state[4] - 实测 yaw| = 0.00568 rad @ t=3.996`（该时刻 yaw=-0.04909、ref=-0.04341）——**没有参考丢失**。
+
+### 四跳对照（跳前 / 落地后 0.3 s）
+
+| 跳 | 跳前 t / yaw / ref | 落地后 0.3 s 的 t / yaw / ref |
+|---|---|---|
+| 1 | 1.77 / +0.00020 / +0.00020 | 2.95 / +0.00039 / +0.00039 |
+| 2 | 7.72 / **-0.73282** / **-0.73282** | 8.87 / **+0.00449** / **+0.00451** |
+| 3 | 10.44 / -0.00678 / -0.00678 | 11.68 / +0.00006 / （ref 记录为 None） |
+| 4 | 15.30 / -0.00054 / -0.00054 | 16.56 / -0.00186 / （ref 记录为 None） |
+
+### P2 判读（按 25.7，只报数据）
+
+- **"`sample.state[4]` 由 Y 变 ≈0 -> 参考丢失"：不成立。** 跳前 ref 与实测**同为 -0.73282**；
+  飞行段 `sample` 本身为 None（`jump.active` 时 WBC 不取 MPC 参考）；落地后 ref 与实测同为 ≈+0.0045。
+- **"ref 始终 ≈Y 而实测回零 -> 跟踪问题"：不成立。** ref 一路跟随实测（差最大 0.00568 rad）。
+- **数据事实**：`cmd_w` 已在 7.26 归零，而**实测 yaw 在飞行段由 -0.73201（7.82）变到 +0.07838（8.24）**，
+  Δ=**+0.811 rad**，同期 `yaw_rate` 峰值 **+3.1588 rad/s（t=8.00）**；落地后收敛到 ≈0。
+- **CASE-C（同输入不跳）未跑**（缺 25.4 入口），所以"偏航回落是否与起跳有关"这一条**无法给结论**。
+
+## 四、run03：你说"落地劣化"的那次会话（护栏统计）
+
+| 项 | 值 |
+|---|---|
+| 跳跃次数 / ABORT | 1 / **0** |
+| 起跳（COMPRESS_BRAKE）t | 2.432 s（空格触发），离地 2.729 |
+| 落地 t = 3.049 -> RECOVER 3.066 -> IDLE **3.067**（缓冲 17 ms，验收工况为 18 ms，同量级） |
+| 落地后护栏告警 | `attitude_guard` **9**、`speed_guard` **8**、`joint_limit` **18**（jAG/jIO/jOP/jGH/jAB 组合） |
+
+落地相位机行为与验收工况一致（无 ABORT、缓冲时长同量级）；落地后姿态与速度触发护栏。
+
+## 五、复刻（你的 run06 键盘输入）
+
+- 复刻只复刻**键盘**：9 段 `cmd_v/cmd_w` + 4 次空格触发（1.873/7.817/10.546/15.404），**不复刻鼠标推扰**。
+- 复刻结果：4 跳的相位时刻与你的会话**完全一致**（brake 2.031/7.973/10.682/15.542；flight 2.329/8.245/11.033/15.905；
+  landing 2.651/8.573/11.379/16.260）；里程 **5.5053 m**（你的记录 `s` 末值 5.8458 m）。
+- 与你的记录逐点比对（3597 个可比点）：`max|Δdistance|=1.78 m`、`max|Δv|=3.91`、`max|Δpitch|=1.13`、
+  `max|Δtorque|=27.5`；**首差出现在 t≈3.1 s**（第 1 跳落地后 0.45 s）。→ 说明除键盘外还有别的输入（鼠标推扰无法复刻）。
+- 视频：`videos/REPLAY_run06_keys_25fps.mp4`（19.5 s / 488 帧 / 25 fps / 跟踪相机）。
+
+## 六、未完成项（如实列出）
+
+1. **25.3 的 5 个诊断字段当前不在代码里**（已从工作区回退），本批数据也没有这些键 —— 因此
+   T1 的 `landing_window`、T2 的 `planner_forward_pos`、T3 的 `planner_yaw_pos`、T4 的 `scaling` 四列缺失。
+   要补齐需要重新实现 25.3 并重跑（属新改动，等指令）。
+2. **25.4 的偏航入口不在**，`CASE-B/CASE-C` 未跑；P2 的"是否与起跳有关"缺对照。
+3. **逐位回归未做**：当前工作区相对 HEAD 只有 `tools/video.py`（回放参数，+42 行，不涉控制）；
+   25.3/25.4 已不存在，因此没有"本轮诊断记录改变控制行为"需要验证。
+
+## 七、结论（只写数据支持的现象）
+
+1. **P1（位置收敛）**：`sample.state[0]` 全程 **0 处** >0.01 m 跳变 -> 不是目标跳变；
+   闭环表现为落地后**前进 6.3 mm（`distance`）/ 16.1 mm（`com_x`）再退回**并稳定（`com_vx` +0.563 -> -0.110 -> 0），
+   位置从未回到负值（符号翻转 0 处）。幅度远小于"米级前进后退"的描述。
+2. **P2（偏航）**：参考没有丢失（跳前/落地后 ref 与实测同值，最大差 0.00568 rad），也不是跟踪问题
+   （ref 始终跟随实测）；**实测 yaw 在飞行段改变了 0.811 rad**（-0.73201 -> +0.07838，`yaw_rate` 峰 +3.1588 rad/s @8.00 s），
+   而 `cmd_w` 早在 7.26 s 已归零。缺少 CASE-C 对照，"是否与起跳有关"本轮不给结论。
+3. 复刻只覆盖键盘输入即可复现 4 跳的相位时刻（误差 0），但轨迹从第 1 跳落地后 0.45 s 起分叉 ->
+   会话里存在键盘以外的输入（鼠标推扰），该差异不是代码差异。
+
+================================================================
+
+--- 附：本轮工作区 diff（上文说“diff 见末尾”，此处补上）---
+
+工作区相对 HEAD（1e18f95）的非文档改动只有 tools/video.py：
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/tools/video.py
+ D "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy.pdf"
+```
+
+```diff
+diff --git a/wheel_leg_mujoco/tools/video.py b/wheel_leg_mujoco/tools/video.py
+index d9ed1f8..0a019b6 100644
+--- a/wheel_leg_mujoco/tools/video.py
++++ b/wheel_leg_mujoco/tools/video.py
+@@ -12,6 +12,9 @@
+ from __future__ import annotations
+ 
+ import argparse
++import bisect
++import gzip
++import json
+ import subprocess
+ import sys
+ from pathlib import Path
+@@ -67,6 +70,12 @@ def parse_args() -> argparse.Namespace:
+     # CMD（16.3）：有输入速度指令录像。默认 0.0 = 保持原行为（零指令）。
+     parser.add_argument("--command-velocity", type=float, default=0.0,
+                         help="CMD：0~hold 期间的速度指令 [m/s]，0 = 不加指令")
++    # 回放一次真实会话的键盘输入（第 25 节）：读 view 的 --output records，按 cmd_v/cmd_w 复刻；
++    # --jump-times 给出每次空格起跳的仿真时刻（配合 --jump-time inf 关掉定时触发）。
++    parser.add_argument("--replay", type=Path, default=None,
++                        help="回放文件：view --output 写出的 records json.gz（按 cmd_v/cmd_w 时序）")
++    parser.add_argument("--jump-times", type=str, default="",
++                        help="空格起跳时刻列表，逗号分隔 [s]（配合 --jump-time inf）")
+     parser.add_argument("--command-hold", type=float, default=3.0,
+                         help="CMD：速度指令保持时长 [s]（之后归零）")
+     # 相机：默认自由相机（原行为）；tracking 时跟随 body("base")，否则机体一走远就出画。
+@@ -107,8 +116,40 @@ def main() -> int:
+     if args.push_time >= 0.0:
+         disturbances = (Disturbance(time=args.push_time,
+                                      delta_velocity=(args.push_speed, 0.0, args.push_speed_z)),)
++    # 回放：把 records 里的指令时序压成"值变化点"分段，回放时按时间取当段值。
++    replay_segments = None
++    if args.replay is not None:
++        with gzip.open(args.replay, "rt", encoding="utf-8") as handle:
++            payload = json.load(handle)
++        records = payload["records"] if isinstance(payload, dict) else payload
++        segments = []
++        previous = None
++        for item in records:
++            key = (round(float(item["cmd_v"]), 6), round(float(item["cmd_w"]), 6))
++            if key != previous:
++                segments.append((float(item["t"]), key[0], key[1]))
++                previous = key
++        replay_segments = segments
++        _LOGGER.info("回放输入：%d 段指令 %s", len(segments),
++                     [(round(t, 3), v, w) for t, v, w in segments])
++    jump_times = [float(x) for x in args.jump_times.split(",") if x.strip()]
++    jump_done = [False] * len(jump_times)
++    _LOGGER.info("回放起跳时刻：%s", jump_times)
++
+     # CMD：与 view.py / jump_diagnostic 同签名的按时间定值回调；velocity=0 时退回零指令对象。
+-    if args.command_velocity != 0.0:
++    if replay_segments is not None:
++        segment_times = [seg[0] for seg in replay_segments]
++
++        def command(time_s: float) -> MotionCommand:
++            index = bisect.bisect_right(segment_times, float(time_s) + 1e-9) - 1
++            velocity, yaw_rate = ((replay_segments[index][1], replay_segments[index][2])
++                                  if index >= 0 else (0.0, 0.0))
++            for k, when in enumerate(jump_times):
++                if not jump_done[k] and float(time_s) >= when:
++                    jump_done[k] = True
++                    sim.request_jump()
++            return MotionCommand(velocity=velocity, yaw_rate=yaw_rate)
++    elif args.command_velocity != 0.0:
+         hold = float(args.command_hold)
+         value = float(args.command_velocity)
+ 
+```
+
+
+================================================================
+26 YAW-JUMP（P2）+ 27 P1-REANCHOR：实现与验收
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：YAW-JUMP（第 26 节）+ P1-REANCHOR（第 27 节）
+
+## 一、代码改动（完整 diff）
+
+**26（`wbc.py` 的 `sample is None` 分支，4 行）**：pitch/pitch_rate 仍归 0；`reference[4]=state.yaw`、
+`reference[5]=0`。跳跃期偏航任务退化为角速度阻尼。
+
+**27**：
+- `planner.py`：新增 `reanchor_from_measurement()`（内部调 `_align`，不复制逻辑）、
+  `mark_reference_frozen()`、`reference_frozen` property；`__init__`/`reset()`/`_align()` 里清 False。
+- `loop.py`：`jump_command.active` 每拍调一次 `sim.mpc.planner.mark_reference_frozen()`。
+- `controller.py`：`reset(soft=True)` 分支按 `reference_frozen` 分流；
+  `soft_reanchor` 本体与现有调用点**未改**。
+- `jump_diagnostic.py`：恢复 `--command-yaw-rate/--command-yaw-hold`（26.4 的 CASE-B/C 需要它；
+  该入口是 25.4 加的，后来被回退，这里按原样恢复，默认 0.0）。
+
+静态检查：`grep reference_frozen` 只出现在 `planner.py` / `loop.py` / `controller.py`（10 处，全在这三个文件）。
+
+```diff
+diff --git a/Algorithm/mpc/controller.py b/Algorithm/mpc/controller.py
+index 7ff9a79..1e26fcd 100644
+--- a/Algorithm/mpc/controller.py
++++ b/Algorithm/mpc/controller.py
+@@ -492,8 +492,13 @@ class WheelMPC:
+         if soft and self.settings.preserve_ramp_on_recontact and state is not None:
+             # ANCHOR-3（2026-10-17，用户同意）：位置锚点仅在真正驱动过时才跟到实际位置。
+             # 零输入（commanded_motion=False）保持原锚点，否则扰动/离地会把目标改写成“被推到的位置”。
+-            self.planner.soft_reanchor(state.position, state.yaw,
+-                                       reset_position=bool(self.planner.commanded_motion))
++            if self.planner.reference_frozen:
++                # 第 27 节：跳跃把斜坡冻结过，旧速度/加速度与实测不同源，改用实测重新播种。
++                self.planner.reanchor_from_measurement(
++                    state.position, state.yaw, state.velocity, 0.0, "jump_landing")
++            else:
++                self.planner.soft_reanchor(state.position, state.yaw,
++                                           reset_position=bool(self.planner.commanded_motion))
+             self.consecutive_failures = 0
+             self.degraded = False
+             return
+diff --git a/Algorithm/mpc/planner.py b/Algorithm/mpc/planner.py
+index 43cdd17..4fd35e7 100644
+--- a/Algorithm/mpc/planner.py
++++ b/Algorithm/mpc/planner.py
+@@ -299,6 +299,7 @@ class VelocityPlanner:
+         if not np.all(np.isfinite([speed, yaw_rate, position or 0.0, yaw or 0.0])):
+             raise ValueError("Reference reset must be finite")
+         self._forward = _RampState(position or 0.0, speed)
++        self._reference_frozen = False
+         self._yaw = _RampState(yaw or 0.0, yaw_rate)
+         self._initialized = position is not None and yaw is not None
+         self.mode = ReferenceMode.RESET
+@@ -329,12 +330,30 @@ class VelocityPlanner:
+         _LOGGER.info("参考软重锚: reset_position=%s s=%.4f yaw=%.4f measured=%.4f",
+                      reset_position, self._forward.position, yaw, position)
+ 
++    def reanchor_from_measurement(self, position: float, yaw: float, speed: float,
++                                  yaw_rate: float, reason: str = "jump_landing") -> None:
++        """用**实测速度**重新播种斜坡（参考可能被冻结过时用）。
++
++        与 ``soft_reanchor`` 的区别：位置、偏航、速度、角速度全部取自同一时刻的实测，
++        不保留斜坡旧值。轮圈腿的 ``_align`` 就是这个语义（内部直接调用，不复制逻辑）。
++        """
++        self._align(float(position), float(yaw), float(speed), float(yaw_rate), reason)
++
++    def mark_reference_frozen(self) -> None:
++        """记录"参考斜坡被冻结过"（跳跃期 motion_enabled=False，斜坡不再推进）。"""
++        self._reference_frozen = True
++
++    @property
++    def reference_frozen(self) -> bool:
++        return bool(self._reference_frozen)
++
+     def _align(self, position: float, yaw: float, speed: float, yaw_rate: float, reason: str,
+                reset_position: bool = True) -> None:
+         # reset_position=False keeps the travel target where it was: a pure
+         # velocity hold must not move the position goal away from the origin.
+         self._forward = _RampState(position if reset_position else self._forward.position, speed)
+         self._yaw = _RampState(yaw, yaw_rate)
++        self._reference_frozen = False
+         self._initialized = True
+         self._hold_time = 0.0
+         self._commanded = False
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index c0f0355..b57ffb0 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -110,6 +110,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+         step_time = float(d.time)
+         # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
+         sim.dyn.begin_step()
++        # 第 27 节：跳跃激活期间斜坡会被冻结（motion_enabled=False 不推进），
++        # 落地后的软重锚必须改用实测速度重新播种，不能用冻结前的旧速度。
++        if jump_command is not None and jump_command.active:
++            sim.mpc.planner.mark_reference_frozen()
+         # 手动复位（第 24 节）：view 里按 R。实体与控制栈由 sim.reset_run 负责，
+         # 本函数自己持有的跳跃/帧计时状态在这里一并清掉（它们不属于 sim）。
+         if reset_key is not None and reset_key():
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+index 8d1132e..42658db 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+@@ -203,8 +203,15 @@ class Gbc486Tasks:
+         reference = (state.vector(self.state_dim) if sample is None else sample.state)
+         acceleration = (np.zeros(self.state_dim) if sample is None else sample.acceleration)
+         if sample is None:
++            # 第 26 节（YAW-JUMP）：只有 pitch 两通道继续归 0（直立是正确行为）；
++            # 偏航两通道改成"保持当前朝向 + 角速度目标 0"，即跳跃期偏航任务退化为
++            # 角速度阻尼，不再跟踪世界系 0。因为 reference[4] 每拍等于实测 yaw，
++            # kp*(reference[4]-state.yaw) 恒为 0。
+             reference = reference.copy()
+-            reference[2:6] = 0.0
++            reference[2] = 0.0            # pitch 目标：直立
++            reference[3] = 0.0            # pitch_rate 目标
++            reference[4] = state.yaw      # 偏航：保持当前朝向（不归中）
++            reference[5] = 0.0            # 偏航角速度目标 0
+         pitch_target = acceleration[1] + kp * (reference[2] - state.pitch) + kd * (reference[3] - state.pitch_rate)
+         roll_target = -kp * roll - kd * (task_rows[1] @ data.qvel)
+         # 显式冻结参考（非 None）覆盖上面两个默认目标（本轮不改变默认 None 的行为）。
+diff --git a/wheel_leg_mujoco/tools/jump_diagnostic.py b/wheel_leg_mujoco/tools/jump_diagnostic.py
+index dd39360..779169e 100644
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++++ b/wheel_leg_mujoco/tools/jump_diagnostic.py
+@@ -161,7 +161,8 @@ def _disturbance(case):
+     raise ValueError(f"unsupported case: {case}")
+ 
+ 
+-def _command(case, velocity: float, hold: float):
++def _command(case, velocity: float, hold: float,
++             yaw_rate: float = 0.0, yaw_hold: float | None = None):
+     """CMD（16.3）：与 ``tools/view.py`` 同签名的按时间定值回调，只用于有输入工况。
+ 
+     ``0 ~ hold`` 给 ``velocity``，``hold`` 之后归零；其它 case 仍返回 ``default_command()``（零指令）。
+@@ -170,9 +171,11 @@ def _command(case, velocity: float, hold: float):
+     if case != "command_velocity":
+         return default_command()
+ 
++    yaw_until = float(hold) if yaw_hold is None else float(yaw_hold)
++
+     def command(time_s: float) -> MotionCommand:
+         return MotionCommand(velocity=(float(velocity) if float(time_s) < float(hold) else 0.0),
+-                             yaw_rate=0.0)
++                             yaw_rate=(float(yaw_rate) if float(time_s) < yaw_until else 0.0))
+ 
+     return command
+ 
+@@ -182,7 +185,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
+              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
+              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
+              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
+-             command_velocity=0.5, command_hold=3.0):
++             command_velocity=0.5, command_hold=3.0,
++             command_yaw_rate=0.0, command_yaw_hold=None):
+     RESULTS.mkdir(exist_ok=True)
+     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
+     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
+@@ -191,7 +195,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
+                               jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
+     sim = Gbc486MpcWbcSimulation(config)
+     frames = []
+-    sim.run(_command(case, command_velocity, command_hold), duration,
++    sim.run(_command(case, command_velocity, command_hold,
++                     yaw_rate=command_yaw_rate, yaw_hold=command_yaw_hold), duration,
+             disturbances=_disturbance(case), trace_sink=frames.append,
+             explicit_jump_reference=explicit_jump_reference, compression_only=compression_only,
+             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
+@@ -267,6 +272,11 @@ def main():
+                         help="CMD：0~hold 期间的速度指令 [m/s]")
+     parser.add_argument("--command-hold", type=float, default=3.0,
+                         help="CMD：速度指令保持时长 [s]（之后归零）")
++    # 第 26 节 CASE-B/C 需要偏航指令入口（25.4 曾加过、后被回退，这里按原样恢复）。
++    parser.add_argument("--command-yaw-rate", type=float, default=0.0,
++                        help="CMD：0~yaw_hold 期间的偏航角速度指令 [rad/s]，默认 0 保持原行为")
++    parser.add_argument("--command-yaw-hold", type=float, default=None,
++                        help="CMD：偏航指令保持时长 [s]；缺省沿用 --command-hold")
+     parser.add_argument("--run-id", default="run01")
+     parser.add_argument("--duration", type=float, default=3.0)
+     parser.add_argument("--jump-height", type=float, default=0.10)
+@@ -321,6 +331,8 @@ def main():
+              mpc_force_feedforward=args.mpc_force_feedforward,
+              wheel_torque_limit=args.wheel_torque_limit,
+              command_velocity=args.command_velocity,
++             command_yaw_rate=args.command_yaw_rate,
++             command_yaw_hold=args.command_yaw_hold,
+              command_hold=args.command_hold)
+ 
+ 
+```
+
+## 二、26 验收：偏航不再归中
+
+### CASE-B（转向 0.3 rad/s 到 1.2 s，t=2.0 起跳，8 s）
+
+`Y` = 触发起跳那一拍（t=2.0）的 yaw = **+0.3461**（改前改后相同）。
+
+| 项 | 改前 | 改后 | 判据 | 结果 |
+|---|---|---|---|---|
+| 压缩+推力段 `max|yaw-Y|` | **0.3876** | **0.0003** | ≤0.05 | 通过 |
+| FLIGHT 段 `max|yaw-Y|` | **0.3876** | **0.0014** | ≤0.05 | 通过 |
+| 落地后 6 s `max|yaw-Y|` | **0.3796** | **0.0031** | ≤0.05 且不向 0 靠 | 通过 |
+| 末值 yaw | +0.0001（回中了） | **+0.3489**（保持 Y） | 不向 0 靠 | 通过 |
+| 落地时刻 | 2.751 | 2.751 | — | — |
+
+飞行段 yaw 轨迹（抽样）：改前 `-0.041, -0.040, -0.039, -0.038, -0.036, -0.035, -0.034`（一路奔向 0）；
+改后 `0.346, 0.346, 0.347, 0.347, 0.347, 0.347, 0.347`（保持 Y）。
+
+### CASE-C（同输入不跳，对照）
+
+改前 vs 改后：`max|dqpos| = 0.000e+00`（完全一致），末 yaw 0.3471。
+
+### 回归（分通道）
+
+| 工况 | 位置/速度/控制 | pitch | yaw 通道 | 判据 | 结果 |
+|---|---|---|---|---|---|
+| T1x（零输入） | **0.000e+00** | **0.000e+00** | **0.000e+00** | 逐位 0 | 通过 |
+| CMD1x（速度指令 0.5） | **0.000e+00** | **0.000e+00** | **0.000e+00** | 逐位 0 | 通过 |
+| T2x（`delta_velocity` 扰动） | **6.96e-05** | 4.50e-07 | **2.13e-05** | 逐位 0 / yaw <=1e-6 | **未通过** |
+| JUMPx 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max|pitch|` 0.24452 | — | — | 同量级 | 通过 |
+
+T2 偏差的定位（有证据）：**首差 t=1.177 s**，正好是 1.0 s 竖直扰动之后控制器进入
+`motion_enabled=False` 的窗口（该工况共 **223 帧**处于该状态）；此窗口内 `sample=None`，
+偏航目标由常数 0 改成实测 yaw（≈1e-5 rad 量级），经 QP 耦合到位置与控制通道。
+这正是 26.5 风险第 1 条描述的情形。偏差量级：位置 6.96e-05 m、yaw 2.13e-05 rad、ctrl 2.63e-03 N·m，
+末态 `distance` 两者都是 -0.000005 m。
+
+## 三、27 验收：机制生效，但本工况下**看不到轨迹差异**
+
+### 机制确认（已实测）
+
+落地段确实走新分支：`reanchor_from_measurement` 被调用 **13 次**（frozen=True），
+传入速度来自实测（1.19 / 1.406 / 1.619 / 1.83 / …）；跳跃结束后
+`planner.reference_frozen` 末值为 **False**（27.6 风险 1 的"标记是否清除"通过）。
+
+### A/B（同工况：v=1.5 到 1.96 s，t=1.873 起跳，8 s）
+
+把 `reference_frozen` 强制为 False 即为"改前"，其余完全相同：
+
+| 时刻 | 改前 ref_v / ref_a | 改后 ref_v / ref_a |
+|---|---|---|
+| 2.400 | +0.9570 / **-1.508** | +1.1905 / **+0.000** |
+| 2.440 | +0.9570 / -1.508 | +1.6192 / +0.000 |
+| 2.480 | +0.9570 / -1.508 | +1.8382 / +0.000 |
+| 2.520 | +0.9570 / -1.508 | +1.6153 / +0.000 |
+| 2.560 | +0.9570 / -1.508 | +1.3955 / +0.000 |
+| 2.640 | +0.9570 / -1.508 | +1.5294 / +0.000 |
+| 2.680 及以后 | 两版完全相同（1.4511 / 0.000 …） | 同 |
+
+**但是：`max|dqpos| = 0.000e+00`（逐位相同）**。原因（数据）：2.40~2.64 s 这段
+`decision.motion_enabled=False`，WBC 拿到的是 `sample=None`（不读规划器参考），
+规划器的 `ref_v/ref_a` 差异**没有进入控制**；2.68 s 之后两版规划器状态已收敛到同一值。
+
+### 主判据（本工况实测，改前 = 改后）
+
+| 判据 | 要求 | 实测（两版相同） | 结果 |
+|---|---|---|---|
+| 落地后 `ref_v <= v + 0.10` | 任何时刻 | `max(ref_v - v) = +0.1683 @ t=3.612 s` | 两版相同，未改善也未恶化 |
+| 落地后无正向大加速度 | 不出现 +41.87 | `max ref_a = +3.800`（= 制动限值） | 改前值 +41.87 **headless 未复现** |
+| 落地后前冲 <=0.05 m | — | 从落地到最远 **+1.7131 m**（其中大部分是 1.37 m/s 的制动距离，非落地前冲） | 口径未对齐，见下 |
+
+### 回归（相对 26 之后的代码，即 T1x/T2x/CMD1x/JUMPx）
+
+| 对比 | 结果 |
+|---|---|
+| T1y vs T1x | `dqpos = dqvel = dctrl = 0.000e+00` |
+| T2y vs T2x | 同上，逐位 0 |
+| CMD1y vs CMD1x | 同上，逐位 0 |
+| JUMPy vs JUMPx | 同上，逐位 0（本改动对"原地跳"工况零影响） |
+| JUMPy 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max|pitch|` 0.24452 |
+
+## 四、结论（只写数据支持的现象）
+
+1. **26 已达成功能判据**：转向后起跳时偏航不再归中（`|yaw-Y|` 从 0.3876 降到 **0.0003/0.0014**，
+   落地后 6 s 0.0031，末值保持 Y=0.349）；CASE-C 逐位不变；T1/CMD1 逐位不变；跳跃 6 项不变。
+2. **26 的唯一偏差在 T2**（`delta_velocity` 工况）：位置 6.96e-05 m、yaw 2.13e-05 rad、ctrl 2.63e-03，
+   首差精确落在 1.177 s 的 `motion_enabled=False` 窗口（223 帧）——即 26.5 风险 1；
+   该工况**不满足**"逐位全 0"和"yaw 差 <=1e-6"这两条。
+3. **27 的机制已生效**（落地段 13 次实测重锚，标记事后清除），但在"v=1.5 + t=1.873 起跳"的复现工况里
+   改前/改后 **`dqpos` 逐位相同**：规划器参考的差异发生在 `motion_enabled=False` 区间，WBC 不读它。
+   → 本轮**无法用轨迹证明 27 改善了 P1**；文档引用的改前 `ref_a=+41.87` 在 headless 复现中**没有出现**
+   （实测最大值 +3.800，等于制动限值）。
+4. 27 的四项回归全部逐位 0（含跳跃工况），说明它对现有验收工况零影响。
+
+## 五、需要你定的两件事
+
+1. **T2 的偏差怎么算**：26.4 要求 T2「逐位全 0」且 yaw 差 <=1e-6，实测分别 6.96e-05 / 2.13e-05。
+   成因是 `motion_enabled=False` 窗口（启动与扰动后）本就改偏航目标，属 26.5 已列风险。
+   是要接受这个量级（改判据），还是要求把改动限制在"跳跃激活"时才生效（需要额外判据，属新改动）？
+2. **27 的验收购造**：要看到 `ref_a` 由 +41.87 降到 ≤3.8，需要一个"落地瞬间 `motion_enabled` 仍为真、
+   软重锚被真正执行"的工况。你那次是 viewer + 鼠标会话。可选：
+   (a) 我给你一个搜索脚本，在 headless 里扫起跳时刻/速度组合，找到"落地后 motion_enabled=True 且改前 ref_a 尖峰"的工况再验收；
+   (b) 你用 view 复现一次并把记录给我，我按 27.5 口径算（但含鼠标，复刻不保证一致）。
+   要哪个，等你指令。
+
+================================================================

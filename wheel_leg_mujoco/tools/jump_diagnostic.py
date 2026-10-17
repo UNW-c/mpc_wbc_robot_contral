@@ -161,7 +161,8 @@ def _disturbance(case):
     raise ValueError(f"unsupported case: {case}")
 
 
-def _command(case, velocity: float, hold: float):
+def _command(case, velocity: float, hold: float,
+             yaw_rate: float = 0.0, yaw_hold: float | None = None):
     """CMD（16.3）：与 ``tools/view.py`` 同签名的按时间定值回调，只用于有输入工况。
 
     ``0 ~ hold`` 给 ``velocity``，``hold`` 之后归零；其它 case 仍返回 ``default_command()``（零指令）。
@@ -170,9 +171,11 @@ def _command(case, velocity: float, hold: float):
     if case != "command_velocity":
         return default_command()
 
+    yaw_until = float(hold) if yaw_hold is None else float(yaw_hold)
+
     def command(time_s: float) -> MotionCommand:
         return MotionCommand(velocity=(float(velocity) if float(time_s) < float(hold) else 0.0),
-                             yaw_rate=0.0)
+                             yaw_rate=(float(yaw_rate) if float(time_s) < yaw_until else 0.0))
 
     return command
 
@@ -182,7 +185,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
-             command_velocity=0.5, command_hold=3.0):
+             command_velocity=0.5, command_hold=3.0,
+             command_yaw_rate=0.0, command_yaw_hold=None):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
@@ -191,7 +195,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
                               jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
-    sim.run(_command(case, command_velocity, command_hold), duration,
+    sim.run(_command(case, command_velocity, command_hold,
+                     yaw_rate=command_yaw_rate, yaw_hold=command_yaw_hold), duration,
             disturbances=_disturbance(case), trace_sink=frames.append,
             explicit_jump_reference=explicit_jump_reference, compression_only=compression_only,
             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
@@ -267,6 +272,11 @@ def main():
                         help="CMD：0~hold 期间的速度指令 [m/s]")
     parser.add_argument("--command-hold", type=float, default=3.0,
                         help="CMD：速度指令保持时长 [s]（之后归零）")
+    # 第 26 节 CASE-B/C 需要偏航指令入口（25.4 曾加过、后被回退，这里按原样恢复）。
+    parser.add_argument("--command-yaw-rate", type=float, default=0.0,
+                        help="CMD：0~yaw_hold 期间的偏航角速度指令 [rad/s]，默认 0 保持原行为")
+    parser.add_argument("--command-yaw-hold", type=float, default=None,
+                        help="CMD：偏航指令保持时长 [s]；缺省沿用 --command-hold")
     parser.add_argument("--run-id", default="run01")
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--jump-height", type=float, default=0.10)
@@ -321,6 +331,8 @@ def main():
              mpc_force_feedforward=args.mpc_force_feedforward,
              wheel_torque_limit=args.wheel_torque_limit,
              command_velocity=args.command_velocity,
+             command_yaw_rate=args.command_yaw_rate,
+             command_yaw_hold=args.command_yaw_hold,
              command_hold=args.command_hold)
 
 

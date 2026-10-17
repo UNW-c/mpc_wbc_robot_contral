@@ -492,8 +492,13 @@ class WheelMPC:
         if soft and self.settings.preserve_ramp_on_recontact and state is not None:
             # ANCHOR-3（2026-10-17，用户同意）：位置锚点仅在真正驱动过时才跟到实际位置。
             # 零输入（commanded_motion=False）保持原锚点，否则扰动/离地会把目标改写成“被推到的位置”。
-            self.planner.soft_reanchor(state.position, state.yaw,
-                                       reset_position=bool(self.planner.commanded_motion))
+            if self.planner.reference_frozen:
+                # 第 27 节：跳跃把斜坡冻结过，旧速度/加速度与实测不同源，改用实测重新播种。
+                self.planner.reanchor_from_measurement(
+                    state.position, state.yaw, state.velocity, 0.0, "jump_landing")
+            else:
+                self.planner.soft_reanchor(state.position, state.yaw,
+                                           reset_position=bool(self.planner.commanded_motion))
             self.consecutive_failures = 0
             self.degraded = False
             return

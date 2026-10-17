@@ -110,6 +110,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         step_time = float(d.time)
         # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
         sim.dyn.begin_step()
+        # 第 27 节：跳跃激活期间斜坡会被冻结（motion_enabled=False 不推进），
+        # 落地后的软重锚必须改用实测速度重新播种，不能用冻结前的旧速度。
+        if jump_command is not None and jump_command.active:
+            sim.mpc.planner.mark_reference_frozen()
         # 手动复位（第 24 节）：view 里按 R。实体与控制栈由 sim.reset_run 负责，
         # 本函数自己持有的跳跃/帧计时状态在这里一并清掉（它们不属于 sim）。
         if reset_key is not None and reset_key():

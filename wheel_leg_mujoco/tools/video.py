@@ -12,6 +12,9 @@
 from __future__ import annotations
 
 import argparse
+import bisect
+import gzip
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -67,6 +70,12 @@ def parse_args() -> argparse.Namespace:
     # CMD（16.3）：有输入速度指令录像。默认 0.0 = 保持原行为（零指令）。
     parser.add_argument("--command-velocity", type=float, default=0.0,
                         help="CMD：0~hold 期间的速度指令 [m/s]，0 = 不加指令")
+    # 回放一次真实会话的键盘输入（第 25 节）：读 view 的 --output records，按 cmd_v/cmd_w 复刻；
+    # --jump-times 给出每次空格起跳的仿真时刻（配合 --jump-time inf 关掉定时触发）。
+    parser.add_argument("--replay", type=Path, default=None,
+                        help="回放文件：view --output 写出的 records json.gz（按 cmd_v/cmd_w 时序）")
+    parser.add_argument("--jump-times", type=str, default="",
+                        help="空格起跳时刻列表，逗号分隔 [s]（配合 --jump-time inf）")
     parser.add_argument("--command-hold", type=float, default=3.0,
                         help="CMD：速度指令保持时长 [s]（之后归零）")
     # 相机：默认自由相机（原行为）；tracking 时跟随 body("base")，否则机体一走远就出画。
@@ -107,8 +116,40 @@ def main() -> int:
     if args.push_time >= 0.0:
         disturbances = (Disturbance(time=args.push_time,
                                      delta_velocity=(args.push_speed, 0.0, args.push_speed_z)),)
+    # 回放：把 records 里的指令时序压成"值变化点"分段，回放时按时间取当段值。
+    replay_segments = None
+    if args.replay is not None:
+        with gzip.open(args.replay, "rt", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        records = payload["records"] if isinstance(payload, dict) else payload
+        segments = []
+        previous = None
+        for item in records:
+            key = (round(float(item["cmd_v"]), 6), round(float(item["cmd_w"]), 6))
+            if key != previous:
+                segments.append((float(item["t"]), key[0], key[1]))
+                previous = key
+        replay_segments = segments
+        _LOGGER.info("回放输入：%d 段指令 %s", len(segments),
+                     [(round(t, 3), v, w) for t, v, w in segments])
+    jump_times = [float(x) for x in args.jump_times.split(",") if x.strip()]
+    jump_done = [False] * len(jump_times)
+    _LOGGER.info("回放起跳时刻：%s", jump_times)
+
     # CMD：与 view.py / jump_diagnostic 同签名的按时间定值回调；velocity=0 时退回零指令对象。
-    if args.command_velocity != 0.0:
+    if replay_segments is not None:
+        segment_times = [seg[0] for seg in replay_segments]
+
+        def command(time_s: float) -> MotionCommand:
+            index = bisect.bisect_right(segment_times, float(time_s) + 1e-9) - 1
+            velocity, yaw_rate = ((replay_segments[index][1], replay_segments[index][2])
+                                  if index >= 0 else (0.0, 0.0))
+            for k, when in enumerate(jump_times):
+                if not jump_done[k] and float(time_s) >= when:
+                    jump_done[k] = True
+                    sim.request_jump()
+            return MotionCommand(velocity=velocity, yaw_rate=yaw_rate)
+    elif args.command_velocity != 0.0:
         hold = float(args.command_hold)
         value = float(args.command_velocity)
 

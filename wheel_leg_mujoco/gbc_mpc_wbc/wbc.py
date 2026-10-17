@@ -203,8 +203,15 @@ class Gbc486Tasks:
         reference = (state.vector(self.state_dim) if sample is None else sample.state)
         acceleration = (np.zeros(self.state_dim) if sample is None else sample.acceleration)
         if sample is None:
+            # 第 26 节（YAW-JUMP）：只有 pitch 两通道继续归 0（直立是正确行为）；
+            # 偏航两通道改成"保持当前朝向 + 角速度目标 0"，即跳跃期偏航任务退化为
+            # 角速度阻尼，不再跟踪世界系 0。因为 reference[4] 每拍等于实测 yaw，
+            # kp*(reference[4]-state.yaw) 恒为 0。
             reference = reference.copy()
-            reference[2:6] = 0.0
+            reference[2] = 0.0            # pitch 目标：直立
+            reference[3] = 0.0            # pitch_rate 目标
+            reference[4] = state.yaw      # 偏航：保持当前朝向（不归中）
+            reference[5] = 0.0            # 偏航角速度目标 0
         pitch_target = acceleration[1] + kp * (reference[2] - state.pitch) + kd * (reference[3] - state.pitch_rate)
         roll_target = -kp * roll - kd * (task_rows[1] @ data.qvel)
         # 显式冻结参考（非 None）覆盖上面两个默认目标（本轮不改变默认 None 的行为）。

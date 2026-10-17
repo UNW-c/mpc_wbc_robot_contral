@@ -2285,7 +2285,336 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
   2. 未验证的方面：连续跳时 MPC/WBC 的跨跳行为（只验证不崩、不 ABORT）。
 
 ================================================================
-25. 交付队列
+25. 排查：落地位置收敛异常 + 起跳偏航归零（2026-10-17）
+================================================================
+
+25.1 用户手测现象（原话整理）
+
+  | 编号 | 现象 |
+  |---|---|
+  | P1 | 边前进边起跳。落地时已无前进输入，但落地后先前进一段、再后退一段、
+    再稍微前进一点收敛住。 |
+  | P2 | 转了一点偏航角之后触发起跳，机器人的偏航角归零后才跳，而不是保持当前偏航角。 |
+
+  已确认的代码事实（用于缩小范围，不代表结论）：
+  - `grep yaw jump.py` 零命中 -> 跳跃规划器不写偏航目标；
+  - `control.py:372` 落地窗口内强制打开 motion 组，含 yaw，目标来自 `sample.state[4]`；
+  - `planner.soft_reanchor()` 会把 `_yaw` 重锚到传入值，调用方传 `state.yaw`。
+
+25.2 本轮禁止事项
+
+  1. **不改任何增益/权重/限幅/阈值/时间常数/控制频率。**
+  2. 不改 `landing_window` 帧数、不改 `soft_reanchor` 语义、不改跳跃相位机逻辑。
+  3. 不改判据、不放宽阈值。只加“记录”与“测试入口参数”。
+  4. 本轮结论必须是数据，不允许用“可能是...”归因。
+
+25.3 需要新增的诊断记录（纯记录，不参与控制）
+
+  （a）帧记录新增字段（均只读）：
+
+  | 字段 | 内容 |
+  |---|---|
+  | `planner_forward_pos` / `planner_forward_vel` | 规划器 `_forward` 的位置与速度目标 |
+  | `planner_yaw_pos` / `planner_yaw_vel` | 规划器 `_yaw` 的偏航目标与偏航角速度目标 |
+  | `landing_window` | 当期 `landing_window` 布尔值 |
+  | `command_yaw_rate` | 当期指令偏航角速度（与已有的 `command_velocity` 同源） |
+
+  若 `planner` 不对外暴露 `_forward`/`_yaw`，允许加只读 property，不得改变内部逻辑。
+
+  （b）事件日志（INFO，已有格式不变）：
+  - `跳跃开始` / 相位切换行；
+  - `轨迹参考重锚: reset_position=... s=... yaw=... measured=...`；
+  - `event=align Reference reset: hold_capture, s=... v=... yaw=...`。
+
+25.4 测试入口改动：`jump_diagnostic.py` 支持偏航指令
+
+  `jump_diagnostic.py:175` 当前 `yaw_rate=0.0` 写死。新增：
+
+  ```
+  --command-yaw-rate <float>   默认 0.0（= 现有行为逐位不变）
+  --command-yaw-hold <float>   偏航指令保持时长 [s]，语义与 --command-hold 一致
+  ```
+
+  实现要求：只在构造 `MotionCommand` 那一处把常量换成参数，不得改动其它逻辑；
+  先贴 `--help` 原文回采。
+
+25.5 两个测试工况
+
+  **CASE-A（复现 P1）**
+
+  ```
+  --case command_velocity --command-velocity 0.5 --command-hold 2.0 \
+  --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 \
+  --leg-length-compression --leg-length-thrust --flight-zero-torque \
+  --flight-leg-retract --flight-leg-extend
+  ```
+
+  时序：t≈0~0.5 加速到 0.5，t=1.0 起跳，落地约 1.75，`--command-hold 2.0`
+  使指令在落地后不久归零 -> 对应“落地时已无前进输入”。
+  时长 8.0 s（观察收敛全过程）。
+
+  **CASE-B（复现 P2）**
+
+  ```
+  --case command_velocity --command-velocity 0.0 \
+  --command-yaw-rate 0.3 --command-yaw-hold 1.2 \
+  --jump-height 0.18 --jump-stroke 0.12 --jump-time 2.0 \
+  --leg-length-compression --leg-length-thrust --flight-zero-torque \
+  --flight-leg-retract --flight-leg-extend
+  ```
+
+  时序：t≈0~1.2 以 0.3 rad/s 转向，t=2.0 起跳。时长 6.0 s。
+
+  **CASE-C（对照，用于分离开跳影响）**
+  同 CASE-B 但不跳（加 `--no-jump`）。用来判断“偏航回落”是否与起跳相关。
+
+25.6 必须产出的数据表（每份结果逐项给值）
+
+  | 表 | 列 |
+  |---|---|
+  | T1 时间线 | t、`jump.phase`、`decision.mode`、`landing_window` |
+  | T2 位置 | t、`distance`、`sample.state[0]`、`planner_forward_pos`、`com_x`、`com_vx` |
+  | T3 偏航 | t、实测 yaw、`sample.state[4]`、`planner_yaw_pos`、`yaw_rate`、`command_yaw_rate` |
+  | T4 控制 | t、`ctrl[0:4]`、`ctrl[4:6]`、`pitch`、`wbc_result.scaling` |
+  | T5 事件 | 重锚/对齐/相位切换的 t 与全部字段值 |
+
+  时间窗口：起跳前 0.5 s 到落地后 3.0 s，至少每秒 4 个采样点，另加：
+  - `distance` 的极大/极小值及其时刻；
+  - 位置由正转负、由负转正的拐点时刻；
+  - `sample.state[0]` 任何一次跳变 > 0.01 m 的时刻与前后值；
+  - `sample.state[4]` 与实测 yaw 的差的最大值及时刻。
+
+25.7 判读规则（测试agent只报数据，不归因）
+
+  P1：若 `sample.state[0]` 在落地后出现 > 0.01 m 的跳变 -> 属“目标跳变”；
+  若 `sample.state[0]` 平稳而 `distance` 走前->后->微前 -> 属“闭环动态/过冲”。
+  （两者可同时成立，分开报。）
+
+  P2：若 `sample.state[4]` 在起跳前后由 Y 变为 ≈0 -> 参考丢失；
+  若 `sample.state[4]` 始终 ≈Y 而实测 yaw 回零 -> 执行/跟踪问题；
+  若 CASE-C（不跳）也回落 -> 与起跳无关，属偏航参考通路。
+  需同时报：转向前 yaw、转向后 yaw（记作 Y）、跳前/跳后/落地后 yaw。
+
+25.8 交付要求
+
+  1. 四个结果文件：`CASE-A`、`CASE-B`、`CASE-C`（每份 json.gz + log）；
+  2. 上述 T1~T5 表全部给出实际数值（不许只写结论）；
+  3. 同一结果重复取数两次必须一致；
+  4. 回归：本轮诊断记录不得改变控制行为，
+     `T1p/T2p/CMD1p/JUMPp` 与基线逐位全 0（或说明为何无法逐位）。
+
+================================================================
+26. YAW-JUMP：跳跃期不再把偏航目标归零（2026-10-17）
+================================================================
+
+26.1 根因（已定位，代码 + 数据双证）
+
+  `control.py:282`：跳跃激活时 MPC 参考被切断：
+
+  ```python
+  if sample_override is not None:  sample = sample_override
+  elif jump.active:                sample = None      # 整个跳跃期
+  else:                            sample = sample_raw
+  ```
+
+  `wbc.py:203-207` 的 `sample is None` 分支：
+
+  ```python
+  if sample is None:
+      reference = reference.copy()
+      reference[2:6] = 0.0        # pitch, pitch_rate, yaw, yaw_rate 全置 0
+  ```
+
+  而 `yaw_target = acceleration[2] + kp*wrap_angle(reference[4] - state.yaw) + kd*(reference[5] - state.yaw_rate)`
+  -> `reference[4] = 0`，**偏航目标是世界系 0，不是当前朝向**。
+
+  实测（MANUAL_keys_run06 第 2 跳，用户键鼠会话）：
+
+  | 时刻 | 事件 | yaw | yaw_rate |
+  |---|---|---|---|
+  | 7.80 | 跳前 | **-0.7323** | +0.015 |
+  | 7.96 | 压缩段 | -0.4113 | **+3.446** |
+  | 8.244 | FLIGHT 开始前一刻 | **+0.0784** | +0.005 |
+  | 8.576 | 落地 | +0.1813 | +0.281 |
+
+  0.81 rad 的变化全部发生在 **7.84~8.24 的压缩/推力段**（还在地面），
+  FLIGHT 是 8.245~8.573，仅变化 0.10 rad。
+  `yaw_rate` 先升到峰再平滑衰到 0，**恰在 yaw 过 0 时归零** -> 是“跟踪 0 目标”的形状。
+
+26.2 改动（`wbc.py` 的 `sample is None` 分支，4 行）
+
+  ```python
+  if sample is None:
+      reference = reference.copy()
+      reference[2] = 0.0            # pitch 目标：直立（保持原行为）
+      reference[3] = 0.0            # pitch_rate 目标
+      reference[4] = state.yaw      # 偏航：保持当前朝向（不归中）
+      reference[5] = 0.0            # 偏航角速度目标 0
+  ```
+
+  语义后果（必须写清）：因为 `reference[4]` 每拍等于实测 yaw，
+  `kp*(ref[4]-yaw) ≡ 0`，**跳跃期偏航任务退化为“偏航角速度阻尼”**，
+  不再跟踪任何绝对偏航目标。这正是想要的：不跟跳、但阻尼残角速度。
+
+  只改 yaw 两通道，**不得改 pitch/pitch_rate**（跳跃期保持直立是正确行为）。
+
+26.3 不改的事
+
+  1. 不改 `control.py:282` 的 sample 切换条件；
+  2. 不改 `planner.soft_reanchor`（P1 单独一轮，第 27 节）；
+  3. 不改任何增益/权重/限幅/阈值/时间常数。
+
+26.4 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 功能 | 转向后起跳（CASE-B） | 起跳前 yaw 记 Y；压缩/推力/飞行期 `|yaw-Y| <= 0.05 rad` |
+  | 功能 | 落地后 | 6 s 内 `|yaw-Y| <= 0.05 rad` 且不再向 0 靠 |
+  | 对照 | CASE-C（不跳） | 与改前一致（不受本改动影响） |
+  | 回归 | 零偏航工况 T1w/T2w/CMD1w | pitch/pitch_rate/位置/速度通道**逐位一致**；
+    yaw 通道差量级 <= 1e-6 rad（参考由常数 0 变为实测 yaw≈1e-4） |
+  | 回归 | 跳跃 6 项 | 间隙 >=0.20 m、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、
+    瞬态后 `max|pitch|` 与验收工况同量级 |
+  | 手测 | view | 转一段后按空格：机器人保持当前朝向起跳、落地不归中 |
+
+  记录：压缩/推力/飞行/落地四段的 yaw 与 yaw_rate 时间线，以及起跳前 yaw Y。
+
+26.5 风险
+
+  1. `sample is None` 分支不只在跳跃时进入（例如启动阶段无 MPC 解、recovery）。
+     那些时刻把偏航目标改成实测 yaw 也是正确的（没理由把姿态拉向世界 0），
+     但需在回归表里单独确认启动阶段无异常。
+  2. 本改动会改变所有含偏航的工况的数值，因此**不能用逐位 0 差异作为全局判据**，
+     只能按 26.4 分通道判定。
+
+================================================================
+27. P1：落地重锚的速度/加速度与位置锚点不同源（2026-10-17）
+================================================================
+
+27.1 现象与证据（MANUAL_keys_run06 第 1 跳，用户键鼠会话，车速 1.5 m/s）
+
+  | t | `cmd_v` | `v` 实测 | `ref_v` | `ref_a` | planner |
+  |---|---|---|---|---|---|
+  | 2.892 | 0.00 | +0.647 | +0.6123 | -10.46 | brake |
+  | 2.972 | 0.00 | +1.5611 | **+1.5763** | **+41.87** | brake |
+  | 3.372 | 0.00 | -0.1174 | — | — | brake |
+  | 3.532 | 0.00 | -0.0372 | +0.0186 | **+18.83** | brake |
+
+  -> 指令为 0、planner 处于 `brake`，却输出 `ref_v` 高于实测、`ref_a = +41.87 m/s^2`
+  （制动加速度限值仅 3.80）。
+  位置走 s=2.265 -> 2.744（**前进 0.479 m**）-> 2.699（**后退 0.045 m**）-> 稳定。
+
+  根因位置：`planner.py:313-323` `soft_reanchor()`
+
+  ```python
+  self._forward = _RampState(float(position) if reset_position else self._forward.position,
+                             self._forward.velocity,          # <- 保留
+                             self._forward.acceleration)      # <- 保留
+  ```
+
+  **位置搬成实测值，但 velocity / acceleration 保留起跳前的值** -> 三个状态量来自三个时刻，
+  重建 S 曲线时出现正向大加速度。
+
+27.2 轮圈腿的做法（参考实现，已核实）
+
+  `planner.py:417-431` 的 `BRAKE` 分支：
+
+  ```python
+  elif self.mode != ReferenceMode.HOLD:
+      self.mode = ReferenceMode.BRAKE
+      if limits.reanchor_position_while_braking and self.commanded_motion:
+          # 只重锚位置，保留斜坡速度与加速度（减速仍按规划进行）
+          self._forward = _RampState(position, self._forward.velocity, self._forward.acceleration)
+      stopped = (abs(self.speed) < 1e-12 and abs(self.yaw_rate) < 1e-12
+                 and abs(speed) <= limits.hold_speed and abs(yaw_rate) <= limits.hold_yaw_rate
+                 and abs(fb.pitch - limits.equilibrium_pitch) <= limits.hold_pitch
+                 and abs(fb.pitch_rate) <= limits.hold_pitch_rate
+                 and all(fb.contact) and not fb.slipping)
+      self._hold_time = self._hold_time + dt if stopped else 0.0
+      if self._hold_time + 1e-12 >= limits.hold_dwell:
+          self._align(position, measured_yaw, 0.0, 0.0, "hold_capture", reset_position=False)
+  ```
+
+  关键差异：
+
+  | | 轮腿现在的 `soft_reanchor` | 轮圈腿 `_align` |
+  |---|---|---|
+  | 位置 | 可搬到实测 | 搬到实测 |
+  | 速度 | **保留斜坡旧值** | **显式传入**（停下时 0） |
+  | 加速度 | **保留斜坡旧值** | 重建时归 0 |
+
+  轮圈腿保留速度是合理的：它的前提是**斜坡一直在推进**（BRAKE 里每拍按 `max_braking` 往下压）。
+  跳跃破坏了这个前提——`motion_enabled=False` 时斜坡**冻结**在起跳前的 1.4 m/s，
+  落地后原样装回 -> 参考速度高于实测 -> `ref_a = +41.87`。
+
+27.3 改动（照轮圈腿语义）
+
+  （a）`planner.py` 新增公开方法（内部直接调 `_align`，不复制逻辑）：
+
+  ```python
+  def reanchor_from_measurement(self, position, yaw, speed, yaw_rate, reason="jump_landing"):
+      """用实测速度重新播种斜坡（参考可能被冻结过时使用）。"""
+      self._align(float(position), float(yaw), float(speed), float(yaw_rate), reason)
+  ```
+
+  （b）`planner.py` 新增冻结标记（状态记录，**不是阈值**）：
+
+  ```python
+  self._reference_frozen = False       # __init__ 与 reset()/ _align() 里清 False
+  def mark_reference_frozen(self):     # 由 loop.py 在跳跃激活时每拍调用
+      self._reference_frozen = True
+  @property
+  def reference_frozen(self) -> bool:
+      return self._reference_frozen
+  ```
+
+  （c）`loop.py`：`jump_command.active` 为真的每一拍调一次 `sim.mpc.planner.mark_reference_frozen()`。
+
+  （d）`controller.py` 的 `reset(soft=True)` 分支：
+
+  ```python
+  if self.planner.reference_frozen:
+      self.planner.reanchor_from_measurement(
+          state.position, state.yaw, state.velocity, 0.0, "jump_landing")
+  else:
+      self.planner.soft_reanchor(state.position, state.yaw,
+                                 reset_position=bool(self.planner.commanded_motion))
+  ```
+
+  **`soft_reanchor` 及其现有调用点一律不改**（零输入扰动、有输入减速两条通道不动）。
+
+27.4 不改的事
+
+  1. 不改 `soft_reanchor` 本体与它现有的调用点；
+  2. 不改 `MotionLimits` 任何字段（`hold_speed`/`hold_dwell`/`max_braking` 等不动）；
+  3. 不改任何增益/权重/限幅/阈值；
+  4. 不改跳跃相位机。
+
+27.5 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | 落地后 `ref_v` vs 实测 `v` | 任何时刻 `ref_v <= v + 0.10`（不得再出现参考高于实测驱动的加速） |
+  | 主判据 | 落地后 `ref_a` | 不出现正向大加速度（改前为 +41.87，限值 3.80） |
+  | 主判据 | 落地后位置 | 前冲幅度 <= 0.05 m（改前 0.479 m），不出现反向回退 |
+  | 回归 | T1w（零输入扰动） | 与改前**逐位全 0**（该工况 `reference_frozen` 恒 False） |
+  | 回归 | CMD1w / T2w（有输入减速） | 与改前**逐位全 0** |
+  | 回归 | 跳跃 6 项 | 间隙 >=0.20 m、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max\|pitch\|` 同量级 |
+  | 静态 | `grep reference_frozen` | 只出现在 `planner.py` / `loop.py` / `controller.py` |
+
+  记录：落地前后 1 s 的 `ref_v`/`ref_a`/`v`/`s` 时间线，以及 `mark_reference_frozen` 首次/末次置位时刻。
+
+27.6 风险
+
+  1. 若 `jump.active` 在接地闪烁时短暂为真，会误置冻结标记；因标记只在 `_align`/`reset` 时清除，
+     影响限于下一次软重锚。需在验收里确认跳跃结束后标记已被清除。
+  2. 本改动会改变跳跃落地后的数值，**不能用逐位 0 作为跳跃工况的判据**；
+     零输入与有输入两个非跳跃工况必须逐位 0。
+  3. 若实测 `state.velocity` 本身在落地瞬间有尖峰，用它播种会把尖峰带进参考；
+     验收里需同时报落地瞬间的 `v` 与 `ref_v` 首值。
+
+================================================================
+28. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -2320,10 +2649,13 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
 | 28 | **PERF** | **可跑（第 22 节规格）** | 消除每步重复计算，要求逐位一致 | — |
 | 29 | **PERF2** | **已回退**（倍率 0.350 -> 0.216，净亏） | 显示刷新改按墙钟 | — |
 | 30 | 网格替代 | 暂不做 | base_link.STL 91441 顶点，单次 sync 9.27 ms | 待定 |
-| 31 | **KB+RJUMP** | **可跑（第 24 节规格）** | 键鼠控制 + 空格重复跳 | — |
-| 32 | 待定 | 排队 | `view.py` 注释与实测不符 | — |
-| 33 | 待定 | 排队 | `controller.py:418` 覆盖改叠加 + 核对 `zmp_crank_radius` | — |
-| 34 | 待定 | 排队 | `wbc.py:247` `acceleration[3]` -> `acceleration[6]` | — |
-| 35 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
+| 31 | **KB+RJUMP** | 已完成（35779c5 / 1e18f95） | 键鼠控制 + 空格重复跳 | — |
+| 32 | **DIAG-P1P2** | 已完成（仅排查，无代码） | 排查落地位置收敛异常 + 起跳偏航归零 | — |
+| 33 | **YAW-JUMP** | **可跑（第 26 节规格）** | 跳跃期偏航不再是 0 目标（wbc.py 4 行） | — |
+| 34 | **P1-REANCHOR** | **可跑（第 27 节规格）** | 落地重锚用实测速度重新播种（照轮圈腿 `_align`） | — |
+| 35 | 待定 | 排队 | `view.py` 注释与实测不符 | — |
+| 36 | 待定 | 排队 | `controller.py:418` 覆盖改叠加 + 核对 `zmp_crank_radius` | — |
+| 37 | 待定 | 排队 | `wbc.py:247` `acceleration[3]` -> `acceleration[6]` | — |
+| 38 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
 
 ================================================================
