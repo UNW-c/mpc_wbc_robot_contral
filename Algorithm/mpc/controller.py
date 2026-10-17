@@ -490,7 +490,10 @@ class WheelMPC:
         偏航到实测值，保留规划器的速度、加速度斜坡与 commanded 标记（短时离地 / 恢复往返用）。
         """
         if soft and self.settings.preserve_ramp_on_recontact and state is not None:
-            self.planner.soft_reanchor(state.position, state.yaw)
+            # ANCHOR-3（2026-10-17，用户同意）：位置锚点仅在真正驱动过时才跟到实际位置。
+            # 零输入（commanded_motion=False）保持原锚点，否则扰动/离地会把目标改写成“被推到的位置”。
+            self.planner.soft_reanchor(state.position, state.yaw,
+                                       reset_position=bool(self.planner.commanded_motion))
             self.consecutive_failures = 0
             self.degraded = False
             return

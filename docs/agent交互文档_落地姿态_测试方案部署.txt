@@ -185,7 +185,7 @@ LAND5 与 LAND2B 的首处差异：t=2.2120，六个通道同时变，`max|dctrl
    若预演显示"逐位不变"，不提这个测试。预演脚本与结果必须写进方案。
 
 ================================================================
-6. 下一轮方案（N1）——已定案（候选 A）
+6. N1：落地窗口 motion_override（已完成，全部判据通过）
 ================================================================
 
 6.1 原始设想（已作废）
@@ -337,7 +337,7 @@ ABORT / assertion_failures：
 结论（只写数据支持的现象）：
 
 ================================================================
-7. 下一轮方案（R1 + LAND3）—— 用户三步顺序的第 2 步，合并为一轮
+7. R1 + LAND3：腿角世界系锚定（已完成，全部判据通过）
 
 7.1 证据（N1 数据，已复核）
 
@@ -491,7 +491,1067 @@ ABORT / assertion_failures：
   结论（只写数据支持的现象）：
 
 ================================================================
-8. 交付队列
+8. P-b：MPC 计划力前馈接线（本轮，已定案，交付测试agent）
+
+8.1 为什么接这里（依据）
+
+  MPC 在跑，计划自洽且可行，**但计划力从未进过 WBC**：
+  - `loop.py:589` / `simulation.py:531` 只把 `solution.force` 写进 trace；
+  - `control.py` 里 `external=None`，`tau_ff` 只在 VMC 相位；
+  - WBC 只从 `sample.state` / `sample.acceleration` 取参考。
+
+  实测 t=2.996（`R1_LAND3_baseline_run01.json.gz`）：MPC 计划 `force = [-53.32, -53.33]`，
+  WBC 实际出 `[+0.036, +0.041]` ≈ 0。而 WBC 的 `forward_velocity` 任务在这一拍
+  `desired +3.0636 / achieved +0.0659 / residual -2.9977`，
+  执行器几乎闲置（轮 0.6%、髀 19%）、`scaling` 全 1.0、`feasible=True`。
+
+  离线复算（`tools/wbc_frame_replay.py`，自检与记录力矩/qacc **逐元素 0.000e+00**）：
+  **只留 fv（其余 activation=0）时 fv 能 100% 达成**（`qacc[0]=+3.0635`），轮力矩仅 0.437 N*m；
+  8 任务全开时不达成。所以是**分配**问题，接前馈正好绕过它。
+
+  另：落地窗口 MPC 还计划了“继续后滚”——t=2.0 时 `reference[1] = -0.6749`、
+  目标位置 -0.2574，即**计划内接受了 0.26 m 后退**。重锤另开一轮，本轮不动。
+
+8.2 符号约定（一步物理推进实测，必须照此实现，不得凭直觉改）
+
+  `nv=20 nu=6`，轮执行器 `ctrl[4]`=右轮、`ctrl[5]`=左轮，左轮 `gainprm=-1`。
+  在 t=2.9962 的状态上单步 `mj_step(0.001 s)`：
+
+  | ctrl[4], ctrl[5] | Δqvel[0]（基座 x） | 说明 |
+  |---|---|---|
+  | 零对照 | -4.350e-04 | 自由响应 |
+  | 同号 +1,+1 | **-7.975e-04** | 驱动（向后） |
+  | 反号 +1,-1 | -4.347e-04 | ≈零，纯俯仰力矩 |
+  | `+R*f` 同号 | -4.627e-04 | 同上 |
+  | `+R,-R*f` | -4.349e-04 | ≈零 |
+
+  结论：
+  1. **同号 `ctrl[4]=ctrl[5]` = 驱动；反号 = 纯俯仰力矩。**
+  2. **正 ctrl = 向后加速**（同号 +1,+1 使基座后退，约 -0.36 m/s² 每 N*m）。
+  3. 左轮 `gainprm=-1` 与 `model.py:171` 的 `-R*force[1]` 两次相消
+     => **`ctrl[4] = +R*f[0]`、`ctrl[5] = +R*f[1]`（同号）**。
+  4. 于是 **MPC 的 `force>0` = 向后（刹车）**，与 `mpc_model_B[1,:] < 0` 一致；
+     且 `simulation.py:150` 用 `force_limit = wheel_limit / reduced.wheel_radius` 设输入界，
+     反向印证 `tau = f*R`。
+  5. 验算：t≥2.26 的 `force=[-53.32,-53.33]` -> `tau_ff=[-4.106,-4.106]` -> **向前加速（刹车）**，
+     与“把后滚停住”的意图一致。
+
+8.3 改动（4 个文件，默认关闭；不是单变量时需逐项列出）
+
+  1. `wheel_leg_mujoco/tools/jump_diagnostic.py`：新增 `--mpc-force-feedforward`
+     （`store_true`，默认 False），按现有其它开关同样的方式透传。
+  2. `wheel_leg_mujoco/gbc_mpc_wbc/simulation.py`：仅在 `run` 的签名上加该开关的透传。
+  3. `wheel_leg_mujoco/gbc_mpc_wbc/loop.py`：把新开关与 `sim.reduced.wheel_radius` 传给 `wbc_stage`。
+  4. `wheel_leg_mujoco/gbc_mpc_wbc/control.py::wbc_stage`：新增入参
+     `mpc_force_feedforward: bool = False`、`wheel_radius: float | None = None`；
+     在现有 `tau_ff = np.zeros(dynamics.model.nu)` 那一段旁边算：
+
+  若开关为真、`solution` 非空、`wheel_radius` 有效：
+  `f = np.asarray(solution.force, dtype=float)`
+  `tau_ff[dynamics.wheel_actuators[0]] = +wheel_radius * f[0]`
+  `tau_ff[dynamics.wheel_actuators[1]] = +wheel_radius * f[1]`
+  `feedforward_active = True`
+
+     然后**走与 VMC 前馈完全同一套路径**：`tau_ff` 折进 `dynamics_bias` 与执行器限幅，
+     求解后再叠加；前馈期间跳过扰动补偿（已有互斥规则）；按 INFO 记日志
+     （至少含 `f`、`tau_ff`、生效帧数）。
+
+  `R` 取 `sim.reduced.wheel_radius`（`model_builder.wheel_radius(model)`，与 `simulation.py:150`
+  用的是同一个），**不写死数值**。
+
+  不得改动：任何增益、权重、阀值、限幅、估计器参数、`jump.py` 的相位判据、N1/LAND3 的行为。
+  `landing_window`（N1/LAND3）保持不变，本开关**独立于它**。
+
+8.4 命令
+
+  新开关关闭（免费回归，必须与 R1_LAND3 逐位一致）：
+
+    tools/jump_diagnostic.py --stage PbOff --case baseline --run-id run01 --duration 8.0 \
+        --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+        --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+  新开关打开（本轮主测）：
+
+    同一条命令 + `--mpc-force-feedforward`，`--stage Pb`。
+
+  对照：`results/R1_LAND3_d8_baseline_run01.json.gz`（8 s）。
+
+8.5 判据
+
+  | 类别 | 指标 | 目标 | R1_LAND3 基线 |
+  |---|---|---|---|
+  | 主 | 触地后峰值后滚位移 | 显著下降 | **1.1145 m**（8 s） |
+  | 主 | 末值 com_vx 绝对值 | < 0.02 m/s | -0.256（3 s）/ +0.042（8 s） |
+  | 约束 | 瞬态后（t ≥ 1.9430）\|pitch\| | ≤ 0.2618 rad（15°） | 从未超过；t≥2.05 起 1.4°；8 s 末 3.83° |
+  | 接受 | 触地 pitch -42.0° / 瞬态峰 45.5° | 不设限 | — |
+  | 回归 | 飞行段最大轮间隙 | ≥ 0.200 | 0.22153 |
+  | 回归 | 腿长越界 / ABORT / 单支撑 / airborne_zero 帧 | 0 / 0 / 0 / 0 | 全 0 |
+  | 验证 | `PbOff` 与 R1_LAND3_d8 全程逐位 | 全 0.0 | — |
+  | 验证 | `Pb` 与 R1_LAND3_d8 首处差异时刻与通道 | 必须不再逐位相同 | — |
+
+  测试窗口用 **8 s**（3 s 看不出慢漂移）。
+
+8.6 反馈格式
+
+  VP编号：P-b
+  代码改动（4 个文件完整 diff，不截断）：
+  共同自检（py_compile / 执行器下标 / 重复取数一致 / git_status_short_raw 完整）：
+  PbOff 与 R1_LAND3_d8 全程逐位比对（max|dqpos| / max|dqvel| / max|dctrl|）：
+  前馈生效帧数与 `tau_ff` 峰值（轮力矩）：
+  Pb 与 R1_LAND3_d8 首处差异时刻与通道：
+  触地后峰值后滚位移（含时刻）/ 8 s 末 com_x、com_vx：
+  位移收敛时刻（|com_vx| < 0.02 首次达到）与 T_settle：
+  瞬态后 max|pitch|（含时刻）/ 8 s 末 pitch：
+  触地帧 pitch / 瞬态峰值 |pitch|：
+  飞行段最大轮间隙 / 腿长越界帧 / 单支撑 / airborne_zero 帧 / ABORT：
+  额外发现（可选）：
+  结论（只写数据支持的现象）：
+
+8.7 已知局限（写清楚以便归因）
+
+  1. MPC 计划力用到摩擦锥 **94%**（53.6 N vs 57.1 N），裕度很小；前馈直接放进去，
+     扰动下可能越界。判据里要记切向力峰值与摩擦上限的比值。
+  2. 本轮**不动重锤**，所以“计划内接受的 0.26 m 后退”仍在。
+  3. 15° 是**带裕度的约束**，不是紧约束；但 8 s 内 pitch 有约 -0.63°/s 的慢漂移，
+     超过 8 s 的窗口要重新评估。
+  4. 本轮**预期不再与 R1_LAND3 逐位相同**，必须报首差时刻与通道。
+
+================================================================
+9. 诊断工具（离线，只读结果文件，不碰控制路径）
+
+  `wheel_leg_mujoco/tools/wbc_frame_replay.py`（本轮新增，比任何一轮都该入库）
+
+  作用：用 `results/*.json.gz` 里已记录的 `qpos` / `qvel` / `sample` / `decision` / `distance`
+  重建**一拍** WBC 输入，直接调 `solve_wbc`，并对任务集做消融。
+
+  ```text
+  # 自检 + 任务消融（full / full-pitch / full-angle / full-length / full-fv /
+  #                   pitch+fv / pitch+angle+fv / pitch+length+fv / 只留fv / 只留pitch）
+  .venv/Scripts/python.exe wheel_leg_mujoco/tools/wbc_frame_replay.py \
+      --result R1_LAND3_baseline_run01.json.gz --times 2.996
+
+  # 硬约束零空间权威度（逐任务 ‖J·N‖/‖J‖）+ 与 result.hierarchy.null_space 交叉验证
+  ... --times 2.996 --authority
+
+  # 扫 forward_velocity 需求（按 t_stop 换算）看解是否跟着动
+  ... --times 2.996 --sweep-fv
+  ```
+
+  **自检口径**：`--times X` 且不带其它模式时，第一项必须打印
+  `[自检] 与记录力矩最大逐元素差 = ... ；qacc 最大逐元素差 = ... => 通过`。
+  不通过则本工具重建的输入与实跑不符，**当次所有结论作废**。
+  `--authority` 还会打印 `[交叉验证] 我算的 N·Nᵀ·M 与 result.hierarchy.null_space 最大逐元素差`。
+
+  本工具只读，不写结果文件，不改任何控制参数。
+
+================================================================
+10. P-b 第一轮结果 + WLIM / Pb2 规格（2026-10-17 修正）
+
+10.1 P-b 第一轮判读（未通过，主因在上一版规格）
+
+  通过：
+  - **`PbOff` 与 `R1_LAND3_d8` 全程 8000 帧逐位一致**（开关默认关闭零副作用）；
+  - 末值 `com_vx` +0.0419 -> **-0.0000**（< 0.02）；
+  - FLIGHT 最大轮间隙 0.21960 >= 0.200；ABORT 0。
+
+  未通过：
+  - 峰值后滚位移 1.1147 -> **1.3838 m**（变大）；
+  - 瞬态后 max|pitch| 0.2580（14.78°）-> **0.7578（43.42°）**，超 15°；
+  - 腿长越界 0 -> 50 帧；单支撑 0 -> 309；`airborne_zero` 0 -> 299；T_settle 0.4710 -> 3.9130。
+
+  根因（两条，都在上一版规格里）：
+  1) **没有窗口门控**。前馈从 t=0.1 第一拍 WBC 就生效（首差 t=0.1000，通道 4/5），
+     触地 pitch 由 -42.0° 变 -49.1°。=> 上一轮**不是单变量**，落地段现象被触地前变化污染。
+  2) **没有折叠**。`control.py:371-372` 的注释写“折进 `dynamics_bias` 与执行器限幅”，
+     但代码是 `dynamics_bias_solve = dynamics.dynamics_bias()`、`limits_solve = dynamics.limits`
+     原样传入，求解后才 `torque += tau_ff`。实测 `max|ctrl[4,5]| = 12.0000`（= 6+6），
+     `|ctrl|>6` 共 **948/8000** 帧，全落在 t=2.0~5.5。
+     （记一条**既有缺陷**：VMC 前馈路径同样如此，不是本轮引入。）
+
+  另：上一版判据的“位移收敛时刻（`|com_vx|<0.02` 首次达到）”漏了“触地后”，口径改。
+
+10.2 轮限幅变更（WLIM）—— 用户 2026-10-17 指定，目的：给 WBC 更多轮权限
+
+  机制：用**既有字段** `SimulationConfig.wheel_torque_limit`（`simulation.py:303`，
+  注释即“用户 2026-10-04：限幅力矩纳入优化备选范围”），`_apply_torque_limits()` 在
+  建 dynamics / MPC **之前**改 `actuator_ctrlrange`。**不改 MJCF**。
+
+  数值：**15.0 N*m**（来源：用户 2026-10-17 指定）。
+
+  影响（实测对比，必须写进报告）：
+
+  | 量 | 现在（沿 MJCF ±6） | 15.0 |
+  |---|---|---|
+  | `dynamics.limits` 轮（WBC 用的） | [-6, +6] | **[-15, +15]** |
+  | MPC `wheel_torque_limit` | 6.0 | 15.0 |
+  | MPC `force_limit = limit/R` | 77.922 N | **194.805 N** |
+  | MPC `yaw_moment_limit` | 38.182 | **95.455** |
+  | 髀限幅（不变） | `dynamics.limits` ±40 / `hip_torque_limit` 10 | 同 |
+
+  基线实测（`R1_LAND3_d8`）：MPC 计划力峰值 **55.09 N**，**0/7333 帧**顶到 77.922 界、
+  **0 帧**超过摩擦锥 71.3 N => **基线工况下该上界 inactive**。
+  但 `Pb`（状态偏离）里 **380 帧顶界、620 帧超摩擦锥**（峰 77.922 = 摩擦锥 109%）
+  => 偏标称时上界会变活跃。判据里用“MPC 计划力峰值”实测跟踪。
+
+10.3 Pb2 两处修正
+
+  1) **窗口门控**：`control.py::wbc_stage` 的前馈条件加 `and landing_window`
+     （`landing_window` 来自 `loop.py` 的 `jump_landed` 锁存，N1/LAND3 已在用）。
+  2) **真折叠（限幅自洽）**，与 VMC 同一段代码：
+
+  ```text
+  dynamics_bias_solve = dynamics.dynamics_bias()
+  limits_solve = dynamics.limits
+  若 feedforward_active:
+      limits_solve = dataclasses.replace(limits_solve,
+                       lower=limits_solve.lower - tau_ff,
+                       upper=limits_solve.upper - tau_ff)
+      dynamics_bias_solve = dynamics_bias_solve - dynamics.selection.T @ tau_ff
+  torque, result = control.solve_wbc(..., dynamics_bias=dynamics_bias_solve,
+                                     limits=limits_solve, ...)
+  torque = torque + tau_ff
+  ```
+
+  3) 工具：`jump_diagnostic.py` 新增 `--wheel-torque-limit`（float，默认 None = 沿 MJCF），
+     透传给 `SimulationConfig`。
+
+  不得改动：任何增益、权重、阈值、估计器参数、`jump.py` 相位判据、N1/LAND3 的行为。
+
+10.4 命令
+
+  `WLIM`：
+
+    tools/jump_diagnostic.py --stage WLIM --wheel-torque-limit 15.0 --duration 8.0 \
+        --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+        --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+
+  `Pb2`：同 `WLIM` + `--mpc-force-feedforward`，`--stage Pb2`。
+
+  对照：`WLIM` 对 `R1_LAND3_d8`；`Pb2` 对 `WLIM`。两条都要跑（同一次会话）。
+
+10.5 判据
+
+  **WLIM vs R1_LAND3_d8**（全部记录，用于归因；不预设优劣）：
+  - **MPC 计划力峰值**（关键：验证“控制律不变”）、顶界帧数、超摩擦锥帧数；
+  - 触地 pitch / 瞬态峰 |pitch| / 瞬态后 max|pitch|；
+  - 峰值后滚位移 / 末值 com_vx / 位移收敛时刻（**触地后**口径）/ T_settle；
+  - FLIGHT 最大轮间隙 / 腿长越界帧 / 单支撑帧 / airborne_zero 帧 / ABORT；
+  - `max|ctrl[4,5]|`。
+
+  **Pb2 vs WLIM**：
+
+  | 类别 | 指标 | 目标 |
+  |---|---|---|
+  | 主 | 触地后峰值后滚位移 | 比 WLIM 显著下降 |
+  | 主 | 末值 com_vx 绝对值 | < 0.02 m/s |
+  | 约束 | 瞬态后（t >= 首次回到 15° 之后）\|pitch\| | <= 0.2618 rad |
+  | 回归 | FLIGHT 最大轮间隙 | >= 0.200 |
+  | 回归 | 腿长越界 / 单支撑 / airborne_zero 帧 | 0 / 0 / 0 |
+  | 回归 | ABORT | 0 |
+  | 回归 | `max|ctrl[4,5]|` | <= 15.0 |
+  | 验证 | 触地段（t < 1.747）与 WLIM 逐位 | 全 0.0 |
+  | 记录 | 前馈生效帧数 / `tau_ff` 峰值 / 前馈帧里 \|force\| 与摩擦锥的比值峰值 | 只记录 |
+
+  测试窗口 **8 s**。
+
+10.6 反馈格式
+
+  VP编号：WLIM / Pb2（两条分开报）
+  代码改动（完整 diff，不截断；标出不属本轮的行）：
+  共同自检（py_compile / 执行器下标 / 重复取数一致 / git_status_short_raw 完整）：
+  实测 `dynamics.limits` 轮上下界与 MPC `force_limit`/`yaw_moment_limit`：
+  [WLIM] MPC 计划力峰值 / 顶界帧数 / 超摩擦锥帧数：
+  [WLIM] 触地后峰值后滚位移 / 末值 com_vx / 收敛时刻 / T_settle：
+  [WLIM] 触地 pitch / 瞬态峰 / 瞬态后 max|pitch|：
+  [WLIM] FLIGHT 间隙 / 越界 / 单支撑 / airborne_zero / ABORT / max|ctrl[4,5]|：
+  [Pb2] 触地段与 WLIM 逐位比对（max|dqpos| / max|dqvel| / max|dctrl|）：
+  [Pb2] 与 WLIM 首处差异时刻与通道：
+  [Pb2] 前馈生效帧数 / tau_ff 峰值 / \|force\| 与摩擦锥比值峰值：
+  [Pb2] 触地后峰值后滚位移 / 末值 com_vx / 收敛时刻 / T_settle：
+  [Pb2] 瞬态后 max|pitch| / max|ctrl[4,5]|：
+  [Pb2] FLIGHT 间隙 / 越界 / 单支撑 / airborne_zero / ABORT：
+  额外发现（可选）：
+  结论（只写数据支持的现象）：
+
+10.7 已知局限
+
+  1. `WLIM` 会**同时**抬高 MPC 的 `force_limit`（77.922 -> 194.805 N）与 `yaw_moment_limit`。
+     基线工况下 inactive（实测），但偏标称时可能变活跃。
+  2. 若 MPC 计划力超过摩擦锥（~71.3 N/轮），前馈会把**不可实现的力**直接送进执行器；
+     所以判据里必须记“前馈帧里 \|force\| 与摩擦锥的比值峰值”。
+  3. 15.0 N*m **无独立物理依据**（用户 2026-10-17 指定），注释里照此口径写。
+  4. `simulation.py:153` 注释 `# 4.0（circleg 5.0）` 已过时（实测读到 6.0），只记录不修。
+
+================================================================
+11. S1：12 s 零改动窗口测量（2026-10-17）
+================================================================
+
+11.1 为什么要这一轮：三个假设已判完，只剩 (c)
+
+  用户 2026-10-17 提出三个候选：
+    (a) 控制器规划本来就不打算收敛位移；
+    (b) 反馈数据源重新锚定有问题，控制器不去收敛位移；
+    (c) 测试本身的问题，观测窗口太小 -> 实际会收敛，只是慢。
+
+  用 `R1_LAND3_d8` 逐帧 `mpc_solution.reference` 已判：
+
+  (a) **不成立**。`reference[0]` = 位置目标，`reference[1]` = 速度目标：
+
+  | t | 位置目标 | 速度目标 | 实际 com_vx |
+  |---|---|---|---|
+  | 2.00 | -0.1997 | -0.6749 | -0.5042 |
+  | 2.50 | **-0.2574** | **+0.0000** | -0.2989 |
+  | 3.50 | -0.2574 | +0.0000 | -0.2745 |
+  | 4.50 | -0.2574 | +0.0000 | -0.2509 |
+  | 5.50 | -0.2574 | +0.0000 | -0.1980 |
+  | 6.50 | -0.2723 | -0.1375 | -0.0096 |
+  | 8.00 | -0.2822 | +0.0000 | +0.0419 |
+
+  **t>=2.50 速度目标就是精确的 0** -> 规划是要收敛的，收敛点 -0.2574
+  （触地 com_x = -0.1310 -> 接受 0.126 m 后退）。
+
+  (b) **部分成立，但量级不对**。位置目标确实浮动（-0.1997 -> -0.2574 -> -0.2822，
+      跟着实际位置往后漂，**从不要求回到触地点**），但漂移只有 0.08 m，
+      实际跑到 1.11 m -> **不是主因**。
+
+  (c) **成立，且是主因**：
+
+  | 判据 | 时刻 |
+  |---|---|
+  | 触地后最后一次 `\|com_vx\| >= 0.10` | **t = 6.134** |
+  | com_x 最靠后 -1.2457（后滚 1.1147 m） | **t = 6.538** |
+  | 触地后最后一次 `\|com_vx\| >= 0.05`（前向过冲 +0.050） | **t = 7.295** |
+  | 8 s 末 | com_x = -1.1895，已从最靠后回来 +0.0562 m，**仍在动** |
+
+  -> **约 6.5 s 的衰减振荡，8 s 窗口切在收敛过程中间。**
+
+11.2 本轮目的（只有这两个）
+
+  目的 1（主）：把 (c) 钉死——给出真实收敛时刻、最终落点、过冲是否衰减、是否进入稳态。
+
+  目的 2（关键未知）：定位“是什么让速度在 t≈5.25 才开始衰减”。
+
+  实测平台段（com_vx 的 1 s 均值）：
+
+  | 段 | 均值 |
+  |---|---|
+  | 2~3 s | -0.2323 |
+  | 3~4 s | -0.2654 |
+  | 4~5 s | -0.2493 |
+  | 5~6 s | -0.1922 |
+  | 6~7 s | -0.0142 |
+
+  速度目标从 t=2.5 就是 0，实际却以 -0.25 m/s 匀速滑行 2.5 s。
+  MJCF 里轮子 `damping/frictionloss/armature` 全 0（无损飞轮），动量只能靠控制力矩消掉。
+  **若能把这个“开始衰减”的时刻从 5.25 提前到 2.5，收敛时间就从 6.5 s 降到约 2.5 s。**
+  这是唯一有效的优化目标，不需提高跳高、不需改 pitch。
+
+  参考：摆腿权限已有实测（`R1_LAND3` t=2.05~2.40）：`phi_world` 前摆 +0.346 rad / 0.35 s
+  -> com_vx 从 -0.019 变到 -0.206，**Δv = 0.32 m/s，等效 0.58 m/s²**；
+  把 -0.25 m/s 在 1 s 内消掉只需 **0.25 m/s²** -> 摆腿权限是需求的 2.3 倍。
+  （这是下一步“摆腿减速/质心可行性”的可行性边界，本轮不用，只备案。）
+
+11.3 改动量：零
+
+  只加命令行参数，**不改任何代码、不改任何参数**：`--duration 3.0 -> 12.0`。
+  不允许为了“看得更清楚”加日志字段、改采样率、改记录步长。
+
+11.4 命令
+
+  ```text
+  tools/jump_diagnostic.py --stage S1 --case baseline --run-id run01 --duration 12.0 \
+      --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+      --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+  ```
+
+  对照：`R1_LAND3_d8`（8 s）。
+  预期：**t<8.0 段与 `R1_LAND3_d8` 逐位全 0**（同代码同参数，只多跑 4 s）。
+  若 t<8.0 出现差异，说明存在未被控制的随机源，**如实报首差时刻与通道，本轮结论作废**。
+
+11.5 取数清单（写死，不由测试agent自选窗口）
+
+  时间序列类：步长 0.1 s，t 从 1.7 到 12.0，给**完整表**（不要只给窗口均值）：
+
+  A. 速度/位置/姿态
+     `com_vx`、`com_x`、`pitch`、`pitch_rate`
+
+  B. 定位“5.25 s 减速”的候选量（逐帧）
+     - `leg_length_R` / `leg_length_L` 与各自 rate
+     - `leg_state[1] - pitch`（世界系腿角）及它对 `phi_eq(leg_length_R)` 的误差
+     - `ctrl[0..3]`（髀）、`ctrl[4,5]`（轮）、`wbc_raw_torque`
+     - `output_source` 的逐帧标签变化点（只列变化时刻 + 前后标签）
+     - `mpc_called` / `wbc_due`
+     - `mpc_solution.force` 两分量（逐帧）、`mpc_solution.reference` 前两分量（逐帧）
+     - `normal_forces` / `tangent_forces`
+     - `decision.motion_enabled`、mode
+     - `jump.phase`
+
+  C. 平滑后的速度（用于读衰减起点）
+     `com_vx` 的 **0.5 s 尾随均值**，步长 0.1 s，t 从 2.0 到 12.0，给完整表。
+     （不要求测试agent判“衰减起点”，只给表，由问题排查agent读。）
+
+11.6 判据
+
+  **硬性（回归，基线必须满足）**
+  - t<8.0 与 `R1_LAND3_d8` 逐位全 0（`max|dqpos| = max|dqvel| = max|dctrl| = 0.0`）
+  - FLIGHT 最大轮间隙 >= 0.200
+  - ABORT 0
+  - 腿长越界（>0.430 或 <0.114）0 帧
+  - 单支撑 / `airborne_zero` 0 帧
+  - 瞬态后 `|pitch| <= 0.2618`（15°）
+
+  **记录（不判优劣）**
+  - 三个吐径的分开报：`|com_vx|` 首次进入 0.10 / 0.05 / 0.02 且**此后不再超出**的时刻；
+    若到 12 s 仍未满足，写“12 s 内未满足”，**不要自行延长**。
+  - `com_x` 最靠后时刻与值、12 s 末值、从最靠后回来的量。
+  - `pitch` 在 8~12 s 是否仍以约 -0.63°/s 漂移（若碰 15°，如实报时刻）。
+
+11.7 反馈格式
+
+  ```text
+  VP编号：S1
+  实跑 --duration 与墙钟：
+  共同自检（py_compile / 执行器下标 leg=(0,1,2,3) wheel=(4,5) / 重复取数一致 / git_status_short_raw 完整）：
+  t<8.0 与 R1_LAND3_d8 逐位比对（max|dqpos| / max|dqvel| / max|dctrl| / 首差时刻）：
+  FLIGHT 最大轮间隙 / ABORT / 腿长越界帧 / 单支撑帧 / airborne_zero 帧：
+  瞬态后 max|pitch|：
+  [表A] t / com_vx / com_x / pitch / pitch_rate（1.7~12.0，步长 0.1）
+  [表C] t / com_vx 的 0.5 s 尾随均值（2.0~12.0，步长 0.1）
+  三个速度阈值各自的收敛时刻（或“12 s 内未满足”）：
+  com_x 最靠后时刻与值 / 12 s 末值 / 回落量：
+  [表B] 逐帧量（至少覆盖 t=4.5~5.8 与 t=2.3~2.8 两个窗口）：
+  output_source 标签变化时刻表：
+  mpc_solution.force 与 reference 的变化时刻（只列发生跳变的时刻与前后值）：
+  额外发现（可选）：
+  结论（只写数据支持的现象）：
+  ```
+
+11.8 已知局限
+
+  1. 12 s 仍可能不够。若末仍明显向最靠后方向走，如实报“12 s 不够”，由问题排查agent决定下一轮，
+     **测试agent不自行拉长**。
+  2. 8 s 之后 pitch 有约 -0.63°/s 的慢漂移（早期测），12 s 会把它放大到约 -7.6°/s 的累计量级，
+     可能碰 15° 界限；这属于**已接受的已知行为**，不作为本轮失败。
+  3. 轮子无损飞轮（`damping/frictionloss/armature` 全 0）是仿真特有的，sim-to-real 不可直接沿用。
+
+================================================================
+12. ANCHOR：只调目标值，链路零新增（2026-10-17 第二版）
+================================================================
+
+12.0 第 0 步：模型 / ZMP 通道自检（必须先跑，零控制改动）
+
+12.0.1 为什么要先做这一步
+
+  离线核查（读 `mpc_model_A` / `mpc_model_B` 记录 + 本地建两套模型）发现三件事：
+
+  1. **已确认**：`mpc_model_A` 形状全程只有 **(8, 8)**，`mpc_model_B` **(8, 3)**
+     -> 实际参与计算的 MPC 模型是 **8 状态、3 输入**，含腿摆角 φ。
+     之前“6 状态”的结论是错的（那 6 分量来自测试agent自己构造的 `sample_override`，
+     不是 MPC 输出；MPC 原始输出 `sample_raw` 一直是 8 分量）。
+  2. **自相矛盾**：ANCHOR 日志第一行是
+     `WARNING 模型 gbc486-held-leg 没有 leg_offset_radius，ZMP 曲柄半径沿用 preset 值`；
+     而离线建模型实测 `held_leg -> state_dim=6`、`leg_input -> state_dim=8`。
+     两个事实不可能同时成立，必须用一行打印定死。
+  3. **独立缺陷**：`simulation.py:197-201` 的 ZMP 参考门是 `reduced.state_dim < 8`；
+     而 `zmp_crank_radius` 取 `reduced.metadata["leg_offset_radius"]`，只有 8 状态模型才有
+     （实测 **0.2132**）。日志说它缺失、退回 preset 值，而 `simulation.py:165-176` 的注释
+     明确写着不能用标称腿长代替：“本机 0.2133 vs L0 0.280，差 31%，直接用 L0 会让曲柄参考偏小”。
+     -> **不论哪种情况，ZMP 摆腿参考的曲柄半径现在都是错的**（要么通道被关，
+        要么半径偏小 31%）。而摆腿减速参考就是本轮所有分析里唯一的减速手段。
+
+12.0.2 要加的那一行（只打印，不改任何控制逻辑）
+
+  位置：`Gbc486MpcWbcSimulation.__init__` 末尾（`self.tasks = ...` 之后、`return` 之前）。
+
+  ```python
+  _LOGGER.info(
+      "模型自检: variant=%s reduced.state_dim=%d mpc.model.state_dim=%d input_dim=%d "
+      "zmp_reference=%s zmp_split=%.3f zmp_crank_radius=%.4f zmp_com_height=%.4f",
+      config.model_variant, self.reduced.state_dim, self.mpc.model.state_dim,
+      self.mpc.model.input_dim, self.mpc.settings.zmp_reference,
+      self.mpc.settings.zmp_split, self.mpc.settings.zmp_crank_radius,
+      self.mpc.settings.zmp_com_height,
+  )
+  ```
+
+  要求：
+  - 用模块级 `_LOGGER`（已有），INFO 级，**不用 print**；
+  - 该行永久保留（以后每轮都能看到模型与 ZMP 的真实状态）；
+  - 不得为打印而改任何控制参数、跳过任何初始化。
+
+12.0.3 判据与分支（拿到这一行后再决定要不要跑 12.2）
+
+  | 打印结果 | 结论 | 下一步 |
+  |---|---|---|
+  | `reduced.state_dim=8` 且 `mpc.model.state_dim=8` | 8 通道模型（与记录一致），日志里的 `held-leg` 只是模型名报错 | 检查 `zmp_reference` 是否为 True；若为 True 再看半径 |
+  | `reduced.state_dim=6` | 6 状态模型，与 `mpc_model_A` (8,8) 矛盾 | 停，先查为什么记录与实例不一致 |
+  | `zmp_reference=False` | ZMP 摆腿通道关闭 | **停**，先打开（改配置，需用户同意），否则没有减速手段 |
+  | `zmp_crank_radius` != 0.2132 | 曲柄半径退回 preset 值，偏小 31% | **停**，先修正半径来源 |
+
+  **以上任一“停”的情况，12.2 的目标值锚定先不跑**——没有摆腿减速参考时，
+  错的是物理手段而不是目标值，跑了也无法归因。
+
+12.1 为什么这一轮（根因已用 S1 数据判完，不改增益/权重/阈值）
+
+12.1.1 `preview_lead = 0.0` -> 目标值退化成“MPC 规划加速度的转发”
+
+  ```text
+  simulation.py:283   preview_lead: float = 0.0
+  control.py:272      sample_raw = solution.trajectory.sample_at(time_s + config.preview_lead)
+  ```
+
+  `preview_lead=0` 意味着 WBC 取的是 MPC 轨迹的**第 0 个节点**，而第 0 个节点按定义就是当前状态。
+  于是 `wbc.py:214-221` 里每个任务的状态反馈项**恒等于零**：
+
+  ```python
+  velocity_target = acceleration[0] + kv*(reference[1]-state.velocity) + kp_pos*(reference[0]-state.position)
+  yaw_target      = acceleration[2] + kp*wrap_angle(reference[4]-state.yaw) + kd*(reference[5]-state.yaw_rate)
+  pitch_target    = acceleration[1] + kp*(reference[2]-state.pitch) + kd*(reference[3]-state.pitch_rate)
+  ```
+
+  实测逐位对上（S1，`wbc_task_trace` vs `sample.acceleration`）：
+
+  | t | fv desired | `acceleration[0]` | 差 |
+  |---|---|---|---|
+  | 3.0 | +2.3723 | +2.372 | 0.0003 |
+  | 7.0 | +2.4168 | +2.417 | 0.0002 |
+  | 11.0 | +2.3165 | +2.317 | 0.0005 |
+
+  yaw 与 pitch 同样逐位相同（如 t=7.0 yaw desired = −1.3517 = `acceleration[2]`）。
+  => **“目标值没有正常设定”的确切机理：不是没人管，是反馈项被结构性清零，位置环从未存在。**
+  正常站立能站住，是因为那时 MPC 的规划加速度本身≈0；落地后规划很大又不对，就原形毕露。
+
+12.1.2 直接后果：自转 + 位移不收敛
+
+  - MPC 在**偏航误差为 0** 的情况下规划出 −1.35 ~ +1.39 rad/s^2 的偏航加速度；
+  - 偏航累计 **−9.10 rad（−521°，1.45 圈）**，`yaw_rate` 峰值 **−2.901 rad/s**；
+  - 轮子对转（t=7.0 vR=−0.722 / vL=+0.530），位移任务达成 **3%~9%**；
+  - 机体系状态与世界系脱节：`state.position=−0.7812` / `state.velocity=+0.2756`，
+    而世界系 `com_x=−1.7359` / `com_vx=−0.2629`。
+
+12.1.3 自转是控制器在 4 s 之后自己造出来的，不是落地冲击
+
+  | t | 3.0 | 4.0 | 5.0 | 6.0 | 7.0 | 8.0 |
+  |---|---|---|---|---|---|---|
+  | yaw_rate | +0.013 | −0.055 | −0.320 | −1.117 | −2.539 | −2.901 |
+
+  锚定候选时刻 t=2.000 的 yaw = **+0.0006 rad**、yaw_rate = **−0.0055** -> 干净。
+
+12.1.4 稳定落地不需要新门槛（现成的状态逻辑）
+
+  | 判据（两轮估计接触 ∧ 几何接触 ∧ 法向力 > 50 N） | 结果 |
+  |---|---|
+  | 触地后最长连续满足段 | **10253 帧，t=1.747 ~ 11.999，一次没断** |
+
+  `decision.mode` 转换：`1.7470 recovery` -> `1.8930 ground（仅 1 帧）` -> `1.8940 recovery`
+  -> **`1.9930 ground`（此后恒为 ground）**。后者是 `ControlSupervisor` 的
+  `touchdown_dwell` 现成逻辑，纯状态，不含经验时间参数。
+
+12.2 改动（两处，其余零改动）
+
+**A. 只调目标值接口，不新增任何状态（第二版）**
+
+  第一版曾在这里新增 `anchor_latched` + 20 帧计数，**已作废**：
+  “确认稳定落地”不是新状态——`ControlSupervisor` 的 `touchdown_dwell` 已经是它，
+  产物就是 `decision.mode` 从 `recovery` 变 `ground`（实测 t=1.993 起恒定）。
+  “落地重锚”也不是新机制——`loop.py:148-159` 已有 `sim.mpc.reset(land_state)` +
+  `contact_estimator.reset()` + `supervisor.reset()`，以及“每跳只触发一次”的
+  `landing_reanchor_pending`。
+
+  零输入链路的目标值本来就是一个设定的位置锚点（原地）；受扰后回到原地，这条链路
+  已验证能收敛。落地后的需求与它**完全同构**：把锚点设成落点，链路自己把机器人带回落点
+  （摆腿减速由 ZMP 参考自动产生）。
+
+  所以本轮唯一的动作：**经已解耦的目标值接口传入不同的参数**：
+
+  | 通道 | 传入值 | 与零输入链路的差别 |
+  |---|---|---|
+  | 位置目标 | 落点（state 系，= 落地时的 `sim.distance`） | 只换值 |
+  | 偏航角目标 | 落点偏航角（`euler_zyx(qpos[3:7])[2]`） | 只换值 |
+  | 速度目标 | 0 | 相同 |
+  | 偏航角速度目标 | 0 | 相同 |
+  | pitch 目标 | 0 | 相同 |
+  | 腿角目标 | `phi_eq(L)` | 相同 |
+  | 腿长目标 | `L0` | 相同 |
+
+  设置时刻：`decision.mode` 由 `recovery` 变为 `ground`（即 `landing_reanchor_pending`
+  那次既有触发），**整跳一次**。不新增计数器、不新增闩锁。
+
+  **链路、MPC、ZMP、WBC、采样、前馈一行不改；WBC 继续收 `sample_raw`。**
+  这样 `_apply_zmp_reference` 写进 `reference[:,6]/[:,7]` 的摆腿减速参考自动保留。
+
+**B. 锚定时刻复位 `landing_window`**（`jump_landed` 派生的那个窗口，`loop.py:261`）
+
+  目的：锚定后**链路与零输入链路完全一致**（用户 2026-10-17 要求）。
+  依据：`mode` 自 t=1.993 起恒为 `ground`，`motion_enabled` 本来就是 True，
+  `motion_override` 已冗余；`world_angle_anchor=False` 让腿角回到与零输入一致的目标定义
+  （由 A 的世界系腿角目标接管）。
+
+**C. 撤销：不要放行 `sample_override`（第一版的错）**
+
+  第一版批准了 `control.py` 的 `sample_override` 优先分支，**已作废**。原因（实测，ANCHOR 轮）：
+
+  WBC 拿到的 `sample.state = [-0.207, 0, 0, 0, 0.00049, 0]`（6 分量、全速率为 0），
+  即 `sample_override` 把 MPC 的整条轨迹替换成了静态锚点，**连带丢掉了
+  `_apply_zmp_reference` 写进 `reference[:,6]/[:,7]` 的摆腿减速参考**。
+  结果：WBC 拿到的是“保持不动”目标，机器人以 0.6 m/s 匀速滑行
+  （t=10.0：`qacc` 只有两个轮关节非零 ±0.30，其余全 0；`feasible=True`、
+  `clip_applied=False`、8 个任务的 `scaling` 全 1.0）。
+
+  所以 `control.py` **保持原样**，`sample` 一律走 `sample_raw`。
+
+  坐标口径（沿用第一版结论）：**位置通道锚 state 系**（`state.position`），不在链路里加
+  world→state 映射（该映射必须用 yaw，而 yaw 正是本轮要验证保持为 0 的量，会形成循环依赖）。
+  `com_x` 作只记录的世界系交叉校核。
+
+**D. 不改**
+
+  控制链路、增益、权重、阈值、MPC 结构、WBC 结构、`preview_lead`。
+  **`preview_lead=0.0` 是根因之一但本轮不动**——改它会同时改变零输入链路的行为，
+  违反单变量。记为下一轮备选 **ANCHOR-2**。
+
+12.3 命令
+
+  ```text
+  tools/jump_diagnostic.py --stage ANCHOR --case baseline --run-id run01 --duration 12.0 \
+      --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+      --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+  ```
+
+  对照：`S1`（同代码同参数、无锚定，12 s）。
+
+12.4 判据
+
+  **验证（证明改动只影响目标值、没有污染前面）**
+  - 日志给出设置时刻 `t_target_set`（应为 `mode` 首次变为 `ground` 的那一帧附近，参照 S1 的 t=1.993）、
+    以及传入的目标位置 / 目标偏航角
+  - 目标值整跳只设一次
+  - 设置时刻之前与 `S1` 的差异只允许来自“目标值提前写入”（需在报告中明确说明哪些帧不同）
+
+  **主判据（本轮新增，针对已定位的两个失败）**
+  - **偏航累计角 ≤ 0.09 rad（5°）**（S1 为 −9.10 rad，留 100 倍裕度）
+  - **`|yaw_rate|` 峰值 ≤ 0.1 rad/s**（锚定时刻实测 0.0055，留 18 倍裕度）
+  - **12 s 内 `|state.position − 目标位置|` 首次 ≤ 0.05 且此后不再超出**
+    （state 系口径；S1 为 12 s 内未满足）
+  - **12 s 内 `|state.velocity|` 首次 ≤ 0.05 且此后不再超出**（与上一条同源，两者应同时满足）
+  - **只记录（世界系交叉校核）**：`|com_x − 落点 com_x|` 在 12 s 内的最小值与末值。
+    **要求**：上述 state 系判据满足时，此项应**同步**满足（同一容差 0.05）；
+    若两者背离，说明 yaw 未保持，按失败处理。
+  - **ZMP/摆腿通道必须活着**（第一版的教训）：**`sample` 必须与 `sample_raw` 逐位相同**，
+    且 `wbc.py:247` 的 `leg_input` 分支被走到（即腿角任务的 `desired` 含
+    `acceleration[3]` 与 `reference[6]/[7]` 的贡献）。只校验到这一点，不评价其好坏。
+
+  **回归**
+  - FLIGHT 最大轮间隙 >= 0.200
+  - ABORT 0
+  - 腿长越界（>0.430 或 <0.114）0 帧
+  - 单支撑 / `airborne_zero` 0 帧
+  - 瞬态后 `|pitch| <= 0.2618`（15°）
+  - `max|ctrl[4,5]| <= 轮限幅`；`max|ctrl[0..3]| <= 40`
+
+  **只记录**
+  - 触地后峰值后滚位移（S1 = 1.1147 m）、末值 com_x / com_vx
+  - MPC `acceleration[0..2]` 的 12 s 范围（看规划是否还自发偏航）
+
+12.5 反馈格式
+
+  ```text
+  VP编号：ANCHOR
+  共同自检（py_compile / leg=(0,1,2,3) wheel=(4,5) / 重复取数一致 / git_status_short_raw 完整）：
+  t_target_set / 目标位置 / 目标偏航角（整跳只设一次）：
+  sample 与 sample_raw 是否逐位相同（max 差）：
+  leg_input 实际取值 / leg_input 分支是否被走到 / 腿角任务 desired 的组成（含 acceleration[3] 与 reference[6]/[7]）：
+  t_target_set 之前与 S1 的差异帧数与首差时刻（并说明来源）：
+  偏航累计角 / |yaw_rate| 峰值：
+  12 s 内 |state.position - 目标位置| 首次 <= 0.05 的时刻（或“未满足”）：
+  12 s 内 |state.velocity| 首次 <= 0.05 的时刻（或“未满足”）：
+  世界系交叉校核：|com_x - 落点com_x| 的 12 s 最小值与末值（是否与 state 系同步满足）：
+  FLIGHT 间隙 / ABORT / 越界 / 单支撑 / airborne_zero / max|ctrl|：
+  瞬态后 max|pitch|：
+  触地后峰值后滚位移 / 末值 com_x / com_vx：
+  MPC acceleration[0..2] 范围：
+  [表] t / state.velocity / state.position / com_vx / com_x / pitch / yaw累计角 / yaw_rate / ctrl[4,5]（1.7~12.0，步长 0.1）
+  额外发现（可选）：
+  结论（只写数据支持的现象）：
+  ```
+
+12.6 已知局限
+
+  1. **`preview_lead=0.0` 不动**：目标值入规划器后，MPC 规划会重新产生非零加速度，
+     而 WBC 取轨迹第 0 节点（= 当前状态）使反馈项≈0，所以 WBC 仍以“前馈为”为主。
+     若目标值正确后位移仍不收敛，下一轮就是 ANCHOR-2（`preview_lead` 或
+     把 `acceleration[*]` 从任务目标里摘出）。
+  2. 设置时刻在 `mode` 变为 `ground`（参照 S1 t=1.993）：此时 pitch=−0.0919 rad、
+     com_vx=−0.5042 m/s，即**还在快速运动中**，目标设完后要刹 0.5 m/s。
+     可行性依据：t=2.0 消融里 `full` 的 fv desired +9.75、achieved +9.86（100%），
+     腿角偏 0.206 rad，水平力通道是开的。
+  3. 目标位置取落地时刻的 `sim.distance`，即**接受落地瞬态那段位移**（相对触地帧后滑约 0.14 m）。
+     这是设计选择（“位移交给控制器权衡”），不是失败。
+  4. 本轮不解除任何已知缺陷（`wbc.py` 任务分级、`dynamics_constraint` 行为 88% 落在前向、
+     轮无损飞轮）。若第二版仍复现“WBC 全部任务达成 0”，则证明那些缺陷是独立瓶颈。
+  5. **第一版留下的待确认问题**：ANCHOR 轮 `sample.state` 只有 6 分量而 `sample_raw` 是 8 分量，
+     而 `wbc.py:247` 要读 `reference[6]/[7]`。本轮必须报 `leg_input` 的实际取值；
+     若为 False，则 `simulation.py:197-201` 会把 `zmp_reference` 自动关掉，
+     **ZMP/摆腿通道在当前配置下根本不存在**，那要先开它（改配置，需用户同意）。
+
+================================================================
+13. PURGE：清除腿长网格重建残骸，回到 8 通道单点线性化（2026-10-17）
+================================================================
+
+13.1 为什么先做这个（12.0 自检已把矛盾解完）
+
+  第 0 步自检 + 测试agent手动调一次 `_schedule_mpc_leg_length()` 后实测：
+
+  | 时刻 | `mpc.model` | `input_dim` | `A` / `B` | `zmp_reference` | `zmp_crank_radius` |
+  |---|---|---|---|---|---|
+  | `__init__` 末尾（默认） | **6** | 2 | 6x6 / 6x2 | **False** | **0.0600** |
+  | 手动跳一次网格后 | **8** | 3 | (8,8) / (8,3) | **False** | **0.0600** |
+
+  `ANCHOR` 全程 `mpc_object_id` 变化 **19 次**，`scheduled_grid_point` 取 0.18 / 0.22 / 0.26 / 0.30。
+
+  => **运行期真实状态 = “8 状态模型 + 按 6 状态 reduced 算出来的 settings”**：
+  `simulation.py:512` 是 `self.mpc = WheelMPC(new_model, self.mpc.settings)`，
+  **settings 沿用最初那套、重装后从未重算**。
+
+  后果：
+  - `zmp_reference=False`（因为 `simulation.py:197-201` 的门的输入是 6 状态 reduced）
+    -> **摆腿减速通道一直是关的**；
+  - `zmp_crank_radius=0.0600`（preset 值）-> 8 状态模型实测 `leg_offset_radius=0.199133`，差约 70%；
+  - MPC 对象随腿长在 0.18/0.22/0.26/0.30 四个网格点间反复重建，引入不属于物理的跳变。
+
+  且这两个 `leg_offset_radius` **不要混用**：
+  `variant="leg_input"` 建模型 -> **0.2132**；腿长网格模型 -> **0.199133**。
+
+13.2 改动
+
+**A. 回到 8 通道正常建模（唯一的行为变更）**
+
+  ```text
+  simulation.py:266   model_variant: str = "held_leg"   ->   "leg_input"
+  ```
+
+  依据（用户 2026-10-17 说明）：正常控制逻辑就是建模时算上腿摆角 φ 的 **8 通道建模**：
+  腿长网格那套是为了“不同腿长下 MPC 稳定”做的离线参数拟合重装方案，**已被废弄**。
+  在 `L0=0.28` 处线性化一次（`LegInputModelBuilder(self.dyn, self.pose.length)`，
+  `self.pose = standing_pose(..., config.nominal_length)`），全程不重建。
+
+**B. 删除腿长网格重建链路（逐项）**
+
+  | 文件 | 删什么 |
+  |---|---|
+  | `gbc_mpc_wbc/model_grid.py` | **整个文件删除** |
+  | `gbc_mpc_wbc/model_grid_leg_length.json` | **整个文件删除** |
+  | `tools/make_model_grid.py` | **整个文件删除** |
+  | `simulation.py:361` | `self._model_grid = None` |
+  | `simulation.py:380` | `self._scheduled_grid_point: float \| None = None` |
+  | `simulation.py:476-525` | `_schedule_mpc_leg_length()` 整个方法 |
+  | `simulation.py` `mpc_stage` 调用点 | `schedule_leg_length=` 参数与它的传递 |
+  | `control.py::mpc_stage` | `schedule_leg_length` 形参与 `schedule_leg_length()` 调用 |
+  | `loop.py:255` | `schedule_leg_length=sim._schedule_mpc_leg_length,` |
+  | `loop.py:730-731` | 记录字段 `scheduled_grid_point` |
+  | `gbc_mpc_wbc/__init__.py:9,15` | 文档里对 `model_grid.py` / `make_model_grid.py` 的描述 |
+  | `simulation.py:66` | `_LEG_LENGTH_GEAR_HYSTERESIS = 0.008`（已无代码引用，属网格换挡方案的滞回常量，随方案一并删） |
+  | `simulation.py:268` | 那行历史说明注释（**删**；记录留在 git 历史与本文件第 13 节，代码里不留历史注释） |
+  | `gbc_mpc_wbc/jump.py:42` | 注释里对 `_LEG_LENGTH_GEAR_HYSTERESIS = 0.008 m` 的引用（常量删后注释也要改，见 13.5） |
+
+  删除后 `WheelMPC` 全程只构造**一次**，`mpc_object_id` 必须恒定。
+
+**C. 不改**
+
+  增益、权重、阈值、限幅、`preview_lead`、WBC 结构、`simulation.py:197-201` 的 ZMP 门。
+
+13.3 验收判据
+
+  **主判据（模型/ZMP 通道）**
+  - 自检行（12.0.2 已经加好的那行）必须输出：
+    `reduced.state_dim=8 / mpc.model.state_dim=8 / input_dim=3 / zmp_reference=True /
+     zmp_split=1.000 / zmp_crank_radius=0.2132 / zmp_com_height=0.2644`
+  - **`zmp_reference` 必须为 True**（这是本轮最重要的产出）
+  - **`mpc_object_id` 全程恒定**（0 次变化）
+  - `scheduled_grid_point` 字段已不存在
+
+  **回归**
+  - 起跳与飞行段功能正常：FLIGHT 最大轮间隙 >= 0.200，ABORT 0
+  - 腿长越界（>0.430 或 <0.114）0 帧
+  - 单支撑 / `airborne_zero` 0 帧
+  - 瞬态后 `|pitch| <= 0.2618`
+  - 力矩在限幅内
+
+  **不得声称逐位一致**
+  本轮的模型 A/B 与 settings 都变了（网格 8 状态 -> L0 8 状态；ZMP 从关到开），
+  **轨迹必然与历史结果不同**，不能拿“逐位 0”当验收。
+
+13.5 三处边角决定（测试agent 2026-10-17 提问）
+
+**1. `simulation.py:66` 的 `_LEG_LENGTH_GEAR_HYSTERESIS = 0.008`：删。**
+
+  全仓只出现两处：定义处 + `gbc_mpc_wbc/jump.py:42` 的注释引用。它正是腿长网格换挡方案的滞回常量，
+  属于本轮要清的残骸，**一并删**。
+
+  但 `jump.py` 里那个“落地/恢复判据的腿长邻域宽度”数值不改（改值属调参，本轮不做），
+  只把注释改成不再引用已删常量，并如实标注依据状态：
+
+  ```text
+  改前：来源：与腿长换挡滞回常量 _LEG_LENGTH_GEAR_HYSTERESIS = 0.008 m
+  改后：取值 0.008 m 为历史沿用；原始出处（腿长网格换挡滞回）已随方案废弃，
+        本轮未重新标定，也无独立物理依据 -> 待实测确定。
+  ```
+
+  （按工程约束，无依据的参数必须标明，不能靠一个已删常量充当“来源”。）
+
+**2. `simulation.py:268` 的历史说明注释：删。**
+
+  理由：历史记录属于 git 与本文件第 13 节；代码里留历史注释是本项目反复踩过的坑
+  （注释与代码不符已发生多次），不留痕迹。
+
+**3. PURGE 之后先做零输入扰动测试，再做落地位移。同意，写入验收链。**
+
+  理由：PURGE 同时改了两件事——模型换成 `L0` 8 状态、**ZMP 摆腿参考从关到开**。
+  后者是历史上第一次在运行链路里真正启用，必须先在已有的、有历史基线的工况上验证
+  “控制链路仍然能收敢”，再叠落地问题；否则落地失败时无法区分是 ZMP 还是锚定。
+
+  测试口径（先零输入、再加扰动）：
+
+  | 步骤 | 工况 | 判据 |
+  |---|---|---|
+  | T1 | 零输入、零扰动、站立 12 s | 位置/速度/pitch/腿长均不漂移；无 ABORT；力矩在限幅内 |
+  | T2 | 零输入 + 一个已知踯度的速度阶跃扰动 | 收敛回原锚点（位置与速度均回到容差内）；不得发散 |
+
+  **T2 的扰动参数必须与历史 P6 系列一致**（否则无法对比）。测试agent需先报：
+  历史 P6 扰动用的是哪个入口/命令、脚注的 `delta_velocity` 与 `time` 取值。
+  若那个入口已不在工具里，就用 `jump_diagnostic.py` 现有的扰动参数（需测试agent先报可用字段），
+  并在报告里标明“无历史基线可直接对比”。
+
+  只有 T1、T2 都通过，才进 ANCHOR-2（落地后位移收敛）。
+
+13.6 已知局限
+
+  1. 本轮一次性打开 ZMP 摆腿参考（`zmp_split=1.0` 全给曲柄），这是历史上第一次在跳跃
+     场景里真正启用它，行为可能剧烈变化；若失败，下一轮用 `--no-zmp` 类开关做单变量对照
+     （需另加参数，本轮不加）。
+  2. 本轮只解决“物理手段存不存在”，不做目标值锚定（第 12.2 节顺延）。
+  3. 删隐的网格模型也包含 `equilibrium_pitch=2.388846e-06` 等元数据；切回 `leg_input` 后
+     这些值由 `LegInputModelBuilder` 重新给出，必须在下一次记录中核对（入接受范围）。
+
+================================================================
+14. ANCHOR-2：让位移目标真正进到 WBC（2026-10-17）
+================================================================
+
+14.1 已确认的机理（读代码 + T2 实测）
+
+```text
+controller.py:688   reference_states = reference.states(...)      # 规划器参考，含位置目标
+controller.py:690-694  _apply_zmp/_hip/_pitch_feedforward/_pitch_bias
+                        -> 只改列 2,3,6,7（pitch、pitch_rate、腿角、腿角率）
+                        -> 位置列 0 从未被改，也从未被重定基
+controller.py:765   predicted = self.predict(vector, ...)         # 从当前实测出发的预测
+controller.py:773   reference=reference                           # 原样传出，无重定基
+controller.py:775   trajectory: OptimizedTrajectory              # 独立字段
+
+control.py:272      sample_raw = solution.trajectory.sample_at(time_s + config.preview_lead)
+```
+
+- `solution.reference`（含位置目标）**没有交给 WBC**；
+- WBC 拿的是 `solution.trajectory`（`OptimizedTrajectory`），其第 0 节点按定义 = 当前状态；
+- 而 `preview_lead = 0.0`（`simulation.py:283`），于是 `sample_at(t+0)` = 第 0 节点
+  -> **所有状态反馈项结构性为零，位移目标在这个环节被丢掉**。
+
+关键对照：`simulation.py:282` 的注释自己写着
+`preview_lead=0.02（APP/mujoco_mpc_wbc.py:421 注释），所以两者必须分开`，
+而实际值是 `0.0`。**这是与轮圈腿共用的那一层被本机单方面改小的痕迹。**
+
+14.2 改动（分两步，各自单变量）
+
+**A-2-1：恢复 `preview_lead`（主改动）**
+
+```text
+simulation.py:283   preview_lead: float = 0.0   ->   0.02
+```
+
+  依据：`simulation.py:282` 注释与 circleg `APP/mujoco_mpc_wbc.py:421` 均为 0.02；
+  且 `controller.py:182` 的设计意图是“高频 WBC 应按实际时间调用 `trajectory.sample`”，
+  取第 0 节点等于取消了预览，也就取消了反馈。
+
+  **不换 sample 来源**（不改 `solution.trajectory` 为 `solution.reference`）：
+  `controller.py:182` 明确 WBC 的接口就是 `trajectory.sample`，换源属于改结构，
+  不是单变量。若 A-2-1 后位置仍不收敛，再单独立一轮讨论。
+
+**A-2-2：定位规划器位置锚点的漂移（诊断，零控制改动）**
+
+  已确认的矛盾：`solution.reference` 未被重定基，所以它的位置列应等于规划器锚点（=0），
+  但 T2 实测 `reference[0]` = −0.04346116（扰动前 +2.83e-05）。
+  按 `planner.py` 的枚举，能移动锚点的只剩 `enable` / `stable_resume` 两条，
+  而二者都会在 `_align` 里打 `Reference reset:` 的 INFO 日志，T2 全程却只有一条（`hold_capture`）。
+  **所以必须补日志才能定死。**
+
+  在 `Algorithm/mpc/planner.py::plan()` 里加（DEBUG 级，20 Hz，不能 INFO 刷屏）：
+
+  ```python
+  _LOGGER.debug(
+      "ref: mode=%s driving=%s suspended=%s target_v=%.6f "
+      "fwd_pos=%.6f measured=%.6f initialized=%s",
+      self.mode, driving, self._suspended, target_v,
+      self._forward.position, position, self._initialized,
+  )
+  ```
+
+  并把 `_align` 已有的 INFO 改成带 `event=align` 前缀，便于计数。
+
+  同时要求报告：`Reference reset:` 出现的**次数与时刻表**、`fwd_pos` 在第几个 MPC 拍
+  从 0 变成 −0.0435。
+
+14.3 命令
+
+  同 T2（零输入 + 同一扰动），两个阶段各跑一次：
+
+  ```text
+  T3A: 仅 A-2-1（preview_lead=0.02），其它同 T2
+  T3B: 仅 A-2-2（诊断日志），日志级别开 DEBUG，其它同 T3A
+  ```
+
+  对照：`T2_delta_velocity_run01`（preview_lead=0.0）。
+  再补一条跳跏工况回归（同 PURGE 命令）确认预跏不影响跳跏与落地。
+
+14.4 判据
+
+  **主判据（T3A 对 T2）**
+  - **位置回到原锚点**：`\|state.position\|` 首次 ≤ 0.01 m 且此后不再超出
+    （T2 末值 −0.04347，未回）
+  - **速度仍收敛**：`\|state.velocity\|` ≤ 0.005 且此后不超出（T2 已达成，不得回退）
+  - **不动发**：位置 10 s 后仍恒定
+
+  **回归**
+  - 零输入零扰动 12 s（T1 口径）：位置跨度 < 1 mm、速度峰值 < 1 mm/s
+  - 跳跏工况：FLIGHT 间隙 ≥ 0.200、ABORT 0、腿长越界 0 帧、单支撑/airborne_zero 0 帧
+  - 力矩在限幅内
+
+  **只记录**
+  - `acceleration[0]` 的峰值（预跏后位置误差会进入需求，应出现在 ±50 内并饱和时如实报）
+  - `Reference reset:` 的次数与时刻（A-2-2）
+
+14.5 已知局限
+
+  1. **必然不是逐位回归**：`preview_lead` 从 0 改到 0.02 会改变整个闭环，
+     跳跏轨迹与历史结果必定不同。不得拿逐位 0 当验收。
+  2. `kp_pos = 49`（`wbc.py:67`）：T2 的位置误差 0.0435 m 对应需求 2.13 m/s²；
+     落地工况的位置误差可达 3 m -> 需求饱和到 `acceleration_limit = 50`。
+     饱和是预期行为，但要如实报饱和帧数。
+  3. 本轮的 A-2-2 只是诊断，不修锚点；若锚点确实在漂，需另开一轮单独处理。
+
+================================================================
+15. ANCHOR-3：修 `soft_reanchor` 把位置锚点搬到实测（2026-10-17）
+================================================================
+
+15.1 T3 结果判读（两件事，一好一坏）
+
+**坏的：A-2-1（`preview_lead 0.0 -> 0.02`）是我写错的规格，必须回退。**
+
+  | 工况 | 指标 | PURGE（`preview_lead=0`） | T3A（`0.02`） |
+  |---|---|---|---|
+  | 零输入零扰动 12 s | 位置跨度 | 0.16 mm | **229.8 mm** |
+  | | 速度峰值 | 0.9 mm/s | **435.9 mm/s** |
+  | | pitch 峰值 | 3.5e-05 rad | **0.3944 rad（22.6°）** |
+
+  零输入站立从“纹丝不动”变成“自己走出 229 mm 并俯仰 22.6°”，**硬回退**。
+  且 T3A 的位置不是停在原地，而是单向漂到 +0.29263。
+  跳跏回归 6 项全过（间隙 0.22178、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、
+  瞬态后 max\|pitch\| 0.25824），但站立崩了——这比原来差。
+
+**好的：A-2-2 的诊断把锚点漂移定死了，而且不是猜的。**
+
+  | 证据 | 结果 |
+  |---|---|
+  | `Reference reset:` 条数（12 s） | **1 条**（启动时 `hold_capture`）-> `enable` / `stable_resume` 均未发生 |
+  | DEBUG 行数 | 588 条（49 Hz） |
+  | `fwd_pos` 取值 | 只有 2 个：0.000028（拍 0~47）-> **0.024867（拍 48，直接等于当时的 `measured`）** |
+  | 之后 | 恒定 0.024867，实际位置一路走到 0.292635 |
+
+  完整触发链：
+
+  ```text
+  扰动（竖直 0.80 m/s 阶跃）-> 25~36 帧脱离接触
+    -> motion_enabled=False
+    -> Algorithm/supervision.py:234/242  self.mpc.reset(state, soft=soft)
+    -> controller.py:486-493  soft=True 且 preserve_ramp_on_recontact（实测 True）
+    -> planner.py:313-323  soft_reanchor -> self._forward = _RampState(state.position, ...)
+       且**只写 last_reset_reason、不打任何日志**
+  ```
+
+  => **位置目标不是“被重定基”，而是被 `soft_reanchor` 直接搬到了扰动瞬间的实测位置。**
+  T2 是 −0.04346，T3B 是 +0.024867，都是这么来的。
+
+15.2 我上一轮的错误（记录，避免重现）
+
+  14.2-A-2 里我写“全仓无 `soft=True` 调用者”和“`preserve_ramp_on_recontact` 默认 False”，
+  两半都错：调用者在 `Algorithm/supervision.py:234/242`，且本机配置已把它覆盖为 **True**。
+  **教训：grep 到的“无调用者”必须同时确认配置覆盖链，不能只看 dataclass 默认值。**
+
+15.3 改动（两处，第一处是回退）
+
+**A-3-1：回退 `preview_lead`**
+
+  ```text
+  simulation.py:283   preview_lead: float = 0.02   ->   0.0（恢复 PURGE 时的值）
+  ```
+
+  依据：15.1 的站立回退（229.8 mm）。A-2-1 假定错误：
+  `trajectory.sample(t+0.02)` 取到的不是“当前状态加 20 ms 速度”，而是优化轨迹的下一个节点，
+  其位置偏差乘上 `kp_pos=49` 形成正反馈。
+
+**A-3-2：`soft_reanchor` 不再搬位置锚点（主改动）**
+
+  依据用户 2026-10-17 的口径：
+  - 零输入扰动：目标就是扰动前的当前位置（不应变）；
+  - 有输入前进并减速后：锚定在停车位置；
+  - 落地收敛：同一逻辑。
+
+  `planner.py:313`：
+
+  ```python
+  def soft_reanchor(self, position: float, yaw: float, *, reset_position: bool = False) -> None:
+      ...
+      self._forward = _RampState(float(position) if reset_position else self._forward.position,
+                                 self._forward.velocity, self._forward.acceleration)
+      self.last_reset_reason = "soft_reanchor"
+      _LOGGER.info("参考软重锚: reset_position=%s s=%.4f yaw=%.4f measured=%.4f",
+                   reset_position, self._forward.position, yaw, position)
+  ```
+
+  `controller.py:493`：
+
+  ```python
+  self.planner.soft_reanchor(state.position, state.yaw,
+                             reset_position=bool(self.planner.commanded_motion))
+  ```
+
+  => 零输入（`commanded_motion=False`）时保留原锚点（=0），速度/加速度斜坡仍按软重锚语义保留；
+     只有在真正驱动过的情况下才把锚点放到当前位置。
+
+  **同时必须给它加日志**（现在完全没有日志，所以整条路径在 12 s 里隐形）。
+
+15.4 命令与判据
+
+  命令：T1c（零输入零扰动 12 s）、T2c（零输入 + 同一扰动）、PURGEc（跳跏回归）。
+  对照：PURGE / T1 / T2。
+
+  | 判据 | 目标 |
+  |---|---|
+  | T1c 零输入站立 | 位置跨度 < 1 mm、速度峰值 < 1 mm/s、pitch < 0.01 rad（恢复到 PURGE 量级） |
+  | T2c 位置 | `\|state.position\|` 首次 ≤ 0.01 且此后不超出（T2 为 −0.04347 未回） |
+  | T2c 速度 | ≤ 0.005 且不超出（T2 已达成，不得回退） |
+  | T2c 不发散 | 10 s 后位置恒定 |
+  | PURGEc 跳跏 | 间隙 >= 0.200、ABORT 0、越界 0、单支撑/`airborne_zero` 0、瞬态后 max\|pitch\| <= 0.2618 |
+  | 记录 | `soft_reanchor` 被调用的次数与时刻、`reset_position` 取值 |
+
+15.5 已知局限
+
+  1. 本轮将同时改两处（回退 + 修 soft_reanchor），因为回退是为了回到可归因的基线。
+     报告中需分开说明：A-3-1 单独等价于 PURGE，A-3-2 才是新行为。
+  2. 若 T2c 位置仍不回，下一个候选是 `Algorithm/supervision.py:234/242` 的
+     `motion 被禁` 时机本身（扰动导致 25~36 帧被禁是否合理），不属本轮。
+
+================================================================
+16. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -505,8 +1565,19 @@ ABORT / assertion_failures：
 | 7 | LAND5 | 已完成（暴露缺陷） | 几何接触作为估计器否决项 | LAND4 |
 | 8 | **N1-C** | **已完成（离线）** | 追查触地后腿长不对称来源；结论：种子 1e-4 m 可忽略，主因是放大器 | 零测试成本 |
 | 9 | **N1** | **已完成（全部判据通过）** | 落地窗口恢复腿长/腿角控制（`motion_override`） | LAND5 |
-| 10 | **R1 + LAND3** | **可跑（合并一轮）** | 腿角换算集中到 `leg_angle_anchor.py` + 腿角目标改世界系投影 | N1 |
-| 11 | 待定 | 排队 | 触地俯仰 -0.7332（飞行段决定，动它有 gap 回退风险） | N1 |
-| 12 | 待定 | 落地稳定后 | 质心可行性模块（见 `docs/质心可行性模块_方案规划_待办.md`） | — |
+| 10 | **R1 + LAND3** | **已完成（全部判据通过）** | 腿角换算集中 + 腿角目标改世界系投影 | N1 |
+| 11 | **P-b** | 已完成（未通过，主因在规格） | MPC 计划力前馈接线（无窗口门控/未折叠） | R1_LAND3_d8 |
+| 12 | **WLIM** | 已完成 | 轮限幅 ±6 -> 15.0（给 WBC 更多轮权限） | R1_LAND3_d8 |
+| 13 | **Pb2** | 已完成（折叠后为恒等，无作用量） | 前馈接线 + 窗口门控 + 真折叠 | WLIM |
+| 14 | **S1** | 已完成（推翻 (c)：非慢收敛） | 12 s 窗口测量：钉死“会收敛只是慢”+ 定位 t≈5.25 的减速起因 | R1_LAND3_d8 |
+| 15 | **ANCHOR** | **12.0 已跑完，命中三个“停”** | 落地后只调目标值（链路零新增） | S1 |
+| 16 | **PURGE** | **可跑（本节规格）** | 清腿长网格重建残骸 + 回到 8 通道 L0 单点线性化 | 原默认路径 |
+| 17 | **DECOUPLE** | 等 PURGE | 新建 `wheel_leg_mujoco/algorithm/`，逐模块迁入，删掉对 `Algorithm` 的引用 | PURGE |
+| 18 | **ANCHOR-2** | 已跑完（A-2-1 错误、A-2-2 成功） | `preview_lead=0.02` + 锚点漂移诊断 | T2 |
+| 19 | **ANCHOR-3** | **可跑（本节规格）** | 回退 `preview_lead` + 修 `soft_reanchor` 搬锚点 | PURGE / T1 / T2 |
+| 19 | P-a | 待定 | `unactuated_directions` 是否正确（随 DECOUPLE 一并处理） | — |
+| 20 | 待定 | 排队 | 摆腿减速 / 质心可行性（0.58 m/s^2 实测权限） | — |
+| 21 | 待定 | 排队 | 触地俯仰 -0.7332（飞行段决定） | — |
+| 22 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
 
 ================================================================

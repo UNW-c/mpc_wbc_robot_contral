@@ -164,13 +164,13 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              explicit_jump_reference=False, compression_only=False, freeze_jump_reference=False,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
-             flight_leg_extend=False):
+             flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
     setup_logging(default_level="INFO", log_file=log_path)
     config = SimulationConfig(jump_height=jump_height, jump_stroke=jump_stroke,
-                              jump_time=jump_time)
+                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
     sim.run(default_command(), duration, disturbances=_disturbance(case), trace_sink=frames.append,
@@ -178,7 +178,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
             leg_length_compression=leg_length_compression, leg_length_thrust=leg_length_thrust,
             thrust_only=thrust_only, flight_zero_torque=flight_zero_torque,
-            flight_leg_retract=flight_leg_retract, flight_leg_extend=flight_leg_extend)
+            flight_leg_retract=flight_leg_retract, flight_leg_extend=flight_leg_extend,
+            mpc_force_feedforward=mpc_force_feedforward)
     release_end = float(sim.jump.config.release_end) if sim.jump is not None else float(config.nominal_length)
     document = {
         "metadata": {
@@ -208,6 +209,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             "flight_zero_torque": bool(flight_zero_torque),
             "flight_leg_retract": bool(flight_leg_retract),
             "flight_leg_extend": bool(flight_leg_extend),
+            "mpc_force_feedforward": bool(mpc_force_feedforward),
+            "wheel_torque_limit": (None if wheel_torque_limit is None else float(wheel_torque_limit)),
             "viewer_xfrc_applied_executed": False,
             "viewer_xfrc_applied_note": "GUI viewer path is not executed by this headless tool; xfrc_applied remains separately recorded.",
             "units": {
@@ -261,6 +264,10 @@ def main():
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
+    parser.add_argument("--mpc-force-feedforward", action="store_true",
+                        help="P-b：把 MPC 计划轮力经 tau=f*R 前馈进 WBC（默认关闭）")
+    parser.add_argument("--wheel-torque-limit", type=float, default=None,
+                        help="WLIM：覆盖轮执行器限幅 [N*m]，None=沿 MJCF")
     # SW1：仅覆盖飞行收腿的两个常量，默认 None 表示不改动任何行为。
     parser.add_argument("--flight-retract-floor", type=float, default=None,
                         help="SW1：只覆盖 control.FLIGHT_RETRACT_FLOOR，None=不改")
@@ -282,7 +289,9 @@ def main():
              thrust_only=args.thrust_only,
              flight_zero_torque=args.flight_zero_torque,
              flight_leg_retract=args.flight_leg_retract,
-             flight_leg_extend=args.flight_leg_extend)
+             flight_leg_extend=args.flight_leg_extend,
+             mpc_force_feedforward=args.mpc_force_feedforward,
+             wheel_torque_limit=args.wheel_torque_limit)
 
 
 if __name__ == "__main__":

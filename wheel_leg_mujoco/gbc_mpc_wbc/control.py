@@ -235,15 +235,13 @@ class WbcOutcome:
 
 
 def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
-              schedule_leg_length, timings: dict, counters: dict):
+              timings: dict, counters: dict):
     """控制级 A：求解一次 MPC，返回 ``(solution, 本拍指令)``。
 
-    与 WBC 无关：不等 WBC、不读 WBC 的力矩。腿长拟合参数调度在求解前执行（幂等，
-    仅在最近网格点变化时才重建 MPC）。
+    与 WBC 无关：不等 WBC、不读 WBC 的力矩。
     """
     current = command(time_s) if callable(command) else command
     start = time.perf_counter()
-    schedule_leg_length()
     solution = control.solve_mpc(feedback.state, current, feedback.decision,
                                  feedback_accum.consume(feedback.state))
     timings["mpc"].append(time.perf_counter() - start)
@@ -262,7 +260,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               desired_com_acceleration_z: float | None = None,
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
               jump_config=None, leg_length_compression: bool = False,
-              leg_length_thrust: bool = False, landing_window: bool = False) -> WbcOutcome:
+              leg_length_thrust: bool = False, landing_window: bool = False,
+              mpc_force_feedforward: bool = False, wheel_radius: float | None = None) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -274,8 +273,13 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
     # - 普通 GROUND（jump 不活动）保持原行为：sample = sample_raw；
     # - jump.active 时：有固定 jump_reference 才用 sample_override，否则 sample=None，
     #   tasks.tasks() 必须走 sample=None 分支（pitch 用当前误差回零，不吃 MPC 参考）。
-    if jump is not None and jump.active:
+    # ANCHOR（2026-10-17，用户同意）：sample_override 优先。落地后 jump 已不活动，但锚定目标值
+    # 仍需注入 WBC，所以放行；sample_override is None 时两条分支与改动前完全一致
+    # （jump.active -> None；否则 sample_raw），零副作用由 t<t_anchor 与 S1 逐位全 0 验收。
+    if sample_override is not None:
         sample = sample_override
+    elif jump is not None and jump.active:
+        sample = None
     else:
         sample = sample_raw
     # E2/WP2：显式质心竖直目标直接进入 WBC 任务，None 时普通路径不变。
@@ -383,6 +387,29 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
         tau_ff, _peak = dynamics.thrust_torque(np.full(2, feedforward_force))
         tau_ff = np.asarray(tau_ff, dtype=float)
         feedforward_active = True
+    # P-b / Pb2（2026-10-17，用户同意）：MPC 计划力前馈接线。默认关闭；与 VMC 前馈走同一条路径。
+    # Pb2：加 landing_window 门控（只在落地锁存期内生效），且 tau_ff 真折叠进限幅与 dynamics_bias。
+    # R 取 sim.reduced.wheel_radius，不写死。
+    if (mpc_force_feedforward and landing_window and solution is not None
+            and wheel_radius is not None and float(wheel_radius) > 0.0):
+        plan_force = np.asarray(solution.force, dtype=float)
+        radius = float(wheel_radius)
+        tau_ff[dynamics.wheel_actuators[0]] = radius * float(plan_force[0])
+        tau_ff[dynamics.wheel_actuators[1]] = radius * float(plan_force[1])
+        feedforward_active = True
+        counters["mpc_ff_frames"] = counters.get("mpc_ff_frames", 0) + 1
+        _LOGGER.info(
+            "P-b MPC 计划力前馈：f=[%.4f, %.4f] tau_ff_wheel=[%.4f, %.4f] 生效帧=%d",
+            float(plan_force[0]), float(plan_force[1]),
+            float(tau_ff[dynamics.wheel_actuators[0]]),
+            float(tau_ff[dynamics.wheel_actuators[1]]), counters["mpc_ff_frames"])
+    if feedforward_active:
+        # Pb2（2026-10-17，用户同意）：真折叠。把 tau_ff 折进 WBC 的执行器限幅与 dynamics_bias，
+        # 使求解器对已施加力矩记账，再在求解后叠加 tau_ff（限幅自洽）。与 VMC 同一段代码。
+        limits_solve = replace(limits_solve,
+                               lower=limits_solve.lower - tau_ff,
+                               upper=limits_solve.upper - tau_ff)
+        dynamics_bias_solve = dynamics_bias_solve - dynamics.selection.T @ tau_ff
     torque, result = control.solve_wbc(
         mass=dynamics.mass(), selection=selection, dynamics_bias=dynamics_bias_solve,
         contacts=blocks, balance_tasks=balance, motion_tasks=motion, limits=limits_solve,

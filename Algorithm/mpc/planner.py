@@ -310,16 +310,24 @@ class VelocityPlanner:
         self._suspended = False
         self._commanded = False
 
-    def soft_reanchor(self, position: float, yaw: float) -> None:
-        """R1'：只把位置 / 偏航重锚到实测值，保留斜坡速度、加速度和 commanded 标记。"""
+    def soft_reanchor(self, position: float, yaw: float, *, reset_position: bool = False) -> None:
+        """只重锚偏航到实测，保留斜坡速度、加速度和 commanded 标记。
+
+        ``reset_position``（ANCHOR-3）：是否同时把**位置锚点**搬到实测位置。
+        默认 False——零输入扰动时目标就是扰动前的当前位置，不应被扰动本身改写；
+        只有真正驱动过（``commanded_motion``）时，错点才应跟在停车位置。
+        """
         if not np.all(np.isfinite([position, yaw])):
             raise ValueError("Reference reanchor must be finite")
-        self._forward = _RampState(float(position), self._forward.velocity, self._forward.acceleration)
+        self._forward = _RampState(float(position) if reset_position else self._forward.position,
+                                   self._forward.velocity, self._forward.acceleration)
         self._yaw = _RampState(float(yaw), self._yaw.velocity, self._yaw.acceleration)
         self._initialized = True
         self._suspended = False
         self.valid = True
         self.last_reset_reason = "soft_reanchor"
+        _LOGGER.info("参考软重锚: reset_position=%s s=%.4f yaw=%.4f measured=%.4f",
+                     reset_position, self._forward.position, yaw, position)
 
     def _align(self, position: float, yaw: float, speed: float, yaw_rate: float, reason: str,
                reset_position: bool = True) -> None:
@@ -333,7 +341,7 @@ class VelocityPlanner:
         self.mode = ReferenceMode.RESET
         self.last_reset_reason = reason
         self.reset_count += 1
-        _LOGGER.info("Reference reset: %s, s=%.4f v=%.4f yaw=%.4f reset_position=%s",
+        _LOGGER.info("event=align Reference reset: %s, s=%.4f v=%.4f yaw=%.4f reset_position=%s",
                      reason, self._forward.position, speed, yaw, reset_position)
 
     def plan(self, position: float, yaw: float, command: MotionCommand, dt: float,
@@ -390,6 +398,13 @@ class VelocityPlanner:
         target_v = np.clip(v_cmd, -limits.max_speed, limits.max_speed) if abs(v_cmd) > limits.velocity_deadband else 0.0
         target_w = np.clip(w_cmd, -limits.max_yaw_rate, limits.max_yaw_rate) if abs(w_cmd) > limits.yaw_rate_deadband else 0.0
         driving = bool(target_v or target_w)
+        # A-2-2（2026-10-17，用户同意）：诊断规划器位置锚点是否在漂。DEBUG 级（MPC 50 Hz，
+        # 不能用 INFO）；只看不改，不参与任何计算。
+        _LOGGER.debug(
+            "ref: mode=%s driving=%s suspended=%s target_v=%.6f fwd_pos=%.6f measured=%.6f "
+            "initialized=%s",
+            self.mode, driving, self._suspended, target_v, self._forward.position, position,
+            self._initialized)
         if driving:
             self.mode = ReferenceMode.DRIVE
             self._hold_time = 0.0

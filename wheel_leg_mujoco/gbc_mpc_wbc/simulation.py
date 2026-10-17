@@ -23,7 +23,7 @@ MPC 与 WBC 也解耦，因为两者频率不同，按异步运行）：
 本模块不做什么
 --------------
 - 不定义 WBC 任务与接触块（见 ``wbc.py``）、不实现 WBC 求解器（见 ``wbc_limited.py``）
-- 不建模型、不做线性化（见 ``robot.py`` / ``model_builder.py`` / ``model_grid.py``）
+- 不建模型、不做线性化（见 ``robot.py`` / ``model_builder.py``）
 - 不配置日志（见 ``logging_setup.py``）；这里只 ``get_logger`` 后写日志
 
 时序说明：物理步长取模型 ``opt.timestep``；``wbc_dt``/``mpc_dt`` 必须是它的整数倍
@@ -58,12 +58,6 @@ from Algorithm.wbc import ContactElimination  # noqa: E402
 
 G = 9.81
 _LOGGER = get_logger(__name__)
-
-# 腿长换挡滞回带宽 [m]。来源：实测站立腿长抖动 0.7 mm（峰峰）而网格间距 0.04 m，
-# 且标称腿长 0.2800 m 正好落在 0.26/0.30 两个格点的中点（判别式 min|g-L| 会打平，
-# 实测 3 s 内换了 9 次挡、能力表来回抖）。取 0.008 m = 网格间距的 1/5 = 实测抖动的 10 倍以上，
-# 等效在中点两侧各留 4 mm 死区（0.284 m 以上才切到上一点）。
-_LEG_LENGTH_GEAR_HYSTERESIS = 0.008
 
 # 驱动阶段（DRIVE 及其后的 BRAKE）的共模腿角预算 [rad]。单一真值来源：
 # objective._settings 与本模块的 gbc486_mpc_settings 都读它。
@@ -263,7 +257,7 @@ class SimulationConfig:
     """对应 circleg ``SimulationConfig`` 中本阶段用到的字段（同名、同默认值）。"""
 
     backend: str = "wls"          # 2026-10-04 用户指定：默认后端改为 WLS（nullspace 会饿死末级任务）
-    model_variant: str = "held_leg"        # held_leg（6 状态）| leg_input（8 状态）
+    model_variant: str = "leg_input"        # leg_input（8 状态，含腿摆角 φ）| held_leg（6 状态）
     # circleg preset 名（取自 APP._PRESETS）；"none" = circleg viewer 默认（tuned-fast-accel，无 ZMP）
     preset: str = "tuned-agile"            # 含 ZMP 参考（zmp_reference / zmp_split 0.3）
     # 标称腿长 [m]。M0 实测机构伸展上限 0.430 m、缩腿下限 0.14 m，所以取行程带中点
@@ -353,12 +347,10 @@ class Gbc486MpcWbcSimulation:
         self.records: list[dict] = []
         self.stop_reason = None
         self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
-                             wbc_clip=0, wbc_infeasible=0)
+                             wbc_clip=0, wbc_infeasible=0, mpc_ff_frames=0)
         # 任务名随 wbc.py 的任务集变化（现在是每条腿单独的 length_*/angle_*），
         # 用动态字典而不是写死的键，避免 KeyError。
         self.exhausted: dict[str, int] = {}
-        # 腿长拟合参数调度（方案 A）：网格懒加载；记录当前换挡点，仅当最近网格点变化才重建 MPC。
-        self._model_grid = None
         # ---------------- 跳跃装配（方案 v3）----------------
         # 跳跃是独立状态：规划器只吃测量量（腿长/腿长率/接触/姿态），不持有模型与控制器对象。
         self.jump = None
@@ -377,9 +369,19 @@ class Gbc486MpcWbcSimulation:
                 total_mass=float(np.sum(self.model.body_mass)),
                 leg_length_min=float(limits[0]), leg_length_max=float(limits[1]),
                 pitch_limit=float(self.mpc.settings.pitch_limit)))
-        self._scheduled_grid_point: float | None = None
         self.scaled: dict[str, int] = {}
         self.timings = dict(mpc=[], wbc=[])
+        # 第 0 步自检（2026-10-17，用户要求永久保留）：MPC 实际模型维数与 ZMP 摆腿通道的真实状态。
+        # 目的是定死“6 状态还是 8 状态”、“zmp_reference 是否打开”、“曲柄半径是否退回 preset”。
+        # 只读属性，不参与控制，也不改变任何初始化顺序。
+        _LOGGER.info(
+            "模型自检: variant=%s reduced.state_dim=%d mpc.model.state_dim=%d input_dim=%d "
+            "zmp_reference=%s zmp_split=%.3f zmp_crank_radius=%.4f zmp_com_height=%.4f",
+            config.model_variant, self.reduced.state_dim, self.mpc.model.state_dim,
+            self.mpc.model.input_dim, self.mpc.settings.zmp_reference,
+            self.mpc.settings.zmp_split, self.mpc.settings.zmp_crank_radius,
+            self.mpc.settings.zmp_com_height,
+        )
 
     def _apply_torque_limits(self) -> None:
         """按 config 覆盖执行器 ctrlrange。必须在建 dynamics / MPC 之前调用，
@@ -421,7 +423,8 @@ class Gbc486MpcWbcSimulation:
             freeze_jump_reference: bool = False, vmc_feedforward: bool = False,
             leg_length_compression: bool = False, leg_length_thrust: bool = False,
             thrust_only: bool = False, flight_zero_torque: bool = False,
-            flight_leg_retract: bool = False, flight_leg_extend: bool = False):
+            flight_leg_retract: bool = False, flight_leg_extend: bool = False,
+            mpc_force_feedforward: bool = False):
         """积分情景；四段时序在 ``loop.run_loop``（采样 / MPC / WBC / 输出 + 推进）。
 
         本方法只做委托：装配在 ``__init__``，时序在 ``loop.py``，控制算法在
@@ -439,7 +442,8 @@ class Gbc486MpcWbcSimulation:
                         thrust_only=thrust_only,
                         flight_zero_torque=flight_zero_torque,
                         flight_leg_retract=flight_leg_retract,
-                        flight_leg_extend=flight_leg_extend)
+                        flight_leg_extend=flight_leg_extend,
+                        mpc_force_feedforward=mpc_force_feedforward)
 
     def _precheck_jump(self) -> None:
         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。
@@ -459,54 +463,6 @@ class Gbc486MpcWbcSimulation:
         else:
             _LOGGER.info("起跳前预检通过：关节力矩峰值 %.2f N*m <= 限幅 %.2f N*m",
                          peak_now, limit)
-
-    def _schedule_mpc_leg_length(self) -> None:
-        """方案 A（用户 2026-10-06）：MPC 每次求解前按**当前腿长**填模型参数。
-
-        背景：降阶模型原本在 L=0.28 处一次性线性化后不再变，而实测 A 矩阵随腿长变化极大
-        （max|dA|=65.99，L 从 0.14 到 0.42），腿长一改 MPC 预测就与实际失配、前馈饱和
-        （实测 acceleration=[-70.5, 548.3, 0.14, -706.0]）。这里让模型的 A/B/极点/偏航惯量
-        随腿长走（8 点分段线性），能力表按最近腿长取（各点单独烘焙，不插值）。
-        腿长取**实测值**（由 ``LegKinematics`` 解析给出），与"高频解算、与控制器解耦"一致。
-        """
-        try:
-            from dataclasses import replace as _dataclasses_replace
-            if self._model_grid is None:
-                from .model_grid import ModelGrid
-                self._model_grid = ModelGrid()
-                _LOGGER.info("已加载腿长网格：%s", list(self._model_grid.grid))
-            legs = self.dyn.leg_state()
-            length = 0.5 * (float(legs[0]) + float(legs[2]))
-            params = self._model_grid.interpolate(length)
-            # ReducedModel 是 frozen dataclass（实测 FrozenInstanceError），不能原地改字段；
-            # 只传真正的字段：unstable_pole / yaw_inertia 是派生属性，用 hasattr 过滤会把它们
-            # 也算进来，导致 replace 报 unexpected keyword。
-            base = self.mpc.model
-            updates = {"A": np.asarray(params["A"], dtype=float),
-                       "B": np.asarray(params["B"], dtype=float),
-                       "metadata": {**base.metadata, **params["metadata"]}}
-            new_model = _dataclasses_replace(base, **updates)
-            # 只换 model 对象**不够**（实测：MPC 输出逐位不变）：WheelMPC 在 __init__ 里把 7 项
-            # 由 A/B 派生的量算好后永久缓存（discrete / qp / fallback_gain / _hip_drift_map /
-            # _lead_model / _disturbance_map / _disturbance_lead_map），求解用的是那些缓存，
-            # 必须整体重装 MPC。
-            nearest = float(min(self._model_grid.grid, key=lambda g: abs(float(g) - length)))
-            # 换挡必须带滞回：只有新格点比**当前**格点近出一个带宽才换（见 _LEG_LENGTH_GEAR_HYSTERESIS）。
-            if (self._scheduled_grid_point is None
-                    or abs(length - nearest) + _LEG_LENGTH_GEAR_HYSTERESIS
-                    < abs(length - self._scheduled_grid_point)):
-                previous = self.mpc
-                self.mpc = WheelMPC(new_model, self.mpc.settings)
-                # 换挡会**重建** MPC，而 WheelMPC.__init__ 把 _pitch_bias 置 0；预倾是斜坡累积
-                # 状态（每次求解只前进 pitch_bias_rate*dt），重建等于清零。这里把偏置状态一并迁移。
-                self.mpc.pitch_bias_target = float(previous.pitch_bias_target)
-                self.mpc._pitch_bias = float(getattr(previous, "_pitch_bias", 0.0))
-                self.mpc.pitch_bias_rate = float(previous.pitch_bias_rate)
-                # MPC 被换掉后必须同步给控制层，否则 SupervisedControl 仍持有旧对象。
-                self.control.mpc = self.mpc
-                self._scheduled_grid_point = nearest
-        except Exception as exc:  # 调度失败不能拖垮控制链：保留当前 MPC 继续跑
-            _LOGGER.warning("腿长调度失败（继续使用当前 MPC）：%s", exc)
 
     def _record(self, state, decision, sample, torque, result, predicted_normal, rows) -> dict:
         legs = self.dyn.leg_state()
