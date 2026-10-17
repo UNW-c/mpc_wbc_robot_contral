@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from gbc_mpc_wbc.logging_setup import setup_logging
 from gbc_mpc_wbc.simulation import Disturbance, Gbc486MpcWbcSimulation, SimulationConfig, default_command
 from gbc_mpc_wbc import control as _control
+from Algorithm.mpc import MotionCommand
 
 _LOGGER = logging.getLogger(__name__)
 RESULTS = ROOT / "results"
@@ -150,7 +151,7 @@ def _summary(frames, sim, release_end):
 
 
 def _disturbance(case):
-    if case == "baseline":
+    if case in ("baseline", "command_velocity"):
         return ()
     if case == "delta_velocity":
         return (Disturbance(time=1.0, delta_velocity=(0.0, 0.0, 0.80)),)
@@ -160,11 +161,28 @@ def _disturbance(case):
     raise ValueError(f"unsupported case: {case}")
 
 
+def _command(case, velocity: float, hold: float):
+    """CMD（16.3）：与 ``tools/view.py`` 同签名的按时间定值回调，只用于有输入工况。
+
+    ``0 ~ hold`` 给 ``velocity``，``hold`` 之后归零；其它 case 仍返回 ``default_command()``（零指令）。
+    这是测试入口，不参与生产代码。
+    """
+    if case != "command_velocity":
+        return default_command()
+
+    def command(time_s: float) -> MotionCommand:
+        return MotionCommand(velocity=(float(velocity) if float(time_s) < float(hold) else 0.0),
+                             yaw_rate=0.0)
+
+    return command
+
+
 def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              explicit_jump_reference=False, compression_only=False, freeze_jump_reference=False,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
-             flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None):
+             flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
+             command_velocity=0.5, command_hold=3.0):
     RESULTS.mkdir(exist_ok=True)
     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
@@ -173,7 +191,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
                               jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
-    sim.run(default_command(), duration, disturbances=_disturbance(case), trace_sink=frames.append,
+    sim.run(_command(case, command_velocity, command_hold), duration,
+            disturbances=_disturbance(case), trace_sink=frames.append,
             explicit_jump_reference=explicit_jump_reference, compression_only=compression_only,
             freeze_jump_reference=freeze_jump_reference, vmc_feedforward=vmc_feedforward,
             leg_length_compression=leg_length_compression, leg_length_thrust=leg_length_thrust,
@@ -193,7 +212,10 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
             "numpy": np.__version__,
             "case": case,
             "run_id": run_id,
-            "command": "default_command()",
+            "command": ("default_command()" if case != "command_velocity"
+                        else f"command_velocity(velocity={command_velocity}, hold={command_hold})"),
+            "command_velocity": (None if case != "command_velocity" else float(command_velocity)),
+            "command_hold_s": (None if case != "command_velocity" else float(command_hold)),
             "config": {
                 "backend": config.backend, "model_variant": config.model_variant,
                 "preset": config.preset, "nominal_length_m": config.nominal_length,
@@ -238,7 +260,13 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", default="P0")
-    parser.add_argument("--case", choices=("baseline", "delta_velocity", "qfrc"), default="baseline")
+    parser.add_argument("--case", choices=("baseline", "delta_velocity", "qfrc", "command_velocity"),
+                        default="baseline")
+    # CMD（16.3）：有输入速度指令工况；其它 case 忽略这两个参数。
+    parser.add_argument("--command-velocity", type=float, default=0.5,
+                        help="CMD：0~hold 期间的速度指令 [m/s]")
+    parser.add_argument("--command-hold", type=float, default=3.0,
+                        help="CMD：速度指令保持时长 [s]（之后归零）")
     parser.add_argument("--run-id", default="run01")
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--jump-height", type=float, default=0.10)
@@ -291,7 +319,9 @@ def main():
              flight_leg_retract=args.flight_leg_retract,
              flight_leg_extend=args.flight_leg_extend,
              mpc_force_feedforward=args.mpc_force_feedforward,
-             wheel_torque_limit=args.wheel_torque_limit)
+             wheel_torque_limit=args.wheel_torque_limit,
+             command_velocity=args.command_velocity,
+             command_hold=args.command_hold)
 
 
 if __name__ == "__main__":

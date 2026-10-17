@@ -25,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))  # noqa: E402
 from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
 from gbc_mpc_wbc.simulation import (Disturbance, Gbc486MpcWbcSimulation,  # noqa: E402
                                     SimulationConfig, default_command)
+from Algorithm.mpc import MotionCommand  # noqa: E402
 
 _LOGGER = get_logger(__name__)
 
@@ -63,6 +64,17 @@ def parse_args() -> argparse.Namespace:
                         help="启用跳跃并给定目标质心抬升 [m]")
     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
     parser.add_argument("--jump-time", type=float, default=1.0, help="起跳指令时刻 [s]")
+    # CMD（16.3）：有输入速度指令录像。默认 0.0 = 保持原行为（零指令）。
+    parser.add_argument("--command-velocity", type=float, default=0.0,
+                        help="CMD：0~hold 期间的速度指令 [m/s]，0 = 不加指令")
+    parser.add_argument("--command-hold", type=float, default=3.0,
+                        help="CMD：速度指令保持时长 [s]（之后归零）")
+    # 相机：默认自由相机（原行为）；tracking 时跟随 body("base")，否则机体一走远就出画。
+    parser.add_argument("--camera", choices=("free", "tracking"), default="free",
+                        help="free = 原来的自由相机；tracking = 跟随机体质心")
+    parser.add_argument("--camera-distance", type=float, default=1.6, help="tracking 相机距离 [m]")
+    parser.add_argument("--camera-elevation", type=float, default=-12.0, help="tracking 相机俯仰 [deg]")
+    parser.add_argument("--camera-azimuth", type=float, default=90.0, help="tracking 相机方位 [deg]")
     return parser.parse_args()
 
 
@@ -74,19 +86,39 @@ def main() -> int:
         backend=args.backend, model_variant=args.variant, preset=args.preset))
     model, data = sim.model, sim.data
     renderer = mujoco.Renderer(model, args.height, args.width)
+    camera = None
+    if args.camera == "tracking":
+        camera = mujoco.MjvCamera()
+        camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        camera.trackbodyid = int(model.body("base").id)
+        camera.distance = float(args.camera_distance)
+        camera.azimuth = float(args.camera_azimuth)
+        camera.elevation = float(args.camera_elevation)
     frames: list = []
 
     def grab(current) -> None:
-        renderer.update_scene(current)
+        if camera is None:
+            renderer.update_scene(current)
+        else:
+            renderer.update_scene(current, camera=camera)
         frames.append(renderer.render().copy())
 
     disturbances = ()
     if args.push_time >= 0.0:
         disturbances = (Disturbance(time=args.push_time,
                                      delta_velocity=(args.push_speed, 0.0, args.push_speed_z)),)
-    _LOGGER.info("开始录制：%.2f s / %d fps / 先平衡后推扰 %.2f m/s @ %.2f s",
-                 args.duration, args.fps, args.push_speed, args.push_time)
-    sim.run(default_command(), args.duration, disturbances=disturbances,
+    # CMD：与 view.py / jump_diagnostic 同签名的按时间定值回调；velocity=0 时退回零指令对象。
+    if args.command_velocity != 0.0:
+        hold = float(args.command_hold)
+        value = float(args.command_velocity)
+
+        def command(time_s: float) -> MotionCommand:
+            return MotionCommand(velocity=(value if float(time_s) < hold else 0.0), yaw_rate=0.0)
+    else:
+        command = default_command()
+    _LOGGER.info("开始录制：%.2f s / %d fps / 先平衡后推扰 %.2f m/s @ %.2f s / camera=%s",
+                 args.duration, args.fps, args.push_speed, args.push_time, args.camera)
+    sim.run(command, args.duration, disturbances=disturbances,
             frame_callback=grab, frame_interval=1.0 / args.fps,
             explicit_jump_reference=args.explicit_jump_reference,
             compression_only=args.compression_only,

@@ -1551,7 +1551,82 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
      `motion 被禁` 时机本身（扰动导致 25~36 帧被禁是否合理），不属本轮。
 
 ================================================================
-16. 交付队列
+16. CMD：有输入（速度指令）收敛测量（2026-10-17）
+================================================================
+
+16.1 入口确认（不新增接口，只用原生那个）
+
+  原生键鼠控制走的就是一个回调：
+
+  ```text
+  wheel_leg_mujoco/tools/view.py:127-130
+  def command(_time):
+      return MotionCommand(velocity=keyboard.read(), yaw_rate=keyboard.read_yaw_rate())
+  view.py:145  simulation.run(command, args.duration, viewer=viewer)
+  ```
+
+  `simulation.run` 每拍调一次 `command(t)`，**时序模拟与键鼠走的是同一个函数签名**，
+  只是把 `KeyboardCommandSource` 换成按时间返回定值的闭包。不改任何生产代码。
+
+  速度上限：`simulation.py:82  MAX_SPEED = 1.5`，本轮用 0.5，在带内。
+
+16.2 逻辑确认：确实走速度规划 + ZMP 点规划
+
+  | 环节 | 位置 | 内容 |
+  |---|---|---|
+  | 速度规划 | `planner.py:185 _RampState.advance` | 按加速度/制动上限把速度沿 S 曲线推到目标，位置随之积分 |
+  | 参考构造 | `controller.py` `reference.states()` | 8 通道参考轨迹 |
+  | ZMP 点规划 | `controller.py:693 _apply_zmp_reference` | `Δ* = z·a/g`，`split=1.0` 全给曲柄，写列 6/7 |
+
+  两者都在路径上，无落地/jump 分支。
+
+16.3 改动（只加测试入口，不动生产代码）
+
+  `wheel_leg_mujoco/tools/jump_diagnostic.py` 新增一个 case，与 `delta_velocity` 并列：
+
+  ```text
+  --case command_velocity
+    参数：--command-velocity 0.5   --command-hold 3.0   --duration 12.0
+    0.0 ~ hold       MotionCommand(velocity=+0.5, yaw_rate=0.0)
+    hold ~ duration  MotionCommand(velocity= 0.0, yaw_rate=0.0)
+  ```
+
+  实现方式：把 `jump_diagnostic` 传给 `simulation.run` 的 command 回调换成一个临时闭包
+  （与 `view.py` 同签名），其它一律不动。不新增帧记录字段。
+
+16.4 命令
+
+  ```text
+  run-id: CMD1
+  PYTHONUTF8=1 PYTHONPATH=. .venv/Scripts/python.exe \
+    wheel_leg_mujoco/tools/jump_diagnostic.py --stage CMD1 --case command_velocity \
+    --command-velocity 0.5 --command-hold 3.0 --run-id run01 --duration 12.0
+  ```
+
+  注：不传 jump 系列参数（本工况不跳）。
+
+16.5 记录项（本轮只测量，不设通过/失败门）
+
+  1. `com_vx` 与 `state_velocity` 的时间线：加速段能否到 0.5、稳态误差多大、上升时间多少；
+  2. **速度指令归零后（t=3.0）**：速度降到 0 的时刻、位置停在哪里、之后是否再漂；
+  3. `sample.state[0:2]`（WBC 拿到的参考位置/速度）在 t=3.0 前后是否重新锚定到停车位置；
+  4. `soft_reanchor` 被调用的次数、时刻、`reset_position` 取值
+     ---- **这是 `reset_position=True` 首次可能被执行的工况，必须逐条报**；
+  5. `decision.motion_enabled` / `commanded_motion` 的区间；
+  6. 参考腿角 `sample.state[6]` 与实测腿角的差值时间线（用于判断 15.3 那条 `[:,6]` 覆盖是否影响有输入工况）。
+
+16.6 符号说明
+
+  `MotionCommand.velocity` 的正方向以实测 `com_vx` 符号为准。若 +0.5 表现为向后运动，
+  报告里如实说明，不改判据、不改符号。
+
+16.7 已知局限
+
+  1. 本轮是测量，不是修复；跑完再决定改什么。
+  2. 本工况不包含跳跃，不用于验证落地。
+
+================================================================
+17. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -1576,7 +1651,7 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
 | 18 | **ANCHOR-2** | 已跑完（A-2-1 错误、A-2-2 成功） | `preview_lead=0.02` + 锚点漂移诊断 | T2 |
 | 19 | **ANCHOR-3** | **可跑（本节规格）** | 回退 `preview_lead` + 修 `soft_reanchor` 搬锚点 | PURGE / T1 / T2 |
 | 19 | P-a | 待定 | `unactuated_directions` 是否正确（随 DECOUPLE 一并处理） | — |
-| 20 | 待定 | 排队 | 摆腿减速 / 质心可行性（0.58 m/s^2 实测权限） | — |
+| 20 | **CMD** | **可跑（本节规格）** | 有输入速度指令 0.5 m/s → 归零，测收敛（首次覆盖 `reset_position=True`） | — |
 | 21 | 待定 | 排队 | 触地俯仰 -0.7332（飞行段决定） | — |
 | 22 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
 
