@@ -1626,7 +1626,251 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
   2. 本工况不包含跳跃，不用于验证落地。
 
 ================================================================
-17. 交付队列
+17. JUMPANCHOR：跳跃结束后把位置目标设回起跳前位置（2026-10-17）
+
+【作废】本节方案实测零效果，原因是写错了持有者：`planner._forward.position` 在跳跃工况里
+没有消费者（WBC 看到的是 `loop.py` ANCHOR 冻结的 `anchor_target`）。由第 18 节取代。
+保留本节仅供追溯。
+================================================================
+
+17.1 依据
+
+  用户在 CMD1 后定案：有输入减速已验证正常，问题回到落地后的目标值锚定；
+  目标定为**起跳前的位置**（与零输入语义一致：目标 = 动作发生前的位置）。
+  不再溯源 −0.2090 是谁写的（用户明确定：不查来源，直接用接口设值）。
+
+17.2 接口与一致性核对
+
+  接口已存在：`planner.soft_reanchor(position, yaw, reset_position=True)` 直接把
+  `_forward.position` 写成给定值（`planner.py:313`）。
+
+  | 量 | 含义 | 起跳前实测值 |
+  |---|---|---|
+  | `state.position` | `sim.distance`，起点 0 | **0.0000** |
+  | 触地时 `state.position` | | ≈ −0.0837 |
+  | PURGEc 现锚点 | | −0.2090 |
+
+  三者在同一坐标、同一单位（普拉纳 `_forward.position` 与 `state.position` 同轴）。
+
+17.3 改动（两处）
+
+**A. `Algorithm/mpc/controller.py`（`WheelMPC`）**
+
+  `__init__` 加持有者 `self._jump_anchor: float | None = None`，并新增：
+
+  ```python
+  def latch_jump_anchor(self, position: float) -> None:
+      """记录起跳前位置，跳跃结束后把位置目标设回这里。"""
+      if not np.isfinite(position):
+          raise ValueError("Jump anchor must be finite")
+      self._jump_anchor = float(position)
+
+  def release_jump_anchor(self, yaw: float) -> bool:
+      """跳跃结束：位置目标设回起跳前位置（复用 soft_reanchor 同一接口）。"""
+      if self._jump_anchor is None:
+          return False
+      self.planner.soft_reanchor(self._jump_anchor, yaw, reset_position=True)
+      self._jump_anchor = None
+      return True
+  ```
+
+**B. `wheel_leg_mujoco/gbc_mpc_wbc/control.py`**
+
+  在现有 jump 相位处理旁加两个调用点：
+
+  - `jump.active` 由 False 变 True 的第一拍 -> `self.mpc.latch_jump_anchor(state.position)`
+  - 跳跃结束（`RECOVER -> IDLE`，即 `landing_window` 关闭）那一拍 -> `self.mpc.release_jump_anchor(state.yaw)`
+
+  两处均需 DEBUG 日志：捕获值 / 释放时刻与目标值。
+
+17.4 命令
+
+  跳跏工况与 PURGEc 完全一致的命令（run-id 改 JUMPANCHOR），并补 T1c / T2c / CMD1 三项回归。
+
+17.5 判据
+
+  | 工况 | 判据 |
+  |---|---|
+  | 跳跏 | 跳跃结束后 `sample.state[0]` == 起跳前 `state.position`（≈0）；落地后位移向它收敛而不是单向漂 |
+  | 跳跏 | `release_jump_anchor` 只调用 1 次，`latch` 只调用 1 次 |
+  | T1c | 零输入站立与现结果一致（该路径只在 jump 边沿触发） |
+  | T2c | 不回退（位置仍回到锚点） |
+  | CMD1 | 不回退（跟踪与停止保持） |
+
+  记录：`latch` 捕获值、`release` 时刻与目标值、跳跃结束后 `sample.state[0:2]` 时间线、
+  消趀后 `com_x` 时间线。
+
+17.6 已知局限
+
+  1. 不在落地瞬态内强制目标，避免与落地缓冲抢权；只在跳跃结束时一次性设定。
+  2. 若落地后已漂出较远，回到起跳前位置所需时间要如实报，不做秒级承诺。
+  3. 本改动**不解决**参考腿角与实测差 0.172 rad 的问题，两者独立。
+
+================================================================
+18. JUMPANCHOR-2：改 ANCHOR 的锚定值为起跳前位置（2026-10-17）
+================================================================
+
+18.1 依据（测试agent本轮反馈，有据可查）
+
+  | 现象 | 数据 |
+  |---|---|
+  | `release` @t≈1.766 零效果 | 1.433~2.000 全体 `mpc_solution=None`，无消费者 |
+  | t=2.000 恢复首拍 ref0=−0.20161 | 恢复窗口 `mpc.reset(...)` -> `planner.reset(position=实测)` 覆写 |
+  | t≥2.05 `sample.state[0]` 恒为 −0.208951 | `loop.py:280-315` ANCHOR 在 t=2.012 捕获的冻结 `MotionSample` |
+  | 规划器锚点 −0.28866 @t≈2.4 | `hold_capture`，同样无人读 |
+
+  回归：T1d / T2d / CMD1b 与 T1c / T2c / CMD1 逐位全 0（零副作用，可直接重做）。
+
+18.2 根因（结构判断）
+
+  结构与有输入工况相同（运动中断开位置参考，结束时重锚），**但锚定值规则不同**：
+
+  | 工况 | 锚定值 | 理由 |
+  |---|---|---|
+  | 有输入加速->减速 | 停车位置 | 净位移是有意的 |
+  | 起跳->落地 | **起跳前位置** | 原地跳净位移应为零 |
+
+  ANCHOR 现在用 `feedback.state.position`（锚定时实测），即把有输入工况的规则套到了跳跏上，
+  于是落地时已经漂到 −0.209，它把 −0.209 固化成目标，漂移永远不会被纠正。
+
+18.3 改动 A：撤销第 17 节（两处都没用）
+
+  - `Algorithm/mpc/controller.py`：删掉 `latch_jump_anchor` / `release_jump_anchor` 与 `_jump_anchor`
+  - `wheel_leg_mujoco/gbc_mpc_wbc/control.py`：删掉对应的两个调用点及 DEBUG 日志
+
+  理由：写的是无人读的持有者，留着就是“设了值但没生效”的假象（§15.1 第 4 条）。
+
+18.4 改动 B：`wheel_leg_mujoco/gbc_mpc_wbc/loop.py`（就两行）
+
+  **捕获点**：在现有“整跳只锚定一次”的复位处（`elif _landed_phase == "COMPRESS":` 分支，
+  与 `anchor_latched/ anchor_holdoff / anchor_target` 清零同处）：
+
+  ```python
+  jump_start_position = float(feedback.state.position)
+  ```
+
+  **赋值**：ANCHOR 构建 `target` 时：
+
+  ```python
+  target[0] = jump_start_position     # 原来：float(feedback.state.position)
+  ```
+
+  其余字段（`target[1]=0`、`target[4]=world yaw`、`target[6]=pose.angle-phi_eq`）不动。
+
+  一致性：`feedback.state.position` 是 `sim.distance`，与 `target[0]` 同一坐标系同一单位；
+  起跳前实测值为 0.0000（PURGEc）。
+
+18.5 判据
+
+  | 工况 | 判据 |
+  |---|---|
+  | 跳跏（PURGEc 同命令） | 落地锚定后 `sample.state[0]` == 起跳前 `state.position`（≈0），不再是 −0.208951 |
+  | | 落地后位移向 0 收敛，而不是单向漂到 +3.5 |
+  | | `anchor_target` 整跳只构建 1 次（`anchor_info.t_anchor` 记录） |
+  | T1d / T2d / CMD1b 回归 | 不回退（T2d 仍回锚、CMD1b 仍停在 +1.39279） |
+  | 副作用 | 确认 `latch_jump_anchor`/`release_jump_anchor` 已完全移除（`grep` 无引用） |
+
+  记录：`jump_start_position` 捕获值、`anchor_info` 全字段、消趀后 `com_x` 与 `com_vx` 时间线。
+
+18.6 已知局限
+
+  1. 不清算 `hold_capture` 在 t≈2.4 重锚到 −0.28866 那条路径（无人读，本轮不管）。
+  2. `target[6]` 仍冻结，而腿长落地后仍从 0.281 变到 0.267，`phi_eq` 随之变，冻结值会过期；
+     与量到的 0.172 rad 腿角偏差同处，另开一轮。
+  3. `planner.reset`（硬重锚）无日志，本轮不加；需要时另开诊断轮。
+
+================================================================
+19. 删 ANCHOR 旁路：落地后回到正常 MPC + ZMP 控制（2026-10-17）
+================================================================
+
+19.1 根因（本节是定案，取代第 17/18 节）
+
+  跳跃工况落地后，`anchor_target` 非 None，经 `sample_override` 整体顶替 WBC 的参考：
+  MPC 轨迹采样与 `_apply_zmp_reference` 的 CoM/ZMP 规划全部被旁路。
+  实测证据（JUMPANCHOR2，t≥2.2 共 9799 帧）：
+
+  | 项 | 值 |
+  |---|---|
+  | `output_source` | wbc_update 2449 / zero_order_hold 7350 |
+  | `jump.phase` | 全程 IDLE |
+  | `decision.mode` | 全程 ground |
+  | `ctrl[4]` | min −0.8163 / max +0.5924 / 末值 **+0.01379** |
+  | `ctrl[4] < 0` | 384 / 9799 帧（3.9%） |
+  | MPC force 末帧 | [53.53, 53.50, 38.68] N（**无消费者**） |
+  | `xfrc_applied`/`qfrc_applied`/`tau_ff`/`tau_jump`/`thrust_applied` | **全窗口恒 0** |
+
+  结论：
+  1. **不存在控制器之外的轮毂写入路径**（五个外部通道全为 0）；
+  2. 发给轮毂的就是 WBC 输出（+0.0138 N·m -> 当量力 0.18 N -> 0.012 m/s²，
+     与实测 +0.023 m/s² 同量级同符号）；WBC 自身需求为 −50，却仍在下发前向力矩；
+  3. MPC 只规划不执行（差 300 倍）；ZMP 点规划被旁路。
+
+  **所以修复方向是删旁路，不是给旁路喂值。第 17/18 节作废。**
+
+19.2 引用点枚举（强制步骤①，已完成）
+
+  | 行 | 内容 | 处置 |
+  |---|---|---|
+  | 96-100 | `anchor_latched`/`anchor_holdoff`/`anchor_target`/`anchor_info` | 删（`anchor_holdoff` 改名 `landed_frames`） |
+  | 102 | `jump_start_position` | 删 |
+  | 270-281 | LANDING/RECOVER 置 `jump_landed`；COMPRESS 清零 | **保留 `jump_landed`**（406 行 `geometrically_airborne` 使用），只删 276-281 与锚定相关行 |
+  | 283-325 | ANCHOR 构建块 | **整块删** |
+  | 353-358 | `wbc_holds` 腿角覆盖（`anchor_leg_world` + 实测 pitch 反算） | **删**（用户 2026-10-17 确认） |
+  | 375-376 | `sample_override = anchor_target` | 删该分支，只留 `jump_reference` 支 |
+  | 379 | `landing_window = jump_landed and not anchor_latched` | **改写为逐位等价形式**（见 19.3） |
+  | 664-665 | 记录字段 `anchor_latched` / `anchor` | 删 |
+  | 406 | `geometrically_airborne = ... and not jump_landed` | **不动** |
+
+19.3 两个保护点的处置
+
+  （a）`landing_window`：`anchor_latched` 恰在 `anchor_holdoff >= ANCHOR_HOLDOFF_FRAMES`
+  那一帧置真，故下式与现状**逐位等价**：
+
+  ```python
+  landing_window = (jump_landed and landed_frames < ANCHOR_HOLDOFF_FRAMES)
+  ```
+
+  `landed_frames` 只做纯帧计时，不再有任何锚定语义。
+
+  （b）`wbc_holds` 腿角覆盖：随旁路一起删，腿角目标回到 `_apply_zmp_reference`
+  写入的 `reference[:,6]/[:,7]`。因为删后腿角行为会变，用 19.5 的瞬态回归堆底。
+
+19.4 目标值：一行都不用写（优先验证）
+
+  原地跳全程 `mode=ground`、无速度指令，`_forward` 从未被驱动：
+  起跳前 `state.position = −0.002785`（JUMPANCHOR2 记录）。现有 `soft_reanchor`
+  （`reset_position=False`，PURGEc 实测 19 次）不搬位置，锚点保持起跳前位置。
+
+  -> **先只删旁路、不改任何目标值，看 `sample.state[0]` 是否已是起跳前位置。**
+  仅当实测偏离超过 0.01 m 时，才补**一次**
+  `planner.soft_reanchor(起跳前位置, yaw, reset_position=True)`（现成接口，不新写）。
+
+19.5 判据
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 静态 | `grep anchor_target\|anchor_latched\|anchor_info\|jump_start_position\|ANCHOR_HOLDOFF` | 无残留（`landed_frames` 除外） |
+  | | 记录字段 `anchor` / `anchor_latched` | 已删 |
+  | 功能 | `sample_override` | 落地后为 None，仅飞行段非 None |
+  | | WBC 参考来源 | MPC 轨迹采样；`reference[:,6]/[:,7]` 由 `_apply_zmp_reference` 写入 |
+  | | `sample.state[0]` | ≈ 起跳前 `state.position`（偏差 ≤ 0.01 m） |
+  | | 位置 | 落地后向 0 收敛，不再单向漂到 +4.0 m |
+  | | 瞬态后 `|pitch|` | ≤ 0.2618 rad（15°） |
+  | 回归 | 落地瞬态 6 项 | 间隙 ≈0.2218、ABORT 0、越界 0、单支撑 0、airborne_zero 0、瞬态后 max|pitch| ≈0.258 |
+  | | T1e / T2e / CMD1c | 逐位全 0（不跳工况不经过本改动） |
+
+  记录：`jump_landed` 首次置位时刻、`landed_frames` 归零时刻、
+  落地后 `sample.state` 全 8 通道、`reference[:,6]` 与实测腿角之差、
+  `com_x`/`com_vx` 时间线、`ctrl[4]` 正负帧数统计。
+
+19.6 不做的事
+
+  1. 不改任何增益/权重/限幅/阈值。
+  2. 不动 `tau_ff` 恒 0（与 CMD1c 对齐后若也恒 0 即为正常，只做口径记录）。
+  3. 不动 `controller.py:418` 覆盖式赋值与 `wbc.py:247` 索引（已排队，另开一轮）。
+
+================================================================
+20. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -1650,9 +1894,13 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
 | 17 | **DECOUPLE** | 等 PURGE | 新建 `wheel_leg_mujoco/algorithm/`，逐模块迁入，删掉对 `Algorithm` 的引用 | PURGE |
 | 18 | **ANCHOR-2** | 已跑完（A-2-1 错误、A-2-2 成功） | `preview_lead=0.02` + 锚点漂移诊断 | T2 |
 | 19 | **ANCHOR-3** | **可跑（本节规格）** | 回退 `preview_lead` + 修 `soft_reanchor` 搬锚点 | PURGE / T1 / T2 |
-| 19 | P-a | 待定 | `unactuated_directions` 是否正确（随 DECOUPLE 一并处理） | — |
-| 20 | **CMD** | **可跑（本节规格）** | 有输入速度指令 0.5 m/s → 归零，测收敛（首次覆盖 `reset_position=True`） | — |
-| 21 | 待定 | 排队 | 触地俯仰 -0.7332（飞行段决定） | — |
-| 22 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
+| 20 | P-a | 待定 | `unactuated_directions` 是否正确（随 DECOUPLE 一并处理） | — |
+| 21 | **CMD** | 已完成（run02 通过） | 有输入速度指令 0.5 m/s → 归零，测收敛 | — |
+| 22 | **JUMPANCHOR** | 作废（零效果，写错持有者） | 跳跃结束后把位置目标设回起跳前位置（沿规划器写入） | CMD1 |
+| 23 | **JUMPANCHOR-2** | 作废（仍在调旁路的值） | 改 ANCHOR 锚定值为起跳前位置 | JUMPANCHOR |
+| 24 | **NOANCHOR** | **可跑（第 19 节规格）** | 删 ANCHOR 旁路，落地回到 MPC + ZMP 正常控制 | JUMPANCHOR-2 |
+| 25 | 待定 | 排队 | `controller.py:418` 覆盖改叠加 + 核对 `zmp_crank_radius` | — |
+| 26 | 待定 | 排队 | `wbc.py:247` `acceleration[3]` -> `acceleration[6]` | — |
+| 27 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
 
 ================================================================

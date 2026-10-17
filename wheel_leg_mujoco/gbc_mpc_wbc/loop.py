@@ -33,10 +33,9 @@ from .logging_setup import get_logger  # noqa: E402
 # viewer 刷新周期（仿真时间），约 60 fps。见本文件循环尾部 viewer.sync() 处的说明：
 # 每物理步都 sync 会让 viewer 比实时慢 9 倍（渲染 91441 顶点的 base_link 等）。
 VIEWER_SYNC_DT = 1.0 / 60.0
-# ANCHOR（2026-10-17，用户同意）：锤定触发的连续帧数。来源：用户指定 20 帧。作用是避掉
-# t=1.893 那个单帧 mode 抖动；启动时 t=0.099 那次 recovery->ground 不误触发因为那时
-# jump_landed 还是 False。纯状态判据，不含经验时间参数。
-ANCHOR_HOLDOFF_FRAMES = 20
+# 落地窗口（原 ANCHOR 锤定帧数，2026-10-17 用户确认保留 20 帧）。来源：用户指定 20 帧；
+# 作用是避掉 t=1.893 那个单帧 mode 抖动。现在只做纯帧计时，不再有任何锚定语义。
+LANDING_WINDOW_FRAMES = 20
 _LOGGER = get_logger(__name__)
 
 
@@ -64,7 +63,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
                           flight_leg_profile_torque, landing_buffer_torque)
     from .jump import JumpObservation, LIFTOFF_GAP
-    from .leg_angle_anchor import phi_body_reference, phi_eq
     from Algorithm.contact_state import JumpPhaseHint
     from Algorithm.mpc.trajectory import MotionSample
     from . import robot as R
@@ -93,11 +91,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     previous_com_time = None
     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
-    anchor_latched = False       # ANCHOR：本跳是否已完成一次性目标值锚定
-    anchor_holdoff = 0           # ANCHOR：jump_landed ∧ mode==ground 的连续帧计数
-    anchor_target = None         # ANCHOR：捕获的目标值（MotionSample，经 sample_override 注入）
-    anchor_leg_world = 0.0       # ANCHOR：世界系腿角目标 phi_eq(anchor_length)
-    anchor_info = {}             # ANCHOR：捕获量（日志与轨迹记录用）
+    landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
     feedback = None              # 采样级：最近一拍反馈
     solution = None              # MPC 级：最近一次解（WBC 与记录共用）
@@ -270,60 +264,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             jump_landed = True
         elif _landed_phase == "COMPRESS":
             jump_landed = False          # 新一跳开始，解锁
-            # ANCHOR：整跳只锚定一次，新一跳开始一并清零。
-            anchor_latched = False
-            anchor_holdoff = 0
-            anchor_target = None
-            anchor_info = {}
-        # ANCHOR（2026-10-17，用户同意）：落地后一次性目标值锚定。触发是纯状态判据——
-        # jump_landed ∧ decision.mode==ground 连续 ANCHOR_HOLDOFF_FRAMES 帧，整跳只触发一次。
-        # 位置/速度锚 state 系（feedback.state.position / 0），偏航锚世界系 yaw（缩减状态的 yaw
-        # 分量就是世界系 yaw）；世界系 CoM 位置只捕获记录、不进目标值，避开坐标跳变。
-        if jump_landed and not anchor_latched:
-            anchor_holdoff = (anchor_holdoff + 1
-                              if feedback.decision.mode == "ground" else 0)
-            if anchor_holdoff >= ANCHOR_HOLDOFF_FRAMES:
-                anchor_leg = sim.dyn.leg_state()
-                anchor_length = 0.5 * (float(anchor_leg[0]) + float(anchor_leg[2]))
-                anchor_com = np.asarray(d.subtree_com[int(m.body("base").id)], dtype=float)
-                anchor_yaw = float(np.asarray(sim.dyn.attitude(), dtype=float)[2])
-                anchor_vx = (0.0 if previous_com_xz is None or previous_com_time is None
-                             or float(d.time) <= previous_com_time
-                             else (float(anchor_com[0]) - float(previous_com_xz[0]))
-                             / (float(d.time) - previous_com_time))
-                target = np.asarray(feedback.state.vector(sim.reduced.state_dim),
-                                    dtype=float).copy()
-                target[0] = float(feedback.state.position)   # 位置：state 系（同量比较）
-                target[1] = 0.0                              # 速度目标 0
-                target[2] = 0.0                              # pitch 目标
-                target[3] = 0.0                              # pitch_rate 目标
-                target[4] = anchor_yaw                       # 偏航角目标 = 世界系 yaw
-                target[5] = 0.0                              # 偏航角速度目标 0
-                if target.size > 7:
-                    target[6] = float(sim.pose.angle - phi_eq(anchor_length))
-                    target[7] = 0.0
-                anchor_target = MotionSample(
-                    state=target,
-                    acceleration=np.zeros(sim.reduced.state_dim, dtype=float),
-                    force=np.zeros(sim.reduced.input_dim, dtype=float),
-                    timestamp=float(d.time))
-                anchor_leg_world = float(phi_eq(anchor_length))
-                anchor_info = {
-                    "t_anchor": float(d.time),
-                    "anchor_position_state": float(feedback.state.position),
-                    "anchor_position_world": float(anchor_com[0]),
-                    "anchor_yaw": anchor_yaw,
-                    "anchor_length": float(anchor_length),
-                    "state_velocity": float(feedback.state.velocity),
-                    "com_vx": float(anchor_vx),
-                }
-                anchor_latched = True
-                _LOGGER.info(
-                    "ANCHOR 锚定生效：t=%.4f position_state=%.5f position_world=%.5f "
-                    "yaw=%+.6f length=%.5f state.velocity=%+.5f com_vx=%+.5f",
-                    float(d.time), float(feedback.state.position), float(anchor_com[0]),
-                    anchor_yaw, float(anchor_length), float(feedback.state.velocity),
-                    float(anchor_vx))
+            landed_frames = 0            # 新一跳开始，落地帧计时清零
+        # 落地后 ground 模式的连续帧数：只用于 landing_window 的帧计时（NOANCHOR，2026-10-17）。
+        landed_frames = (landed_frames + 1
+                         if jump_landed and feedback.decision.mode == "ground" else 0)
         # LAND4（2026-10-17，用户同意）：离地判据改为“估计器无接触”且“几何也无接触”双确认，
         # 避免“离地档清零力矩 -> 法向力 0 -> 估计器持续报无接触”的自锁。几何来源与 jump.py 一致。
         _geometry_contact = tuple(bool(v) for v in sim.dyn.contact_geometry()[0])
@@ -341,15 +285,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         # COMPRESS/THRUST 有接触时持续调用 WBC。disconnect 字段仅作状态记录，不再改变 WBC 调用。
         jump_phase_now = None if jump_command is None else jump_command.phase.value
         contact_available = bool(feedback is not None and any(feedback.decision.contact))
-        # ANCHOR：锚定后腿角目标改世界系 phi_eq(anchor_length)，机体系参考按实测 pitch 换算
-        # （phi_body_reference，与 LAND3 同一口径），目标在世界系不变、随 pitch 收敛而变。
-        # 锚定前的 holds 原样透传，保证 t<t_anchor 逐位一致。
+        # 腿角目标回到 _apply_zmp_reference 写入的 reference[:,6]/[:,7]（NOANCHOR 删去覆盖）。
         wbc_holds = jump_holds
-        if anchor_latched:
-            _phi_body = float(phi_body_reference(
-                anchor_leg_world, float(np.asarray(sim.dyn.attitude(), dtype=float)[1])))
-            wbc_holds = {"angle_R": float(sim.pose.angle - _phi_body),
-                         "angle_L": float(sim.pose.angle - _phi_body)}
         if (sim.timing.wbc_due(step) and not airborne_active
                 and jump_phase_now != "FLIGHT" and contact_available):
             wbc_called = True
@@ -367,11 +304,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 leg_length_compression=leg_length_compression,
                 leg_length_thrust=leg_length_thrust,
                 jump_config=(None if sim.jump is None else sim.jump.config),
-                sample_override=(anchor_target if anchor_target is not None
-                                 else (jump_reference if explicit_jump_reference
-                                       and jump_command is not None and jump_command.active
-                                       else None)),
-                landing_window=(jump_landed and not anchor_latched),
+                sample_override=(jump_reference if explicit_jump_reference
+                                 and jump_command is not None and jump_command.active
+                                 else None),
+                landing_window=(jump_landed and landed_frames < LANDING_WINDOW_FRAMES),
                 mpc_force_feedforward=mpc_force_feedforward,
                 wheel_radius=float(sim.reduced.wheel_radius))
             torque = outcome.torque
@@ -623,7 +559,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "thrust_applied": bool(thrust_applied),
                 "pitch": float(feedback.state.pitch),
                 "pitch_rate": float(feedback.state.pitch_rate),
-                # ANCHOR：偏航与 state 系速度需要进轨迹（判据与反馈表要用实测值，不用 MPC 节点）。
+                # 偏航与 state 系速度需要进轨迹（判据与反馈表用实测值，不用 MPC 节点）。
                 "yaw": float(feedback.state.yaw),
                 "yaw_rate": float(feedback.state.yaw_rate),
                 "state_velocity": float(feedback.state.velocity),
@@ -656,8 +592,6 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     "context": int(feedback.decision.context),
                 },
                 "airborne_active": bool(airborne_active),
-                "anchor_latched": bool(anchor_latched),
-                "anchor": (None if not anchor_info else dict(anchor_info)),
                 "geometrically_airborne": bool(geometrically_airborne),
                 "flight_zero_torque": bool(flight_zero_torque),
                 "flight_leg_retract": bool(flight_leg_retract),
