@@ -1870,7 +1870,422 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
   3. 不动 `controller.py:418` 覆盖式赋值与 `wbc.py:247` 索引（已排队，另开一轮）。
 
 ================================================================
-20. 交付队列
+20. VJUMP：前进中起跳，落地后停住（2026-10-17）
+================================================================
+
+20.1 工况定义（用户口径）
+
+  1. 静止 -> 指令 0.5 m/s 加速并稳定；
+  2. **保持 0.5 m/s**，行进中触发跳跃（压缩 -> 释放 -> 滞空）；
+  3. **落地后指令归零，机器人停在落地点**。
+
+  语义：落地位置作为新起点；不要求回到起跳点，也不要求继续前进。
+
+  用户已明确：不做只读预检（斜坡推进条件 / 触发方式 / 压缩段速度门控 /
+  `commanded_motion` 取值），直接跑。
+
+20.2 控制器侧不改任何代码
+
+  ANCHOR 旁路已删（第 19 节，提交 32dd667），落地后由正常 MPC + ZMP 接管。
+  现有 `soft_reanchor(position, yaw, reset_position=bool(commanded_motion))`：
+  指令归零后 `commanded_motion` 为 False -> 不搬位置锚点 -> 锚点保持规划器现值。
+  **本轮不新增任何落地专用逻辑，不改任何增益/权重/阈值/限幅。**
+
+20.3 入口
+
+  `wheel_leg_mujoco/tools/jump_diagnostic.py`，参照 CMD1 已有参数：
+
+  ```
+  --case command_velocity --command-velocity 0.5 --command-hold <T>
+  ```
+
+  并**打开跳跃（不加 `--no-jump`）**；`--jump-height 0.18 --jump-stroke 0.12
+  --jump-time 1.0 --leg-length-compression --leg-length-thrust
+  --flight-zero-torque --flight-leg-retract --flight-leg-extend` 沿用。
+
+  `T` 取值：使归一零发生在落地之后，初始取 4.0（落地约 1.75 s）。
+
+  [TODO-1] 若无“速度指令 + 跳跃”的组合入口，由测试agent最小新增该组合（仅测试工具，
+  不涉及控制逻辑）；新增前先把 `--help` 原文贴回核对参数名，禁止自己取名。
+
+20.4 记录项
+
+  - `command_velocity` 时序（帧里目前没有，需新增）；
+  - `decision.motion_enabled`、planner 的目标位置与目标速度；
+  - `soft_reanchor` 调用时刻与 `reset_position` 取值（A-3-2 已加 INFO 日志）；
+  - 离地与落地时刻、各自 `com_vx`、轮最大离地间隙；
+  - 落地后 0.2 s 内的轮速与 `com_vx`（看是否打滑）。
+
+20.5 判据
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 起跳 | 离地瞬间 `com_vx` | 0.5 ± 0.1 |
+  | 高度 | 轮最大离地间隙 | >= 0.20 m（硬下限） |
+  | 异常 | ABORT / 越界 / 单支撑 / `airborne_zero` | 全 0 |
+  | 姿态 | 瞬态后 `|pitch|` | <= 0.2618 rad |
+  | 停住 | 指令归零后 | `com_vx` 在窗口内归零 |
+  | | 之后位置跨度 | <= 0.01 m |
+  | 不倒退 | 落地后位置向起跳点方向回退 | <= 0.05 m |
+  | 参考 | 落地后 | `sample_override` 为 None，参考来自 MPC 轨迹 |
+
+  报告需给出上表每项实测值，不允许只报结论。
+
+20.6 不做的事
+
+  1. 不改任何参数（增益/权重/限幅/阈值/时间常数）。
+  2. 不写落地专用控制逻辑。
+  3. 不动 `controller.py:418` 与 `wbc.py:247`（已排队）。
+
+================================================================
+21. VJUMP-VIEW：view 里复现验收跳跃工况（2026-10-17）
+================================================================
+
+21.1 问题（已核实）
+
+  `view.py:66-67`：`--jump-height` 默认 `None` -> `simulation.py:358` 不构造 `sim.jump`
+  -> `loop.py:132` 触发条件不成立 -> 永不跳跃。
+
+  `view.py:145` 只传 `(command, duration, viewer)`，而 `simulation.run(...)`
+  （`simulation.py:425-429`）的下列参数默认全 False：
+
+  ```
+  leg_length_compression, leg_length_thrust, flight_zero_torque,
+  flight_leg_retract, flight_leg_extend
+  ```
+
+  即 view 里只能跑“裸跳”，与已验收工况不是同一套。
+
+21.2 改动范围：只改 `wheel_leg_mujoco/tools/view.py`
+
+  （a）argparse 新增 5 个开关，拼写与 `jump_diagnostic.py` 一致：
+
+  ```
+  --leg-length-compression
+  --leg-length-thrust
+  --flight-zero-torque
+  --flight-leg-retract
+  --flight-leg-extend
+  ```
+
+  全部 `action="store_true"`，默认 False（不传时行为与现状一致）。
+
+  （b）`view.py:145` 透传：
+
+  ```python
+  summary = simulation.run(command, args.duration, viewer=viewer,
+                           leg_length_compression=args.leg_length_compression,
+                           leg_length_thrust=args.leg_length_thrust,
+                           flight_zero_torque=args.flight_zero_torque,
+                           flight_leg_retract=args.flight_leg_retract,
+                           flight_leg_extend=args.flight_leg_extend)
+  ```
+
+  （c）启动时打印一行生效配置（开机就能在日志里核对，不靠感觉）：
+
+  ```
+  jump_height=None/0.18 jump_stroke=0.12 jump_time=8.0
+  compression=False thrust=False zero_torque=False retract=False extend=False
+  ```
+
+21.3 不改的事
+
+  1. 不动任何控制代码（`gbc_mpc_wbc/` 下所有文件）、不动 `Algorithm/`。
+  2. 不动任何增益/权重/限幅/阈值/时间常数。
+  3. 不新增其他开关（`explicit_jump_reference` 等用不到的不加）。
+
+21.4 复现命令（与验收工况同参数，仅把 `--jump-time` 放宽到你手动准备）
+
+  ```
+  cd C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco
+  ..\.venv\Scripts\python.exe tools\view.py --backend wls --duration 60 ^
+    --jump-height 0.18 --jump-stroke 0.12 --jump-time 8.0 ^
+    --leg-length-compression --leg-length-thrust --flight-zero-torque ^
+    --flight-leg-retract --flight-leg-extend
+  ```
+
+  若需与 `jump_diagnostic` 完全对齐（含 t=1.0 触发）：`--jump-time 1.0`。
+
+21.5 验收
+
+  | 项 | 要求 |
+  |---|---|
+  | 启动日志 | 21.2(c) 那行打印正确，5 个开关与命令行一致 |
+  | 跳跃 | 到 `jump_time` 时相位机进入 COMPRESS -> THRUST -> FLIGHT |
+  | 高度 | 轮最大离地间隙 >= 0.20 m（目测可见离地） |
+  | 异常 | 无 ABORT 日志、无控制器保护告警异常堆 |
+  | 回归 | 不传 5 个开关时行为与现状逐位一致（默认全 False） |
+
+21.6 已知限制（不在本轮）
+
+  1. 实时倍率 0.280（实测 3.566 ms/步），未修；手测时间需除以 0.28 换算。
+  2. `view.py:134` 的注释“headless 0.95 倍、viewer 3.56 倍”与实测不符（headless 已 0.280），
+     待后续修正注释；本轮不改。
+
+================================================================
+22. PERF：消除每步重复计算（2026-10-17）
+================================================================
+
+22.1 依据（cProfile，headless 1 s = 1000 步，合计 3.042 s）
+
+  | 占比 | 函数 | 每步调用 |
+  |---|---|---|
+  | 32% | `dynamics.py:237 rowset`（内含 `_evaluate` 0.917 s） | 2 |
+  | 13% | `dynamics.py:380 recover_contact_force` | 1.25 |
+  | 10% | `projection.py:273 from_matrices` | 1.5 |
+  | 10% | `output.py:34 advance_physics` | 1 |
+  | 8% | `dynamics.py:396 joint_limit_active`（纯 numpy） | 2.25 |
+  | 8% | `supervision.solve_wbc` | 0.25 |
+  | 7% | `leg_kinematics.py:129 _chain`（来自 `lengths`） | 3 |
+  | 5% | `mj_step` + `mj_forward` | 1 |
+
+  调用归属（已实测）：
+  - `rowset()`：`sampling.py:51` + `sampling.py:97`，**方法不带参数**；
+  - `joint_limit_active()`：`output.py:41` + `dynamics.py:378 contact_untrusted`，不带参数；
+  - `lengths(angles)`：`dynamics.py:300` + `dynamics.py:341`；
+  - `_evaluate` 每步 6 次 = rowset 自身 2 次 + `_evaluate_at` 4 次（每个 rowset 调 2 次）。
+
+  关键前提：上述采样调用全部发生在 `mj_step`（`output.py:34`，循环末尾）**之前**，
+  同一物理步内状态未被改写 -> 重算结果逐位相同。
+
+22.2 改动项（只加缓存，不改算法）
+
+  | 项 | 做法 | 预期收益 |
+  |---|---|---|
+  | `rowset()` | 无参方法，按物理步缓存；每步首次调用后命中 | 32% -> 约 16% |
+  | `joint_limit_active()` | 同上 | 8% -> 约 0 |
+  | `lengths(angles)` | 以 `tuple(angles)` 为键缓存（同一拍内角度未变即命中） | 7% -> 约 3% |
+  | 采样侧 `recover_contact_force` | 仅缓存 `sampling.py:102` 那一路（入参同拍内不变）；`control.py:461`（WBC）**不缓存** | 13% -> 约 8% |
+
+  实现约束：
+  1. 缓存只能以**物理步**为生命周期，每步开头清空（建议在 `loop.run_loop` 每拍开头调一次
+     `sim.dyn.begin_step()`）；
+  2. 遇到以下任一事件必须立即失效：`mj_step`、`mj_forward`、扰动注入、`viewer.perturb` 应用后；
+  3. 缓存值必须是**首次计算的原对象/原数组副本**，不得重排运算顺序、不得改变 dtype 与形状。
+
+22.3 不改的事
+
+  1. 不改任何增益/权重/限幅/阈值/时间常数/控制频率/积分参数；
+  2. 不缓存 `solve_wbc`、`projection.from_matrices`、svd/pinv/lstsq（这些是真实计算）；
+  3. 不改 `mj_step`/`mj_forward`。
+
+22.4 验收（硬要求：逐位一致）
+
+  | 项 | 要求 |
+  |---|---|
+  | 位相同 | T1e / T2e / CMD1c 三份结果与改前**逐位全 0 差异**（`qpos`/`qvel`/`ctrl` 全帧） |
+  | 位相同 | 跳跃回归 6 项不变（间隙 0.2218、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max|pitch|` 0.258） |
+  | 速度 | headless 1 s 的墙钟从 3.566 s 降到 <= 2.7 s |
+  | 缓存命中 | 每步 `rowset` 实际重算次数 = 1（加计数器验证并写进日志） |
+
+  **任何一项不是 0 差异，整轮作废，不得以“数值上差不多”放行。**
+
+22.5 期望与实际边界
+
+  保守合并约 -30%：3.566 ms/步 -> 约 2.5 ms/步，**0.28 -> 约 0.39 倍速**。
+  **仍达不到实时**，不要以“优化完就能实时”作为验收前提。
+  观感改善主要靠:
+  - 本节的 1.4 倍提速；
+  - 显示刷新改为墙钟门限（`loop.py:698` 的 `VIEWER_SYNC_DT` 现按仿真时间计，
+    0.28 倍速下实际约 17 fps；改后可达 60 fps）。后者只影响显示频率，
+    不改物理积分与控制周期，可单独立项。
+
+================================================================
+23. PERF2：显示刷新改按墙钟（2026-10-17）
+================================================================
+
+23.1 依据
+
+  `loop.py:695-700` 现状：
+
+  ```python
+  if float(d.time) - sim._viewer_sync_time >= VIEWER_SYNC_DT:
+      viewer.sync()
+      sim._viewer_sync_time = float(d.time)
+  ```
+
+  `VIEWER_SYNC_DT = 1/60` 量的是**仿真时间**。实测倍率：
+  - PERF 前 0.384~0.398 -> 屏幕约 23 fps
+  - PERF 后 0.493~0.495 -> 屏幕约 29 fps
+
+  也就是画面偏偏慢且顿；且倍率越低顿得越重。
+
+23.2 改动（只改 `loop.py` 的 viewer 分支）
+
+  （a）新增墙钟常量（不删原常量，改用新常量名）：
+
+  ```python
+  VIEWER_SYNC_WALL_DT = 1.0 / 60.0   # [s] 墙钟秒；与渲染开销无关
+  ```
+
+  （b）循环外初始化一个墙钟基准（不靠 `sim._viewer_sync_time`）：
+
+  ```python
+  viewer_sync_wall = time.perf_counter()
+  ```
+
+  （c）循环尾部同步条件改为：
+
+  ```python
+  if viewer is not None:
+      _now_wall = time.perf_counter()
+      if _now_wall - viewer_sync_wall >= VIEWER_SYNC_WALL_DT:
+          viewer.sync()
+          viewer_sync_wall = _now_wall
+  ```
+
+  （d）`sim._viewer_sync_time` 与旧门限代码**一并删除**（不得两个基准共存，
+  见 §15.1 第 1 条：一份状态只能有一个持有者）。
+
+23.3 不改的事
+
+  1. 不改物理积分、控制周期、MPC/WBC、任何增益/权重/限幅/阈值。
+  2. `viewer=None`（headless）时完全不进入这段。
+  3. 不动 `mjv_applyPerturbForce` 与任何 mj_开头的调用。
+
+23.4 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 逐位 | headless T1p/T2p/CMD1p/JUMPp | 与改前**逐位 0 差异**（该路径不进改动） |
+  | 逐位 | view 下 `--output` 记录 | 与改前同一命令的结果逐位 0 差异 |
+  | 显示 | 墙钟帧率 | 约 60 fps（记录 sync 次数 / 墙钟秒） |
+  | 静态 | `grep _viewer_sync_time` | 无残留 |
+  | 倍率 | 1 s 仿真的墙钟 | 记录改前/改后，确认未明显恶化 |
+
+23.5 风险与退路
+
+  1. sync 频率从 29 次/秒提到 60 次/秒，渲染开销上升，**可能拉低仿真倍率**。
+     所以 23.4 最后一行是硬要求：必须记录改前/后的 1 s 仿真墙钟。
+  2. 若确认渲染把仿真拖慢，退路是“墙钟门限 + 每 N 步最多 sync 一次”的双重限制。
+  3. 本节不解决倍率问题（仍约 0.49），只解决“看到的帧率”。
+
+23.6 另开一项（本轮不做）
+
+  实时倍率显示（每 2 s 墙钟打一条 INFO：仿真时间/墙钟时间、步/秒）。
+  与本节无依赖，单独排队。
+
+================================================================
+24. KB+RJUMP：键鼠控制 + 空格重复跳（2026-10-17）
+================================================================
+
+24.1 目标
+
+  在 view 里用键鼠驾驶（方向键速度/偏航）并用空格发起起跳，**一次会话内可重复跳多次**。
+  仅改测试入口与“每跳必须复位”的状态，**不改控制算法、不改任何参数**。
+
+24.2 现状（已逐项核实）
+
+  | 项 | 现状 |
+  |---|---|
+  | 方向键速度/偏航 | 已可用（`APP/keyboard_task.py`） |
+  | 空格键名 | `_key_name()` 先取 `key.char` 再 `lower()`，空格是 `" "`（不是 `"space"`） |
+  | `view.py --jump-height` | 默认 `None` -> `sim.jump` 不构造 -> 永不跳跃 |
+  | `view.py` 5 个工况开关 | 不存在（`simulation.run` 的参数默认全 False） |
+  | 定时触发 | `loop.py:132` `not sim._jump_started and d.time >= jump_time`，`_jump_started` 永不复位 |
+  | 每跳锁存 | `JumpPlanner.start()` 只复位 4 项；`_airborne_confirmed`、`direction_lost_*`、
+    `_direction_lost_seen`、`transition_reason` 不复位；`loop.py` 的 `flight_leg_ref` 也不复位 |
+
+24.3 改动 A：`jump.py` 的 `start()` 补齐每跳复位
+
+  ```python
+  self.phase = JumpPhase.COMPRESS
+  self.reason = None
+  self.started_at = float(time)
+  self.phase_since = float(time)
+  # 新增：每跳必须清空的锁存（不复位会让第二跳沿用第一跳的离地/方向丢失状态）
+  self._airborne_confirmed = False
+  self._direction_lost_seen = {"R": False, "L": False}
+  self.direction_lost_R = False
+  self.direction_lost_L = False
+  self.direction_lost_isolated_R = False
+  self.direction_lost_isolated_L = False
+  self.transition_reason = None
+  ```
+
+  `direction_lost_isolation_active`（WP7 临时隔离开关）**不动**。
+
+24.4 改动 B：`simulation.py` 新增 `request_jump()`
+
+  - `self.jump is None` -> WARNING（提示需 `--jump-height`）并返回 False；
+  - `self.jump.phase.value != "IDLE"` -> INFO 记录当前相位并返回 False；
+  - 否则置 `self._jump_requested = True`，返回 True。
+
+  相位判据放在**请求侧**，不放进直时触发路径。
+
+24.5 改动 C：`loop.py` 触发点只加一个 OR 分支
+
+  ```python
+  _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
+  _requested = bool(getattr(sim, "_jump_requested", False))
+  if sim.jump is not None and (_timed_due or _requested):
+      if _timed_due:
+          sim._jump_started = True        # 定时来源仍只消费一次
+      sim._jump_requested = False
+      flight_leg_ref = None               # 新增：每跳复位飞行剖面状态
+      sim._precheck_jump()
+      jump_command = sim.jump.start(float(d.time))
+  ```
+
+  `_requested` 恒 False 时与原条件**逐位等价**。`_jump_started` 只管定时来源，
+  外部请求不受它约束 -> 可重复跳。不加 `phase == "IDLE"`（那会让所有工况（含
+  `jump_diagnostic`）多一个前置条件）。
+
+24.6 改动 D：`APP/keyboard_task.py` 加只读方法
+
+  ```python
+  def pressed_key(self, name: str) -> bool:
+      return name in self._pressed_keys
+  ```
+
+  只读，不改任何现有行为。空格用 `pressed_key(" ")`。
+
+24.7 改动 E：`view.py`
+
+  （a）补 5 个开关（拼写与 `jump_diagnostic.py` 一致，均 `store_true`、默认 False）：
+  `--leg-length-compression`、`--leg-length-thrust`、`--flight-zero-torque`、
+  `--flight-leg-retract`、`--flight-leg-extend`，并透传给 `simulation.run`；
+
+  （b）空格按下沿 -> `simulation.request_jump()`（按住不重复）；
+
+  （c）启动时打一行 INFO：`jump_height/jump_stroke/jump_time` + 5 个开关的取值；
+
+  （d）**不改任何默认值**（`--jump-height` 仍 None，`--jump-time` 仍 2.0）；
+
+  （e）不动 `--output` 的现有行为（上轮修的 bug 保留，不在本轮改动范围）。
+
+24.8 使用方式
+
+  ```
+  cd C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco
+  ..\.venv\Scripts\python.exe tools\view.py --backend wls ^
+    --jump-height 0.18 --jump-time inf ^
+    --leg-length-compression --leg-length-thrust --flight-zero-torque ^
+    --flight-leg-retract --flight-leg-extend
+  ```
+
+  `--jump-time inf` 是命令行显式传值，不改代码默认。方向键上/下=速度，左/右=偏航，空格=起跳。
+
+24.9 验收
+
+  | 分类 | 项 | 要求 |
+  |---|---|---|
+  | 回归 | 不按空格、不传 5 开关 | 与当前工作区（32dd667 + PERF）逐位一致 |
+  | 回归 | `jump_diagnostic` 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max|pitch|` 0.2445/0.258（口径不变） |
+  | 功能 | 重复跳 | 一次会话连续跳 **>=3 次**，每次相位都回到 IDLE |
+  | 功能 | 每跳质量 | 轮最大离地间隙 >=0.20 m，ABORT 0 |
+  | 功能 | 冒错请求 | 非 IDLE 时按空格：请求被拒并记 INFO，不崩溃 |
+  | 静态 | `grep request_jump` | 只出现在 `simulation.py`/`loop.py`/`view.py` |
+
+  每跳记录：触发时刻与来源、离地间隙、相位序列、ABORT 原因。
+
+24.10 已知限制
+
+  1. 倍率仍约 0.35（仿真时间门限下约 20 fps），本轮不优化。
+  2. 未验证的方面：连续跳时 MPC/WBC 的跨跳行为（只验证不崩、不 ABORT）。
+
+================================================================
+25. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |
@@ -1898,9 +2313,17 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
 | 21 | **CMD** | 已完成（run02 通过） | 有输入速度指令 0.5 m/s → 归零，测收敛 | — |
 | 22 | **JUMPANCHOR** | 作废（零效果，写错持有者） | 跳跃结束后把位置目标设回起跳前位置（沿规划器写入） | CMD1 |
 | 23 | **JUMPANCHOR-2** | 作废（仍在调旁路的值） | 改 ANCHOR 锚定值为起跳前位置 | JUMPANCHOR |
-| 24 | **NOANCHOR** | **可跑（第 19 节规格）** | 删 ANCHOR 旁路，落地回到 MPC + ZMP 正常控制 | JUMPANCHOR-2 |
-| 25 | 待定 | 排队 | `controller.py:418` 覆盖改叠加 + 核对 `zmp_crank_radius` | — |
-| 26 | 待定 | 排队 | `wbc.py:247` `acceleration[3]` -> `acceleration[6]` | — |
-| 27 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
+| 24 | **NOANCHOR** | 已完成（提交 32dd667） | 删 ANCHOR 旁路，落地回到 MPC + ZMP 正常控制 | — |
+| 25 | **VJUMP** | 可跑（第 20 节规格） | 0.5 m/s 行进中起跳，落地后指令归零停住 | — |
+| 26 | **VJUMP-VIEW** | 规格待重写（上一版实施已回退） | view 补 5 个跳跃开关 + 空格触发 | — |
+| 27 | **RJUMP+KB** | 排队 | 空格重复跳（JumpPlanner 每跳复位 + request_jump + 墙钟输入） | — |
+| 28 | **PERF** | **可跑（第 22 节规格）** | 消除每步重复计算，要求逐位一致 | — |
+| 29 | **PERF2** | **已回退**（倍率 0.350 -> 0.216，净亏） | 显示刷新改按墙钟 | — |
+| 30 | 网格替代 | 暂不做 | base_link.STL 91441 顶点，单次 sync 9.27 ms | 待定 |
+| 31 | **KB+RJUMP** | **可跑（第 24 节规格）** | 键鼠控制 + 空格重复跳 | — |
+| 32 | 待定 | 排队 | `view.py` 注释与实测不符 | — |
+| 33 | 待定 | 排队 | `controller.py:418` 覆盖改叠加 + 核对 `zmp_crank_radius` | — |
+| 34 | 待定 | 排队 | `wbc.py:247` `acceleration[3]` -> `acceleration[6]` | — |
+| 35 | 废弃 | — | P-b-重锚（锚点不是瓶颈） | — |
 
 ================================================================

@@ -41,7 +41,9 @@ from gbc_mpc_wbc.simulation import Gbc486MpcWbcSimulation, SimulationConfig  # n
 from Algorithm.mpc import MotionCommand  # noqa: E402
 from APP.mujoco_mpc_wbc import _PRESETS  # noqa: E402
 from gbc_mpc_wbc.simulation import MAX_SPEED
-from gbc_mpc_wbc.logging_setup import setup_logging  # noqa: E402
+from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
+
+_LOGGER = get_logger(__name__)
 
 RESULTS = ROOT / "results"
 
@@ -67,6 +69,18 @@ def main():
                         help="启用跳跃并给定目标质心抬升 [m]（例如 0.10）")
     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
     parser.add_argument("--jump-time", type=float, default=2.0, help="起跳指令时刻 [s]")
+    # 第 24 节：与 tools/jump_diagnostic.py 同名的 5 个跳跃工况开关，只做透传；
+    # 默认全 False，不传时与既有行为一致（裸跳）。
+    parser.add_argument("--leg-length-compression", action="store_true",
+                        help="VL1：COMPRESS/COMPRESS_BRAKE 用腿长行加速度驱动，不创建 com_vertical")
+    parser.add_argument("--leg-length-thrust", action="store_true",
+                        help="TR1：THRUST 用腿长行加速度驱动，不创建 com_vertical")
+    parser.add_argument("--flight-zero-torque", action="store_true",
+                        help="FL1：FLIGHT 或真离地时输出显式零力矩，不保持地面力矩")
+    parser.add_argument("--flight-leg-retract", action="store_true",
+                        help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
+    parser.add_argument("--flight-leg-extend", action="store_true",
+                        help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--leg-length", type=float, default=None,
                         help="标称腿长 [m]，默认 0.28（行程带中点）；机构范围约 0.14–0.43")
     parser.add_argument("--output", type=Path, default=None, help="结束时写入的记录（JSON.gz）")
@@ -74,6 +88,11 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     setup_logging(default_level="INFO")
+    _LOGGER.info("view 配置：jump_height=%s jump_stroke=%.4g jump_time=%.4g "
+                 "compression=%s thrust=%s zero_torque=%s retract=%s extend=%s",
+                 args.jump_height, args.jump_stroke, args.jump_time,
+                 args.leg_length_compression, args.leg_length_thrust,
+                 args.flight_zero_torque, args.flight_leg_retract, args.flight_leg_extend)
 
     from mujoco import viewer as mujoco_viewer
     from APP.keyboard_task import KeyboardCommandSource
@@ -121,12 +140,34 @@ def main():
         # 键盘步长跟本工作区的速度上限（circleg 共享配置里是 2.5；不改那个文件）
         keyboard = KeyboardCommandSource(_replace(
             DEFAULT_CONFIG, keyboard=_replace(DEFAULT_CONFIG.keyboard, speed_step=MAX_SPEED)))
-        print(f"键盘指令源可用：{keyboard.available}（方向键上/下=速度，左/右=偏航；"
+        print(f"键盘指令源可用：{keyboard.available}（方向键上/下=速度，左/右=偏航，空格=起跳，R=复位；"
               f"有速度输入的模式尚未测试）")
+
+    # 空格触发 / R 复位（第 24 节）：都只取按下沿，按住不重复动作。
+    _space_was_down = [False]
+    _r_was_down = [False]
+    _reset_pending = [False]
+
+    def reset_key():
+        """一次性消费的复位请求：返回 True 后立刻清标识，避免每帧重复复位。"""
+        if _reset_pending[0]:
+            _reset_pending[0] = False
+            return True
+        return False
 
     def command(_time):
         if keyboard is None:
             return MotionCommand(velocity=0.0, yaw_rate=0.0)
+        # 空格键名实测是 "space"（pynput 送 Key.space，_key_name 取 name 分支）；
+        # 某些布局/平台会送字符型 KeyCode(char=" ")，两种都认，避免按键静默失效。
+        _space_down = bool(keyboard.pressed_key("space") or keyboard.pressed_key(" "))
+        if _space_down and not _space_was_down[0]:
+            simulation.request_jump()
+        _space_was_down[0] = _space_down
+        _r_down = bool(keyboard.pressed_key("r"))
+        if _r_down and not _r_was_down[0]:
+            _reset_pending[0] = True             # 实际复位在 loop 开头执行（下一拍）
+        _r_was_down[0] = _r_down
         return MotionCommand(velocity=keyboard.read(), yaw_rate=keyboard.read_yaw_rate())
 
     with mujoco_viewer.launch_passive(model, simulation.data) as viewer:
@@ -142,7 +183,17 @@ def main():
                 pass
         viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         viewer.cam.trackbodyid = int(model.body("base").id)
-        summary = simulation.run(command, args.duration, viewer=viewer)
+        summary = simulation.run(command, args.duration, viewer=viewer,
+                                 reset_key=reset_key,
+                                 leg_length_compression=args.leg_length_compression,
+                                 leg_length_thrust=args.leg_length_thrust,
+                                 flight_zero_torque=args.flight_zero_torque,
+                                 flight_leg_retract=args.flight_leg_retract,
+                                 flight_leg_extend=args.flight_leg_extend)
+    if summary is None:
+        # run_loop 不返回值（它只负责推进），汇总要自己取；否则下面 items() 必抛
+        # AttributeError，--output 那段永远执行不到（既有缺陷，本轮顺手修掉）。
+        summary = simulation.summary(args.duration)
 
     print(json.dumps({k: v for k, v in summary.items() if k != "model"}, ensure_ascii=False, indent=1))
     if args.output is not None:

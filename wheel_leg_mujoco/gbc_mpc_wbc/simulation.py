@@ -42,6 +42,7 @@ import numpy as np
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
 from .loop import VIEWER_SYNC_DT, run_loop  # noqa: E402
+from .jump import JumpPhase  # noqa: E402
 from . import robot as R
 from .dynamics import Gbc486Dynamics, leg_combination
 from .model_builder import HeldLegModelBuilder, LegInputModelBuilder
@@ -301,10 +302,12 @@ class SimulationConfig:
 class Gbc486MpcWbcSimulation:
     def __init__(self, config: SimulationConfig = SimulationConfig(), mpc_settings: MPCSettings | None = None):
         self.config = config
-        self._viewer_sync_time = -1.0e9      # 上次 viewer.sync() 的仿真时刻
         self.model, self.data = R.load()
         self._apply_torque_limits()
         self.pose = R.standing_pose(self.model, self.data, config.nominal_length)
+        # 开局出生位形（站立解算结果）。手动复位要用它，不能用 model.qpos0：
+        # 实测 qpos0 不是站立位形（腿长 0.3138 m vs 站立 0.2801 m），复位后要多解一次才能站住。
+        self._initial_qpos = self.pose.qpos.copy()
         self.dyn = Gbc486Dynamics(self.model, self.data)
         self.reduced = (LegInputModelBuilder(self.dyn, self.pose.length).build()
                         if config.model_variant == "leg_input" else
@@ -344,6 +347,8 @@ class Gbc486MpcWbcSimulation:
         self.solution = None
         self._normal_violation_time = 0.0
         self._infeasible_active = False
+        self._viewer_sync_time = -1.0e9      # 上次 viewer.sync() 的仿真时刻
+        self._jump_requested = False         # 外部（view 空格）请求起跳；由 loop 消费
         self.records: list[dict] = []
         self.stop_reason = None
         self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
@@ -424,7 +429,7 @@ class Gbc486MpcWbcSimulation:
             leg_length_compression: bool = False, leg_length_thrust: bool = False,
             thrust_only: bool = False, flight_zero_torque: bool = False,
             flight_leg_retract: bool = False, flight_leg_extend: bool = False,
-            mpc_force_feedforward: bool = False):
+            mpc_force_feedforward: bool = False, reset_key=None):
         """积分情景；四段时序在 ``loop.run_loop``（采样 / MPC / WBC / 输出 + 推进）。
 
         本方法只做委托：装配在 ``__init__``，时序在 ``loop.py``，控制算法在
@@ -443,7 +448,61 @@ class Gbc486MpcWbcSimulation:
                         flight_zero_torque=flight_zero_torque,
                         flight_leg_retract=flight_leg_retract,
                         flight_leg_extend=flight_leg_extend,
-                        mpc_force_feedforward=mpc_force_feedforward)
+                        mpc_force_feedforward=mpc_force_feedforward,
+                        reset_key=reset_key)
+
+    def reset_run(self, viewer=None) -> None:
+        """手动复位（view 按 R）：回到出生位形并重新锚定整条控制栈。
+
+        借 circleg ``APP/mujoco_mpc_wbc.py::_recover_from_guard`` 的口径：
+        实体复位（qpos=出生位形、qvel/外力/ctrl 清零）+ 控制栈各自 reset +
+        MPC 全量重锚（position=None，下次 plan 从实测值锚定）。
+        **不重置 data.time**：仿真时间继续走，便于在日志里看出"第几秒按了 R"。
+        """
+        data, model = self.data, self.model
+        data.qpos[:] = self._initial_qpos
+        data.qvel[:] = 0.0
+        data.qfrc_applied[:] = 0.0
+        data.xfrc_applied[:] = 0.0
+        data.ctrl[:] = 0.0
+        if viewer is not None:
+            # 清掉鼠标拖拽残留在 viewer 里的扰动，否则复位后会被立刻再推翻
+            viewer.perturb.active = 0
+            viewer.perturb.select = 0
+        mujoco.mj_forward(model, data)
+        self.supervisor.reset()
+        if getattr(self, "contact_estimator", None) is not None:
+            self.contact_estimator.reset()
+        self.feedback.reset()
+        if self.jump is not None:
+            self.jump.phase = JumpPhase.IDLE
+            self.jump.reason = None
+            self.jump._airborne_confirmed = False                       # noqa: SLF001 - 与 start() 同口径
+            self.jump._direction_lost_seen = {"R": False, "L": False}   # noqa: SLF001
+        self._jump_started = False
+        self._jump_requested = False
+        self.mpc.reset(None)
+        self.solution = None
+        self.distance = 0.0
+        self._normal_violation_time = 0.0
+        self._infeasible_active = False
+
+    def request_jump(self) -> bool:
+        """外部请求起跳（view 按空格）。返回是否受理。
+
+        相位判据放在**请求侧**（只接受 IDLE），不放进 loop 的定时触发路径：
+        定时触发是"整轮一次"的既有语义，不能被请求侧的状态判断改写。
+        没有跳跃对象（``jump_height is None``）时不受理并记 WARN。
+        """
+        if self.jump is None:
+            _LOGGER.warning("跳跃请求被忽略：未配置 jump_height（需 --jump-height）")
+            return False
+        if self.jump.phase.value != "IDLE":
+            _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 接受，t=%.3f s）",
+                         self.jump.phase.value, float(self.data.time))
+            return False
+        self._jump_requested = True
+        return True
 
     def _precheck_jump(self) -> None:
         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。

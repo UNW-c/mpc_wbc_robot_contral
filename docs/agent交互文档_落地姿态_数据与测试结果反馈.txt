@@ -10829,3 +10829,1785 @@ reset_position=True)`”。现在条件成立（0.2859 m），但 **19.2 同时�
 确认后我再补这一处并重跑（跳跃 + 三项回归）。
 
 ================================================================
+
+
+================================================================
+VJUMP：0.5 m/s 行进中起跳，落地后指令归零停住
+测试agent-ds，2026-10-17
+================================================================
+
+VP编号：VJUMP（第 20 节）
+
+## 零、[TODO-1] 核对结果（先答这一条）
+
+**不需要新增组合入口**，入口本来就存在。`--help` 原文（节选，参数名逐字一致）：
+
+```text
+usage: jump_diagnostic.py [-h] [--stage STAGE]
+                          [--case {baseline,delta_velocity,qfrc,command_velocity}]
+                          [--command-velocity COMMAND_VELOCITY]
+                          [--command-hold COMMAND_HOLD] [--run-id RUN_ID]
+                          [--duration DURATION] [--jump-height JUMP_HEIGHT]
+                          [--jump-stroke JUMP_STROKE] [--jump-time JUMP_TIME]
+                          [--no-jump] [--explicit-jump-reference]
+                          [--compression-only] [--freeze-jump-reference]
+                          [--vmc-feedforward] [--leg-length-compression]
+                          [--leg-length-thrust] [--thrust-only]
+                          [--flight-zero-torque] [--flight-leg-retract]
+                          [--flight-leg-extend] [--mpc-force-feedforward]
+                          [--wheel-torque-limit WHEEL_TORQUE_LIMIT]
+                          [--flight-retract-floor FLIGHT_RETRACT_FLOOR]
+                          [--flight-retract-torque-limit FLIGHT_RETRACT_TORQUE_LIMIT]
+
+  --command-velocity COMMAND_VELOCITY   CMD：0~hold 期间的速度指令 [m/s]
+  --command-hold COMMAND_HOLD           CMD：速度指令保持时长 [s]（之后归零）
+  --jump-height JUMP_HEIGHT
+  --no-jump
+```
+
+速度指令（`_command()`）与跳跃（`jump_height is None if --no-jump else args.jump_height`）
+是两条独立的路，组合不需要任何新参数。
+
+## 一、代码改动（完整 diff）
+
+只有一处，且**只是记录字段**（20.4 要求“`command_velocity` 时序，帧里目前没有，需新增”）：
+
+- `wheel_leg_mujoco/gbc_mpc_wbc/loop.py` trace 增加只读字段
+  `"command_velocity" = None if sim._command is None else float(sim._command.velocity)`。
+- **零控制改动**：不新增落地逻辑，不动增益/权重/限幅/阈值，不动 `tau_ff`。
+
+```diff
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 798ea67..8d8e1f9 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -563,6 +563,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 "yaw": float(feedback.state.yaw),
+                 "yaw_rate": float(feedback.state.yaw_rate),
+                 "state_velocity": float(feedback.state.velocity),
++                # VJUMP（第 20 节）：速度指令时序需要进轨迹（只读记录，不参与控制）。
++                "command_velocity": (None if sim._command is None
++                                     else float(sim._command.velocity)),
+                 "leg_state": np.asarray(sim.dyn.leg_state(), dtype=float).copy(),
+                 "leg_rate": np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float).copy(),
+                 "leg_length_R": float(trace_leg[0]),
+```
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/loop.py`：**通过**。
+- 入口自检：`--help` 如上；结果 metadata 记录
+  `command = "command_velocity(velocity=0.5, hold=4.0)"`、`command_velocity=0.5`、`command_hold_s=4.0`。
+- 新字段口径核对：`command_velocity` 在 `t=0.2/1.0/3.9` 为 **+0.500**，`t=4.1/5.0/11.999` 为 **+0.000**，
+  与 `--command-hold 4.0` 一致。
+- 执行器下标：`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+- 重复取数一致：同一结果文件两次独立取数，八项判据数值相同。
+- 运行当时 `git_status_short_raw`（完整）：
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ D "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy.pdf"
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _cmd_diff.txt
+?? _cmd_entry.tpl
+?? _git_status_cmd.txt
+?? _git_status_ja.txt
+?? _git_status_ja2.txt
+?? _git_status_na.txt
+?? _ja2_diff.txt
+?? _ja2_entry.tpl
+?? _ja_diff.txt
+?? _ja_entry.tpl
+?? _na_diff.txt
+?? _na_entry.tpl
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.log
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.log
+?? wheel_leg_mujoco/results/N1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/N1_baseline_run01.log
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.log
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.log
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/S1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_tableB_t2.3-2.8.csv
+?? wheel_leg_mujoco/results/S1_tableB_t4.5-5.8.csv
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/T1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1_baseline_run01.log
+?? wheel_leg_mujoco/results/T1b_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1b_baseline_run01.log
+?? wheel_leg_mujoco/results/T1c_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1c_baseline_run01.log
+?? wheel_leg_mujoco/results/T1d_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1d_baseline_run01.log
+?? wheel_leg_mujoco/results/T1e_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1e_baseline_run01.log
+?? wheel_leg_mujoco/results/T1f_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1f_baseline_run01.log
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.log
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? wheel_leg_mujoco/tools/wbc_frame_replay.py
+```
+
+## 三、八项判据（逐项实测）
+
+命令：
+
+```text
+tools/jump_diagnostic.py --stage VJUMP --case command_velocity --command-velocity 0.5 \
+    --command-hold 4.0 --run-id run01 --duration 12.0 \
+    --jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0 --leg-length-compression \
+    --leg-length-thrust --flight-zero-torque --flight-leg-retract --flight-leg-extend
+```
+
+| # | 判据 | 要求 | 实测 | 结果 |
+|---|---|---|---|---|
+| 1 | 离地瞬间 `com_vx` | 0.5 ± 0.1 | **+0.34595**（t=1.437）；起跳指令时刻 t=1.000 为 **+0.49834** | **未通过** |
+| 2 | 轮最大离地间隙 | >= 0.20 m | **0.22985 m** | 通过 |
+| 3 | ABORT / 越界 / 单支撑 / `airborne_zero` | 全 0 | **0 / 0 / 0 / 0** | 通过 |
+| 4 | 瞬态后 `|pitch|` | <= 0.2618 rad | **0.24693**（统计窗口 t>=落地+0.2） | 通过 |
+| 5 | 指令归零后 `com_vx` 归零 | 窗口内归零 | `com_vx` 零化时 **+0.49990** -> **+0.57026（t=4.100 冲高）** -> -0.05955（t=4.5）-> **首次稳住 `|com_vx|<=0.01` 于 t=4.642 并保持到 12 s** | 通过 |
+| 6 | 之后位置跨度 | <= 0.01 m | 4.6~12 s：`state.position` 跨度 **0.001252 m**，`com_x` 跨度 **0.001744 m** | 通过 |
+| 7 | 落地后向起跳点方向回退 | <= 0.05 m | `state.position` **0.06041 m**（0.67572 -> 0.61531 @t=2.068）；`com_x` **0.01820 m**（0.56706 -> 0.54887 @t=2.027） | **视口径：state 系未通过 / com_x 通过** |
+| 8 | 落地后 `sample_override` 为 None，参考来自 MPC | — | 代码层：`anchor_target` 已删、`explicit_jump_reference=False` -> 恒 None；数值层：落地后 `sample.state[0]` 有 **1097 个不同值 / 2476 帧**（非冻结），飞行段 **330/330 帧 `sample=None`** | 通过 |
+
+第 1 项拆开说清楚（避免误读）：
+
+| 时刻 | `com_vx` |
+|---|---|
+| t=1.000（JUMP 指令下发，COMPRESS 起） | **+0.49834** |
+| t=1.200（COMPRESS_BRAKE） | +0.43265 |
+| t=1.437（离地，THRUST->FLIGHT） | **+0.34595** |
+| t=1.767（落地） | +0.34311 |
+
+即“起跳指令时刻”在带内（0.498），“离地瞬间”掉到 0.346，低于下限 0.4 共 **0.054**。
+判据原文写的是“离地瞬间”，我按字面判未通过。
+
+第 7 项两个口径都给：回退发生时点在 t≈2.03~2.07（落地缓冲段内，非稳态）。
+
+## 四、记录项（20.4）
+
+### 4.1 时间线
+
+| t | cmd_v | motion | phase | state.pos | ref0（目标位置） | ref1（目标速度） | com_vx | com_x |
+|---|---|---|---|---|---|---|---|---|
+| 0.200 | +0.500 | True | IDLE | +0.00214 | +0.00214 | +0.04498 | -0.04389 | -0.05285 |
+| 0.500 | +0.500 | True | IDLE | +0.07199 | +0.07199 | +0.43467 | +0.49227 | +0.01493 |
+| 1.000 | +0.500 | True | COMPRESS | +0.31994 | +0.31994 | +0.50000 | +0.49834 | +0.27078 |
+| 1.200 | +0.500 | True | COMPRESS_BRAKE | +0.41359 | +0.41359 | +0.50000 | +0.43265 | +0.36500 |
+| 1.437 | +0.500 | True | FLIGHT | +0.50208 | +0.49657 | +0.50000 | +0.34595 | +0.45346 |
+| 1.600 | +0.500 | False | FLIGHT | +0.59657 | - | - | +0.34407 | +0.50960 |
+| 1.767 | +0.500 | False | LANDING | +0.67572 | - | - | +0.34311 | +0.56706 |
+| 1.900 | +0.500 | False | RECOVER | +0.66498 | - | - | -0.22890 | +0.56918 |
+| 2.100 | +0.500 | True | IDLE | +0.61747 | +0.61747 | -0.35569 | +0.28751 | +0.55887 |
+| 2.500 | +0.500 | True | IDLE | +0.71519 | +0.71519 | +0.22297 | +0.11089 | +0.65575 |
+| 3.000 | +0.500 | True | IDLE | +0.93096 | +0.93096 | +0.50000 | +0.49163 | +0.88293 |
+| 3.900 | +0.500 | True | IDLE | +1.38043 | +1.38043 | +0.50000 | +0.49991 | +1.33140 |
+| 4.000 | +0.500 | True | IDLE | +1.43042 | +1.43042 | +0.50000 | +0.49990 | +1.38139 |
+| 4.100 | +0.000 | True | IDLE | +1.47782 | +1.47782 | +0.43967 | +0.57026 | +1.43617 |
+| 4.500 | +0.000 | True | IDLE | +1.55488 | +1.55488 | +0.00000 | -0.05955 | +1.50724 |
+| 5.000 | +0.000 | True | IDLE | +1.55256 | +1.55260 | +0.00000 | +0.00080 | +1.50370 |
+| 6.000 | +0.000 | True | IDLE | +1.55259 | +1.55260 | +0.00000 | -0.00000 | +1.50357 |
+| 11.999 | +0.000 | True | IDLE | +1.55259 | +1.55260 | +0.00000 | +0.00000 | +1.50357 |
+
+- `decision.motion_enabled`：True 全段，仅 **t=1.437~2.09 的飞行/落地窗口**为 False（与跳跃相位一致）。
+- 规划器目标位置/目标速度直接取 `mpc_solution.reference[0] / [1]`（即规划器 `_forward.position` 与其速度）。
+- 归零后停在 `com_x=+1.50357`，即**从归零时刻 1.38139 又前进 0.12218 m 才停**。
+
+### 4.2 `soft_reanchor` 调用（现有 INFO 日志，共 24 次）
+
+- `reset_position=True`：**18 次**，集中在 **t≈1.437~1.79**（飞行/落地段，此时 `commanded_motion=True`
+  因为还在执行 0.5 指令），`s` 从 0.5079 递增到 0.6473，之后落地缓冲回退到 0.6202。
+- `reset_position=False`：**6 次**，全部在 **t≈0.000 启动段**（`s=0.0000`）。
+- **指令归零（t=4.0）之后没有任何 `soft_reanchor` 调用** -> 锚点保持规划器现值。
+- `event=align Reference reset: hold_capture, s=1.5526 v=0.0000 yaw=-0.0028 reset_position=False`
+  （进入 HOLD 的那一次），此后 `ref0` 冻结在 **1.55260**。
+
+### 4.3 离地/落地与落地后 0.2 s
+
+| 时刻 | 事件 | 值 |
+|---|---|---|
+| t=1.437 | 离地 | `com_vx=+0.34595`，`state.pos=+0.50208` |
+| FLIGHT 段 | 轮最大离地间隙 | **0.22985 m**（离地那一帧 `wheel_gap=-0.00014`） |
+| t=1.767 | 落地 | `com_vx=+0.34311`，`state.pos=+0.67572`，`com_x=+0.56706` |
+
+落地后 0.2 s（看打滑）：
+
+| 相对时刻 | `qvel[0]`（轮前进方向） | `com_vx` | `ctrl[4]` | `ctrl[5]` |
+|---|---|---|---|---|
+| +0.00 s | +0.3918 | +0.3431 | +0.0000 | +0.0000 |
+| +0.05 s | -0.0624 | +0.0712 | -3.9159 | -3.8696 |
+| +0.10 s | -0.3434 | -0.1694 | -1.7390 | -1.7439 |
+| +0.15 s | -0.4456 | -0.2343 | +0.0925 | +0.0650 |
+| +0.20 s | -0.3853 | -0.1760 | +1.2023 | +1.1722 |
+
+轮速在 50 ms 内从 +0.392 翻到负值（-0.34 @+0.1 s），`com_vx` 同步转负到 -0.234 m/s，
+即落地缓冲段轮子被反向高速拖动（滑移），随后在 +0.15 s 后转回正力矩把轮速拉回。
+
+### 4.4 其它量
+
+- 末态：`state.position=+1.55259`、`com_x=+1.50357`、`com_vx=0.000000`、`|pitch|=0.00000`。
+- `max|ctrl[0..3]|=37.2401`（限 40）；`max|ctrl[4]|=5.9929`、`max|ctrl[5]|`=**6.0000**（限 6，见第六节）。
+
+## 五、与逐位基线的对照
+
+本节没有要求回归项，也没有新增控制逻辑，改动只有一个记录字段。
+但为确认“加字段零副作用”，跑前跑后同一条非跳跃命令（不加 `--no-jump` 无法比对，
+故用上一轮 CMD1d 的零副作用结论 + 字段为只读）：本轮的 `command_velocity` 字段只写 `frames`，
+不进入 `sim._command` 的任何消费路径。**未做逐位回归对比，如实说明。**
+
+## 六、额外发现
+
+1. **轮力矩在落地段摸到 ±6 上限**：`max|ctrl[4]|=5.9929`、`max|ctrl[5]|=6.0000`，
+   落地后 0.05~0.10 s 处两轮同时给 -3.9 / -1.7 N·m 的反向力矩。
+   本轮限幅仍是 MJCF 的 ±6（未启用 WLIM 的 15），即**落地瞬态确实被限幅削顶**。
+   20.6 禁止改限幅，所以只记录。
+2. **第 1 项失败点在压缩段**：起跳指令时刻 `com_vx=0.498`（符合），压缩 1.0->1.437 s 期间
+   掉到 0.346，衰减 0.152 m/s，全部发生在 COMPRESS/COMPRESS_BRAKE 段
+   （跳跃期 `sample=None`，WBC 不吃 MPC 参考）。
+3. **归零后的“冲高-回摆”**：`com_vx` 在 t=4.10 升到 **+0.57026**（比稳态 0.5 还高），
+   t=4.5 反到 **-0.05955**，再在 t=4.642 稳住。位置多走了 0.122 m。
+4. **落地后存在约 0.06 m 的退回**（state 系），集中在 t=2.03~2.07 的落地缓冲段；
+   `com_x` 口径只有 0.018 m。第 7 项按哪个口径算，需要你定。
+5. `soft_reanchor` 在飞行/落地段被调用了 18 次且 `reset_position=True`（`commanded_motion=True`），
+   即锚点在这段时间里一直跟着实测位置走——与 20.2 描述的“指令归零后不搬位置”不冲突
+   （那说的是归零之后），但**飞行段搬锚点这件事本身是可观察行为**，记录在此。
+
+## 七、结论（只写数据支持的现象）
+
+1. [TODO-1] 无需新增入口，`--case command_velocity` + 跳跃参数即可组合；本轮唯一代码改动是
+   trace 增加 `command_velocity` 只读字段，零控制改动。
+2. 八项判据：**6 项通过（2、3、4、5、6、8）**，**2 项按字面未通过（1、7）**：
+   - 第 1 项：离地瞬间 `com_vx=+0.34595`，低于 0.4 下限（起跳指令时刻为 0.49834，在带内）；
+   - 第 7 项：`state.position` 回退 **0.06041 m** > 0.05（`com_x` 口径 0.01820 m 通过）。
+3. 工况语义成立：匀速 0.5 行进中成功起跳（间隙 0.22985 m），落地后由正常 MPC+ZMP 接管，
+   指令归零后 `com_vx` 于 t=4.642 归零并保持到 12 s，之后位置跨度 **0.0013 m**（`state`）/ **0.0017 m**（`com_x`），
+   末态完全静止。
+
+================================================================
+
+
+================================================================
+PERF：消除每步重复计算（只加缓存）
+测试agent-ds，2026-10-17
+================================================================
+
+VP编号：PERF（第 22 节）
+
+## 一、代码改动（完整 diff）
+
+只加缓存，未改任何算法/增益/限幅/阈值/控制频率；未改 `mj_step`/`mj_forward`；
+未缓存 `solve_wbc`/`from_matrices`/svd/pinv/lstsq。
+
+| 项 | 落点 | 做法 |
+|---|---|---|
+| `rowset()` | `dynamics.py` | 无参方法，按物理步缓存；复用判据是 `(qpos, qvel)` 字节快照完全一致 |
+| `joint_limit_active()` | `dynamics.py` | 同上（键 = 同一状态快照） |
+| `lengths(angles)` | `dynamics.py::_lengths()` | 键 = `(腿名, tuple(angles.items()))`，`leg_state()` 与 `thrust_torque()` 共用 |
+| 采样侧 `recover_contact_force` | `sampling.py` | 只缓存采样这一路；键含 `(qpos,qvel,qacc,ctrl,qfrc_applied,flags,block 行数)`；`control.py` 的 WBC 调用**不缓存** |
+| 缓存生命周期 | `loop.py` | 每拍开头 `sim.dyn.begin_step()` 清空 |
+| 统计与日志 | `loop.py` 结尾 | 输出 `PERF 缓存统计` INFO 行 |
+
+**关于"失效条件"的实现选择（需你确认是否合意）**：第 22.2 条要求"遇到 `mj_step`/`mj_forward`/
+扰动注入必须立即失效"。我没有用"调用点事件失效"（那样采样里每次 `mj_forward` 前都会清空，
+缓存永远命不中），而是把**状态本身**放进键：`(data.qpos, data.qvel)` 的 `tobytes()`。
+任何改变状态的路径（`mj_step`、积分、直接写 qpos/qvel）都会自动 miss，比"记得失效"更强；
+而 `mj_forward` 只重建派生量（`xpos`/`qacc`/`efc`）不改 qpos/qvel，所以复用它的结果是安全的。
+这一条已经用逐位一致验证（见第三节），不是靠推断。
+
+```diff
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py b/wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+index 7ee2b68..56ee8b6 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+@@ -153,6 +153,31 @@ class Gbc486Dynamics:
+         self.leg_actuators = tuple(int(model.actuator(n).id) for n in (
+             "Right_front_joint_act", "Right_rear_joint_act", "Left_front_joint_act", "Left_rear_joint_act"))
+         self.wheel_actuators = tuple(int(model.actuator(n).id) for n in ("Right_Wheel_act", "Left_Wheel_act"))
++        # PERF（第 22 节）：按物理步复用同一次计算的结果。缓存的两条硬约束：
++        #   1) 生命周期 = 一个物理步（``begin_step`` 清空，``run_loop`` 每拍开头调用）；
++        #   2) 复用判据是 (qpos, qvel) 的字节快照完全一致 —— 任何状态改动（mj_step /
++        #      积分 / 直接写 qpos）都会自动 miss，不需要依赖调用方记得失效。
++        # 缓存返回的是首次算出的原对象，不重排运算、不改 dtype 与形状，所以逐位一致。
++        self._cache_signature: tuple[bytes, bytes] | None = None
++        self._cache_rowset: RowSet | None = None
++        self._cache_joint_limit: tuple[tuple, list[str]] | None = None
++        self._cache_lengths: dict[tuple, tuple[float, float]] = {}
++        self.cache_stats = {"steps": 0, "rowset_recompute": 0, "rowset_hit": 0,
++                            "joint_limit_recompute": 0, "joint_limit_hit": 0,
++                            "lengths_recompute": 0, "lengths_hit": 0}
++
++    # ------------------------------------------------------------------ cache
++    def begin_step(self) -> None:
++        """一个物理步开始：清空本拍缓存（缓存生命周期 = 一个物理步）。"""
++        self._cache_signature = None
++        self._cache_rowset = None
++        self._cache_joint_limit = None
++        self._cache_lengths.clear()
++        self.cache_stats["steps"] += 1
++
++    def _signature(self) -> tuple[bytes, bytes]:
++        """当前 (qpos, qvel) 的字节快照，用作"状态是否变过"的判据。"""
++        return (self.data.qpos.tobytes(), self.data.qvel.tobytes())
+ 
+     # ------------------------------------------------------------------ model
+     def _selection(self) -> np.ndarray:
+@@ -235,14 +260,25 @@ class Gbc486Dynamics:
+         return self._evaluate(s)
+ 
+     def rowset(self) -> RowSet:
+-        """当前 ``data`` 状态的全部行与偏置。调用前 ``data`` 需已 ``mj_forward``。"""
++        """当前 ``data`` 状态的全部行与偏置。调用前 ``data`` 需已 ``mj_forward``。
++
++        PERF：同一物理步内重复调用直接返回首次结果（多个采样入口共用，行集是纯函数）。
++        """
++        signature = self._signature()
++        if self._cache_rowset is not None and signature == self._cache_signature:
++            self.cache_stats["rowset_hit"] += 1
++            return self._cache_rowset
+         data = self.data
+         rows = self._evaluate(data)
+         plus, minus = data.qpos.copy(), data.qpos.copy()
+         mujoco.mj_integratePos(self.model, plus, data.qvel, _DIFFERENCE_DT)
+         mujoco.mj_integratePos(self.model, minus, data.qvel, -_DIFFERENCE_DT)
+         bias = (self._evaluate_at(plus) - self._evaluate_at(minus)) @ data.qvel / (2 * _DIFFERENCE_DT)
+-        return RowSet(rows, bias)
++        result = RowSet(rows, bias)
++        self._cache_rowset = result
++        self._cache_signature = signature
++        self.cache_stats["rowset_recompute"] += 1
++        return result
+ 
+ 
+ 
+@@ -283,6 +319,22 @@ class Gbc486Dynamics:
+     def attitude(self) -> np.ndarray:
+         return euler_zyx(self.data.qpos[3:7])
+ 
++    def _lengths(self, leg, angles: dict[str, float]) -> tuple[float, float]:
++        """``LegKinematics.lengths`` 的按拍缓存（同一拍角度未变即命中）。
++
++        PERF：``_chain`` 占 7%，每步 3 次调用；同一拍内 ``leg_state`` 与 ``thrust_torque``
++        读的是同一组 qpos，所以键取 ``tuple(angles)`` 即足以判等。
++        """
++        key = (leg.name, tuple(angles.items()))
++        cached = self._cache_lengths.get(key)
++        if cached is not None:
++            self.cache_stats["lengths_hit"] += 1
++            return cached
++        value = self._leg_kinematics[leg.name].lengths(angles)
++        self._cache_lengths[key] = value
++        self.cache_stats["lengths_recompute"] += 1
++        return value
++
+     def leg_state(self) -> np.ndarray:
+         """[L_R, phi_R, L_L, phi_L]：腿长与腿摆角，由关节角**解析推导**。
+ 
+@@ -297,7 +349,7 @@ class Gbc486Dynamics:
+         for leg in R.LEGS:
+             angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
+                       for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+-            values.extend(self._leg_kinematics[leg.name].lengths(angles))
++            values.extend(self._lengths(leg, angles))
+         return np.asarray(values)
+ 
+     def leg_velocity(self, rows: RowSet | None = None) -> np.ndarray:
+@@ -338,7 +390,7 @@ class Gbc486Dynamics:
+             kin = self._leg_kinematics[leg.name]
+             angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
+                       for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
+-            length, phi = kin.lengths(angles)
++            length, phi = self._lengths(leg, angles)
+             wrench = np.array([float(forces[side]) * np.cos(phi),
+                                -float(forces[side]) * float(length) * np.sin(phi)])
+             tau = kin.jacobian(angles).T @ wrench
+@@ -396,8 +448,17 @@ class Gbc486Dynamics:
+     def joint_limit_active(self) -> list[str]:
+         """当前被 MuJoCo 关节限位约束顶住的关节名。"""
+         data = self.data
++        # PERF：纯 numpy 循环，每步被 2.25 次调用。限位激活只由 qpos 决定（mj_forward 重建
++        # efc 表是同值再推导），所以键用状态快照即可；缓存本身按物理步清空，不会跨步复用。
++        count = int(data.nefc)
++        key = self._signature()
++        if self._cache_joint_limit is not None and self._cache_joint_limit[0] == key:
++            self.cache_stats["joint_limit_hit"] += 1
++            return self._cache_joint_limit[1]
+         names = []
+-        for i in range(data.nefc):
++        for i in range(count):
+             if data.efc_type[i] == mujoco.mjtConstraint.mjCNSTR_LIMIT_JOINT:
+                 names.append(self.model.joint(int(data.efc_id[i])).name)
++        self._cache_joint_limit = (key, names)
++        self.cache_stats["joint_limit_recompute"] += 1
+         return names
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/sampling.py b/wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+index a1db99d..6ae8ed1 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+@@ -83,6 +83,7 @@ class FeedbackSampler:
+         self.equilibrium_pitch = float(reduced.metadata["equilibrium_pitch"])
+         self.nominal_angle = float(nominal_angle)
+         self.pitch_limit = float(pitch_limit)
++        self._contact_cache = None      # PERF：采样侧接触力反解的按拍缓存
+ 
+     def update(self, distance: float, phase_hint: JumpPhaseHint = JumpPhaseHint.NONE) -> Feedback:
+         """取一拍反馈：运动学 -> 接触几何 -> 力雅可比反解接触力 -> 接触判定 -> 状态/监督层。
+@@ -99,8 +100,19 @@ class FeedbackSampler:
+         flags = tuple(bool(n) for n in counts)
+         if any(flags):
+             blocks = self.tasks.contact_blocks(rows, flags)
+-            recovered = self.dynamics.recover_contact_force(
+-                blocks, self.data.qacc, self.data.ctrl, external=self.data.qfrc_applied)
++            # PERF（第 22 节）：只缓存采样侧这一路（WBC 级 control.py 的调用不缓存，
++            # 它的输入是解出来的 qacc，语义不同）。同一物理步内 (qpos, qvel, qacc, ctrl,
++            # 外部力) 不变即复用首次结果，返回的是原数组。
++            cache_key = (self.dynamics._signature(),  # noqa: SLF001 - 同一包内的状态快照
++                         self.data.qacc.tobytes(), self.data.ctrl.tobytes(),
++                         np.asarray(self.data.qfrc_applied, dtype=float).tobytes(),
++                         flags, tuple(int(len(b.jacobian)) for b in blocks))
++            if self._contact_cache is not None and self._contact_cache[0] == cache_key:
++                recovered = self._contact_cache[1]
++            else:
++                recovered = self.dynamics.recover_contact_force(
++                    blocks, self.data.qacc, self.data.ctrl, external=self.data.qfrc_applied)
++                self._contact_cache = (cache_key, recovered)
+             values = self.tasks.contact_forces(recovered, flags)
+             for pair, side in zip(values, [i for i, f in enumerate(flags) if f]):
+                 # [切向, 法向]：切向给 x 分量，法向给 z（横向 y 在本构型是共模量，不按轮拆分）
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 798ea67..a970986 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -107,6 +107,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     while steps is None or step < steps:
+         step_wall_start = time.perf_counter()
+         step_time = float(d.time)
++        # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
++        sim.dyn.begin_step()
+         mpc_called = False
+         wbc_called = False
+         outcome = None
+@@ -702,3 +704,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.stop_reason = "viewer_closed"
+                 break
+         step += 1
++    # PERF（第 22 节）：缓存统计写进日志（22.4 要求"每步 rowset 重算次数 = 1"可核对）。
++    stats = sim.dyn.cache_stats
++    if stats["steps"]:
++        _LOGGER.info("PERF 缓存统计：步数=%d | rowset 重算/步=%.3f（命中 %d）| "
++                     "joint_limit 重算/步=%.3f（命中 %d）| lengths 重算/步=%.3f（命中 %d）",
++                     stats["steps"], stats["rowset_recompute"] / stats["steps"], stats["rowset_hit"],
++                     stats["joint_limit_recompute"] / stats["steps"], stats["joint_limit_hit"],
++                     stats["lengths_recompute"] / stats["steps"], stats["lengths_hit"])
+```
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/{dynamics,sampling,loop}.py`：**通过**。
+- 缓存命中口径自检：
+  - `joint_limit` 键最初把 `nefc/efc_type/efc_id` 也算进去，实测**每步 2.0 次重算、仅 0.25 命中**；
+    查调用栈确认同一步内有两个不同状态（见第七节），改成纯状态快照后不再恶化；
+  - `rowset` 每步重算次数用逐拍差分核实，**999/999 步均为 1 次**。
+- 执行器下标：`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+- 重复取数一致：同一结果文件两次独立取数，末值与回归 6 项相同。
+- 运行当时 `git_status_short_raw`（完整）：
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+ D "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy.pdf"
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _cmd_diff.txt
+?? _cmd_entry.tpl
+?? _git_status_cmd.txt
+?? _git_status_ja.txt
+?? _git_status_ja2.txt
+?? _git_status_na.txt
+?? _git_status_vj.txt
+?? _ja2_diff.txt
+?? _ja2_entry.tpl
+?? _ja_diff.txt
+?? _ja_entry.tpl
+?? _na_diff.txt
+?? _na_entry.tpl
+?? _vj_diff.txt
+?? _vj_entry.tpl
+?? _vv_diff.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.log
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPp_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.log
+?? wheel_leg_mujoco/results/N1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/N1_baseline_run01.log
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.log
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.log
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/S1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_tableB_t2.3-2.8.csv
+?? wheel_leg_mujoco/results/S1_tableB_t4.5-5.8.csv
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/T1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1_baseline_run01.log
+?? wheel_leg_mujoco/results/T1b_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1b_baseline_run01.log
+?? wheel_leg_mujoco/results/T1c_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1c_baseline_run01.log
+?? wheel_leg_mujoco/results/T1d_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1d_baseline_run01.log
+?? wheel_leg_mujoco/results/T1e_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1e_baseline_run01.log
+?? wheel_leg_mujoco/results/T1f_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1f_baseline_run01.log
+?? wheel_leg_mujoco/results/T1g_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1g_baseline_run01.log
+?? wheel_leg_mujoco/results/T1p_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1p_baseline_run01.log
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.log
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? wheel_leg_mujoco/tools/wbc_frame_replay.py
+```
+
+## 三、22.4 硬门槛：逐位一致（全部 0）
+
+基线 = 加缓存**前**的当前工作区（`T1g / T2g / CMD1e / JUMPg`），改动后同参数重跑（`T1p / T2p / CMD1p / JUMPp`）：
+
+| 对比 | 帧数 | `max|dqpos|` | `max|dqvel|` | `max|dctrl|` | 首差帧 |
+|---|---|---|---|---|---|
+| T1p vs T1g（零输入 12 s） | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| T2p vs T2g（`delta_velocity` 12 s） | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| CMD1p vs CMD1e（速度指令 12 s） | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| JUMPp vs JUMPg（跳跃 12 s） | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+
+跳跃回归 6 项（JUMPp）：
+
+| 项 | 要求 | 实测 |
+|---|---|---|
+| 轮最大离地间隙 | 0.2218 | **0.22180** |
+| ABORT | 0 | **0** |
+| 腿长越界 | 0 | **0** |
+| 单支撑 | 0 | **0** |
+| `airborne_zero` | 0 | **0** |
+| 瞬态后 `max|pitch|` | ≈0.258，且 <= 0.2618 | **0.24452**（见第六节口径说明） |
+
+末态 `com_x=-0.33769`、`com_vx=0.00000`（与基线一致）。
+
+## 四、速度（口径必须说明）
+
+**先说一处与文档不符的实测**：文档 22.1 写"headless 1 s 合 3.042 s / 3.566 ms/步"，
+我在本机加缓存**之前**实测 **2.513~2.605 s / 1 s**（两次复跑），即 0.384~0.398 倍速。
+所以"3.566 s -> <= 2.7 s"这条判据在改动前**就已经满足**，不是本轮达成的。
+
+| 口径 | 改前（两次） | 改后（两次） | 变化 |
+|---|---|---|---|
+| headless 1 s 墙钟 | 2.605 / 2.513 s | **2.021 / 2.026 s** | **-19% ~ -22%** |
+| 每步 | 2.61 / 2.51 ms | **2.02 ms** | 同上 |
+| 倍速 | 0.384 / 0.398 | **0.493 / 0.495** | +27% ~ +29% |
+
+测量方式：`Gbc486MpcWbcSimulation(SimulationConfig())` + `sim.run(zero_command, 1.0)`，
+`time.perf_counter()` 只包住 `run`（不含建模/构造），每档跑两次取两次原值。
+低于文档预期的 -30%，原因见第六节第 3 条。
+
+## 五、缓存命中（22.4 要求"每步 rowset 重算 = 1"）
+
+`results/JUMPp_baseline_run01.log`（跳跃 12 s，12000 步）：
+
+```text
+PERF 缓存统计：步数=12000 | rowset 重算/步=1.005（命中 12002）| joint_limit 重算/步=2.000（命中 2920）| lengths 重算/步=...
+```
+
+拆开看（`T1p`，零输入，与 `rowset` 同为 12000 步）：
+
+| 项 | 每步调用 | 每步重算 | 命中 | 结论 |
+|---|---|---|---|---|
+| `rowset` | 2.000 | **1.000**（步内）/ 1.005（含构造期 62 次） | 12002 | **达标**：每步恰好 1 次重算 |
+| `joint_limit` | 2.25 | **2.000** | 0.25 | 未达标（文档期望约 0），原因见第七节 |
+| `lengths` | 3.00 | **2.004** | 1.00 | 按预期（两条腿各 1 次，第三次命中） |
+
+`rowset` 的 "1.005" 是**统计口径**问题：`cache_stats` 计数器包含仿真**构造期**的 62 次
+（建模/预检阶段，不在物理步内）。逐拍差分核实：999 个步区间内，每步 `rowset` 重算次数
+**全部等于 1**，没有例外。
+
+## 六、与文档预期的差异（逐条说明，不含推断）
+
+1. **基线速度**：文档 3.566 s vs 我实测 2.513~2.605 s。可能来自测量口径不同（是否带
+   `trace_sink`、是否在 cProfile 下、机器负载）。我按"只包 `sim.run`、无 trace、跑两次"
+   测量，两次差异 <4%，可复现。
+2. **`joint_limit` 未能降到约 0**：同一步内它被 3 个位置调用，其中
+   `loop.py:672` 在 `advance_physics`（`mj_step`）**之后**，qvel 已变；我用调用栈 + qvel 字节
+   快照核实，20 个步里 20 步都出现"同一步两个不同状态"。所以每步 2 次重算是物理下限，
+   除非跨步复用**错误值**。实际收益：2.25 -> 2.00 次/步（该路径约省 11%）。
+3. **总提速 -19%~-22% 低于 -30%**：按文档 22.1 的占比，`rowset` 32% 的一半、`lengths` 的一半
+   是本轮能拿到的；`from_matrices`/`solve_wbc`/`advance_physics` 占 28% 按要求不动，
+   `joint_limit` 只拿到 11%、采样侧 `recover_contact_force` 只省掉 0.25/1.25 次，
+   合并后落在 -20% 量级与预期一致。
+4. **瞬态后 `max|pitch|` 这轮记 0.24452**，与文档写的 ≈0.258 不同：口径差别是窗口起点
+   （本轮取 `落地+0.2 s`=1.947 s，之前某轮取固定 1.943 s）。同一结果文件重取两次数值相同；
+   `JUMPp` 与基线**逐位相同**，所以这个差异不是本轮引入的。
+
+## 七、额外发现（本轮实测，未改）
+
+1. **`joint_limit_active` 的调用跨 `mj_step`**：`sampling.py:121`（采样）与 `control.py:468`
+   （WBC 不可信判据）在步前，`loop.py:672`（输出护栏）在步后。要让这条路径真正 0 重算，
+   需要把输出护栏挪到步前，或让它复用采样已算好的结果——属于控制流改动，需你决定。
+2. `rowset` 每步仍被调用 2 次（`sampling.py:51` 的 `chassis_state` 与 `sampling.py:97`），
+   缓存后第二次命中，但**调用本身**还在；进一步合并这两处可再省一点，属结构改动。
+3. 工作区当前还含上一轮加的"空格起跳"4 处改动（`APP/keyboard_task.py`、
+   `simulation.py`、`loop.py`、`tools/view.py`，未提交）。交付队列第 26 项写
+   "VJUMP-VIEW 上一版已回退"、第 27 项才是 RJUMP+KB。**这 4 个文件是否要一并回退，
+   等你的指令**；本轮 PERF 的逐位一致结论是在**包含**这些改动的工作区上取得的。
+
+## 八、结论（只写数据支持的现象）
+
+1. 四项缓存已按 22.2 落地，且**四项判据的硬门槛全部通过**：`T1p/T2p/CMD1p/JUMPp` 与基线
+   12000 帧**逐位全 0**，跳跃回归 6 项不变（间隙 0.22180、ABORT 0、越界 0、单支撑 0、
+   `airborne_zero` 0）。
+2. `rowset` 每步重算 **1.000 次**（逐拍差分核实），缓存命中 12002 次。
+3. 速度从 **2.513~2.605 s/1 s**（0.384~0.398 倍速）降到 **2.021~2.026 s/1 s**
+   （0.493~0.495 倍速），即 **-19%~-22%**；文档的 "<= 2.7 s" 门槛改动前已满足。
+4. `joint_limit` 未降到约 0（每步 2.0 次），有调用跨 `mj_step` 的实测证据，本轮未动控制流。
+
+================================================================
+
+
+================================================================
+PERF2：viewer 刷新门限改墙钟
+测试agent-ds，2026-10-17
+================================================================
+
+VP编号：PERF2（第 23 节）
+
+## 一、代码改动（完整 diff）
+
+| 文件 | 改动 |
+|---|---|
+| `gbc_mpc_wbc/loop.py` | 常量 `VIEWER_SYNC_DT`(仿真秒) -> **`VIEWER_SYNC_WALL_DT`(墙钟秒)**；循环外 `viewer_sync_wall = time.perf_counter()`；循环尾部墙钟门限 `if _now_wall - viewer_sync_wall >= VIEWER_SYNC_WALL_DT: viewer.sync(); viewer_sync_wall = _now_wall` |
+| `gbc_mpc_wbc/simulation.py` | 删 `self._viewer_sync_time`（同一份计时状态不能有两个持有者）；import 与文档串同步改名 |
+| `tools/view.py` | **额外的 4 行**（见下）：`run_loop` 无返回值导致 `summary is None`，`--output` 那段永远执行不到。23.4 要求用 `--output` 记录比对，必须修，否则验收无法进行。不涉及控制。 |
+
+物理积分、控制周期、MPC/WBC、增益/权重/限幅/阈值均未改；`viewer=None`（headless）完全不进入该分支；
+未改任何 `mj_*` 调用。
+
+```diff
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 798ea67..88fe9da 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -30,9 +30,10 @@ import numpy as np
+ 
+ from .logging_setup import get_logger  # noqa: E402
+ 
+-# viewer 刷新周期（仿真时间），约 60 fps。见本文件循环尾部 viewer.sync() 处的说明：
+-# 每物理步都 sync 会让 viewer 比实时慢 9 倍（渲染 91441 顶点的 base_link 等）。
+-VIEWER_SYNC_DT = 1.0 / 60.0
++# viewer 刷新周期。**墙钟秒**（不是仿真秒）：按仿真时间计时时，实际刷新率 = 60 * 仿真倍速，
++# 实测 0.35 倍速下只有 20.6 fps。改成墙钟口径后与倍速解耦，显示可达约 60 fps；
++# 只影响显示频率，不动物理积分与控制周期。
++VIEWER_SYNC_WALL_DT = 1.0 / 60.0
+ # 落地窗口（原 ANCHOR 锤定帧数，2026-10-17 用户确认保留 20 帧）。来源：用户指定 20 帧；
+ # 作用是避掉 t=1.893 那个单帧 mode 抖动。现在只做纯帧计时，不再有任何锚定语义。
+ LANDING_WINDOW_FRAMES = 20
+@@ -103,10 +104,13 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     normal_warned = limit_warned = False
+     wbc_warning = guard_warning = None   # 告警去抖：只在状态变化的那一拍打日志
+     last_frame_time = -1.0e9      # 帧回调节流（离线录像用；frame_callback=None 时无开销）
++    viewer_sync_wall = time.perf_counter()   # 上次 viewer.sync() 的墙钟时刻（唯一持有者）
+     step = 0
+     while steps is None or step < steps:
+         step_wall_start = time.perf_counter()
+         step_time = float(d.time)
++        # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
++        sim.dyn.begin_step()
+         mpc_called = False
+         wbc_called = False
+         outcome = None
+@@ -688,13 +692,12 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             break
+         if viewer is not None:
+             # 被动 viewer 刷新 + 实时限速；关窗口即停。
+-            # 2026-10-05：sync() 不再每物理步调用。实测每步 sync+渲染约 8.2 ms（物理步长 1 ms），
+-            # 会使 viewer 比实时慢 9.16 倍——用户看到的“收敛慢/效果差”有相当一部分是显示器上的
+-            # 时间被拉长 9 倍造成的假象（headless 同配置为 0.95 倍）。现在按渲染帧率（约 60 Hz
+-            # 仿真时间）刷新，物理与控制在 1 kHz 照常推进。渲染负担主因：base_link 单网格 91441 顶点。
+-            if float(d.time) - sim._viewer_sync_time >= VIEWER_SYNC_DT:
++            # 刷新门限按**墙钟**计时（第 23 节）：旧实现按仿真时间，倍率 0.35 时只有约 21 fps。
++            # 渲染负担主因仍是 base_link 单网格 91441 顶点；本改动只改刷新频率，不改物理与控制。
++            _now_wall = time.perf_counter()
++            if _now_wall - viewer_sync_wall >= VIEWER_SYNC_WALL_DT:
+                 viewer.sync()
+-                sim._viewer_sync_time = float(d.time)
++                viewer_sync_wall = _now_wall
+             remaining = m.opt.timestep - (time.perf_counter() - step_wall_start)
+             if remaining > 0.0:
+                 time.sleep(remaining)
+@@ -702,3 +705,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.stop_reason = "viewer_closed"
+                 break
+         step += 1
++    # PERF（第 22 节）：缓存统计写进日志（22.4 要求"每步 rowset 重算次数 = 1"可核对）。
++    stats = sim.dyn.cache_stats
++    if stats["steps"]:
++        _LOGGER.info("PERF 缓存统计：步数=%d | rowset 重算/步=%.3f（命中 %d）| "
++                     "joint_limit 重算/步=%.3f（命中 %d）| lengths 重算/步=%.3f（命中 %d）",
++                     stats["steps"], stats["rowset_recompute"] / stats["steps"], stats["rowset_hit"],
++                     stats["joint_limit_recompute"] / stats["steps"], stats["joint_limit_hit"],
++                     stats["lengths_recompute"] / stats["steps"], stats["lengths_hit"])
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index a9d98bc..26f990a 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -27,7 +27,7 @@ MPC 与 WBC 也解耦，因为两者频率不同，按异步运行）：
+ - 不配置日志（见 ``logging_setup.py``）；这里只 ``get_logger`` 后写日志
+ 
+ 时序说明：物理步长取模型 ``opt.timestep``；``wbc_dt``/``mpc_dt`` 必须是它的整数倍
+-（见 ``Algorithm/timing.py``）。viewer 的实时同步见 ``VIEWER_SYNC_DT`` 处的注释。
++（见 ``Algorithm/timing.py``）。viewer 的实时同步见 ``VIEWER_SYNC_WALL_DT`` 处的注释。
+ """
+ from __future__ import annotations
+ 
+@@ -41,7 +41,7 @@ import numpy as np
+ 
+ from . import _circleg  # noqa: F401
+ from .logging_setup import get_logger  # noqa: E402
+-from .loop import VIEWER_SYNC_DT, run_loop  # noqa: E402
++from .loop import VIEWER_SYNC_WALL_DT, run_loop  # noqa: E402
+ from . import robot as R
+ from .dynamics import Gbc486Dynamics, leg_combination
+ from .model_builder import HeldLegModelBuilder, LegInputModelBuilder
+@@ -301,7 +301,6 @@ class SimulationConfig:
+ class Gbc486MpcWbcSimulation:
+     def __init__(self, config: SimulationConfig = SimulationConfig(), mpc_settings: MPCSettings | None = None):
+         self.config = config
+-        self._viewer_sync_time = -1.0e9      # 上次 viewer.sync() 的仿真时刻
+         self.model, self.data = R.load()
+         self._apply_torque_limits()
+         self.pose = R.standing_pose(self.model, self.data, config.nominal_length)
+diff --git a/wheel_leg_mujoco/tools/view.py b/wheel_leg_mujoco/tools/view.py
+index cb61ea4..15751f8 100644
+--- a/wheel_leg_mujoco/tools/view.py
++++ b/wheel_leg_mujoco/tools/view.py
+@@ -143,6 +143,10 @@ def main():
+         viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+         viewer.cam.trackbodyid = int(model.body("base").id)
+         summary = simulation.run(command, args.duration, viewer=viewer)
++    if summary is None:
++        # run_loop 不返回值（它只负责推进），汇总要自己取；否则下面 items() 必抛
++        # AttributeError，--output 那段永远执行不到（既有缺陷，本轮顺手修掉）。
++        summary = simulation.summary(args.duration)
+ 
+     print(json.dumps({k: v for k, v in summary.items() if k != "model"}, ensure_ascii=False, indent=1))
+     if args.output is not None:
+```
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/{loop,simulation}.py tools/view.py`：**通过**。
+- 静态：`grep -rn "_viewer_sync_time|VIEWER_SYNC_DT" --include=*.py`
+  -> **无输出**（旧常量与旧计时状态都已清除）。
+- 执行器下标：`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+- 重复取数一致：同一结果文件两次独立取数，数值相同；view 连跑两次记录逐条相同（见第四节）。
+- 运行当时 `git_status_short_raw`（完整）：
+
+```text
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+ M wheel_leg_mujoco/tools/view.py
+ D "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy.pdf"
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _cmd_diff.txt
+?? _cmd_entry.tpl
+?? _git_status_cmd.txt
+?? _git_status_ja.txt
+?? _git_status_ja2.txt
+?? _git_status_na.txt
+?? _git_status_perf.txt
+?? _git_status_vj.txt
+?? _ja2_diff.txt
+?? _ja2_entry.tpl
+?? _ja_diff.txt
+?? _ja_entry.tpl
+?? _na_diff.txt
+?? _na_entry.tpl
+?? _perf_diff.txt
+?? _perf_entry.tpl
+?? _view_before_barejump.json.gz
+?? _view_before_nojump.json.gz
+?? _vj_diff.txt
+?? _vj_entry.tpl
+?? _vv_diff.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.log
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1q_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1q_command_velocity_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPp_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPp_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPq_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.log
+?? wheel_leg_mujoco/results/N1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/N1_baseline_run01.log
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.log
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.log
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/S1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_tableB_t2.3-2.8.csv
+?? wheel_leg_mujoco/results/S1_tableB_t4.5-5.8.csv
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/T1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1_baseline_run01.log
+?? wheel_leg_mujoco/results/T1b_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1b_baseline_run01.log
+?? wheel_leg_mujoco/results/T1c_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1c_baseline_run01.log
+?? wheel_leg_mujoco/results/T1d_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1d_baseline_run01.log
+?? wheel_leg_mujoco/results/T1e_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1e_baseline_run01.log
+?? wheel_leg_mujoco/results/T1f_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1f_baseline_run01.log
+?? wheel_leg_mujoco/results/T1g_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1g_baseline_run01.log
+?? wheel_leg_mujoco/results/T1p_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1p_baseline_run01.log
+?? wheel_leg_mujoco/results/T1q_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1q_baseline_run01.log
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2q_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2q_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.log
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? wheel_leg_mujoco/tools/wbc_frame_replay.py
+```
+
+## 三、23.4 验收
+
+| 项 | 要求 | 实测 | 结果 |
+|---|---|---|---|
+| headless 逐位 | T1p/T2p/CMD1p/JUMPp 逐位 0 差异 | 见下表，四份全 **0.000e+00** | **通过** |
+| view 逐位 | 同一命令 `--output` 记录逐位 0 差异 | 裸跳工况 **0 差异**；无跳工况有一份被污染的旧记录（见第五节），并用 sync 频率 A/B/C 实验直接证明"刷新频率不影响记录"（**0 差异**） | **通过（附说明）** |
+| 显示帧率 | 约 60 fps | **20.6 -> 54.0 fps** | 通过（略低于 60，原因见第六节） |
+| 静态 | `grep _viewer_sync_time` 无残留 | 无输出 | 通过 |
+| 倍率 | 记录改前/改后 1 s 墙钟，确认未明显恶化 | **0.350 -> 0.216 倍速（-38%）** | **未通过**（命中 23.5 退路分支） |
+
+### headless 逐位（`viewer=None`，不经该分支）
+
+| 对比 | 帧数 | `max|dqpos|` | `max|dqvel|` | `max|dctrl|` | 首差 |
+|---|---|---|---|---|---|
+| T1q vs T1p | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| T2q vs T2p | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| CMD1q vs CMD1p | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| JUMPq vs JUMPp | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+
+## 四、view 逐位（`--output` 记录）
+
+命令（当前 view.py 没有第 21 节那 5 个开关，它们随上一版回退一起没了）：
+
+```
+tools/view.py --backend wls --duration 3 [--jump-height 0.18 --jump-stroke 0.12 --jump-time 1.0] --output <file>
+```
+
+| 对比 | 记录数 | 不同记录 | 结果 |
+|---|---|---|---|
+| 裸跳：改前 vs 改后 | 691 / 691 | **0** | 逐位一致 |
+| 无跳：改后 vs 复跑 1 vs 复跑 2 | 750 / 750 / 750 | **0 / 0** | 当前代码自身完全确定 |
+
+## 五、无跳那一份"改前记录"为什么不同（有据可查，不是本轮引入）
+
+`_view_before_nojump` 与改后记录从**第 575 条（t=2.300 s）起连续不同**，但：
+
+- 首差记录的 `s / v / pitch / ref` **完全相同**，只有 `torque` 变
+  （轮力矩 -0.642 -> -1.5e-05，腿力矩同时跳 0.5 N·m 量级）；
+- 形态符合"外部力在 t=2.3 s 被注入"（`xfrc_applied` 经 `recover_contact_force` 的外部项
+  先改控制、下一拍才改状态），即**鼠标拖拽推扰**。那几个窗口当时是打开的。
+
+为排除"刷新频率改数值"这一可能，做了直接实验（同一份代码、同一命令，只改 sync 门限）：
+
+| 门限 | sync 次数 | 记录数 | 与其它组的差异 |
+|---|---|---|---|
+| 从不 sync（1e9 s） | 0 | 750 | — |
+| 60 fps（1/60 s，本轮值） | 661 | 750 | vs 从不：**0** |
+| 每步 sync（0 s） | 3000 | 750 | vs 从不/60fps：**0 / 0** |
+
+**结论：sync 频率（0 / 661 / 3000 次）对 750 条记录逐条无影响**，所以 23.2 不可能是数值差异来源；
+那份旧记录是被推扰污染的，不作为"改前基线"。
+
+## 六、倍率恶化（23.5 的退路条件已触发）
+
+viewer 下实测（`--duration 3`，同一台机器，同一命令）：
+
+| 口径 | 改前（仿真时间门限） | 改后（墙钟门限） | 变化 |
+|---|---|---|---|
+| 仿真 3 s 的墙钟 | 8.58 s | **13.88 s** | +62% |
+| 倍率 | **0.350** | **0.216** | **-38%** |
+| sync 次数 / fps | 177 / **20.6** | 749 / **54.0** | +162% |
+
+由此反解出渲染成本（两条方程解两个未知数）：
+
+- 每次 `viewer.sync()` 约 **9.27 ms**（(13.88-8.58)/(749-177)）；
+- 不含渲染的单步 **2.31 ms**（约 0.43 倍速，与 headless 2.02 ms 同量级）；
+- 预测模型：`倍速 ≈ 1 / (2.31 + 9.27/N)` ms，N = 每 N 步 sync 一次。
+
+| N（步/sync） | 显示帧率 | 预测倍速 |
+|---|---|---|
+| 4（=现在，墙钟 16.7 ms） | 54.0（实测） | 0.216（实测） |
+| 6 | 约 43 | 0.259 |
+| 8 | 约 34 | 0.288 |
+| 10 | 约 28 | 0.309 |
+| 15 | 约 19 | 0.341 |
+| 20 | 约 14 | 0.361 |
+
+**按 23.5，退路是"墙钟门限 + 每 N 步最多 sync 一次"。N 取多少没有依据可循，我不能自己定**，
+需要你给 N（或给目标：例如"倍率不低于 0.30" -> N=10；"倍率回到 0.34 以上" -> N=15）。
+确认后我按 `<N 作为显式常量 + 注释写明来源>` 实现并重跑本节验收。
+
+## 七、额外发现
+
+1. **`view.py` 的 `--output` 一直是坏的**（既有缺陷，本轮修）：`run_loop` 不返回值，
+   `summary.items()` 必抛 `AttributeError`，进程以 traceback 结束、`--output` 永不执行。
+   现在 `summary is None` 时改取 `simulation.summary(duration)`，`--output` 可正常写出（本轮验收依赖它）。
+2. **推扰会污染比对**：viewer 窗口开着时鼠标拖拽会经 `xfrc_applied` 进入接触力反解，
+   任何"改前/改后记录比对"都必须保证无人操作窗口。建议后续验收注明这一条。
+3. 第 21 节的 5 个跳跃开关（`--leg-length-compression` 等）已随上一版回退从 `view.py` 消失，
+   当前 view 只能跑裸跳；本轮 view 验收因此用裸跳与无跳两个工况。
+
+## 八、结论（只写数据支持的现象）
+
+1. 23.2 已按要求落地：墙钟门限 + 旧计时状态彻底删除（`grep` 无残留），只动 viewer 分支。
+2. **headless 四份结果逐位全 0**；view 侧裸跳记录改前/改后 **0 差异**，且 sync 频率
+   0 / 661 / 3000 次的记录**完全相同**，证明本改动不进入数值链路。
+3. 显示帧率 **20.6 -> 54.0 fps**（目标约 60，差的部分来自每次 sync 9.27 ms 的渲染开销）。
+4. **倍率 0.350 -> 0.216（-38%），按 23.4 最后一条属"明显恶化"，命中 23.5 退路分支**；
+   退路要定 N（每 N 步最多 sync 一次），N 的取值需要你给依据/目标，我不自行选。
+
+================================================================
+
+
+================================================================
+KB+RJUMP：键鼠控制 + 空格重复跳
+测试agent-ds，2026-10-17
+================================================================
+
+VP编号：KB+RJUMP（第 24 节）
+
+## 一、代码改动（完整 diff，A-E 五处）
+
+| 项 | 文件 | 改动 |
+|---|---|---|
+| A | `gbc_mpc_wbc/jump.py::start()` | 补齐每跳复位：`_airborne_confirmed`、`direction_lost_R/L`、`direction_lost_isolated_R/L`、`_direction_lost_seen`、`transition_reason`（后者原本已置） |
+| B | `gbc_mpc_wbc/simulation.py` | 新增 `request_jump()`：`jump is None` -> WARN 并拒绝；`phase != IDLE` -> INFO 并拒绝；否则置 `_jump_requested`。相位判据只在请求侧 |
+| C | `gbc_mpc_wbc/loop.py` | 触发点只加 OR 分支：`_timed_due or _jump_requested`；**不加** `phase == "IDLE"`；请求路径不动 `_jump_started`（只有 `_timed_due` 推进它）；新增 `flight_leg_ref = None` 每跳复位 |
+| D | `APP/keyboard_task.py` | 新增只读 `pressed_key(name)` |
+| E | `tools/view.py` | 补 5 个跳跃开关 + 透传；空格按下沿触发；启动打印生效配置；**未改任何默认值**（`--jump-height` 仍是 None、`--jump-time` 仍是 2.0） |
+
+```diff
+diff --git a/APP/keyboard_task.py b/APP/keyboard_task.py
+index 631503b..f32976c 100644
+--- a/APP/keyboard_task.py
++++ b/APP/keyboard_task.py
+@@ -100,6 +100,10 @@ class KeyboardCommandSource:
+     def read_reset_posture(self) -> bool:
+         return False
+ 
++    def pressed_key(self, name: str) -> bool:
++        """某个键当前是否按下（只读）。``name`` 用 ``_key_name`` 的口径：空格是 ``" "``。"""
++        return self._pressed(name)
++
+     def command(self) -> MotionCommand:
+         return MotionCommand(
+             self.read(),
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/jump.py b/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+index 00412cc..4650084 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+@@ -206,7 +206,14 @@ class JumpPlanner:
+         self.started_at = float(time)
+         self.phase_since = float(time)
+         self.transition_reason = "跳跃开始"
++        # 每跳复位（第 24 节）：这些是"本跳内"的状态，不复位会让第二跳沿用第一跳的离地锁存
++        # 与方向丢失记录，导致第二跳的 LANDING 判据被前一次结果污染。
+         self._airborne_confirmed = False
++        self.direction_lost_R = False
++        self.direction_lost_L = False
++        self.direction_lost_isolated_R = False
++        self.direction_lost_isolated_L = False
++        self._direction_lost_seen = {"R": False, "L": False}
+         config = self.config
+         _LOGGER.info(
+             "跳跃开始：目标高度 %.3f m | 压缩行程 %.3f m | 压缩终点 %.4f m | "
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 798ea67..78cbff9 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -107,6 +107,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     while steps is None or step < steps:
+         step_wall_start = time.perf_counter()
+         step_time = float(d.time)
++        # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
++        sim.dyn.begin_step()
+         mpc_called = False
+         wbc_called = False
+         outcome = None
+@@ -129,10 +131,19 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             mujoco.mjv_applyPerturbForce(m, d, viewer.perturb)
+ 
+         # -------------------------------------------------- 起跳触发（跳跃级）
+-        if sim.jump is not None and not sim._jump_started and float(d.time) >= sim.config.jump_time:
+-            sim._jump_started = True
++        # 第 24 节：定时触发与外部请求（view 空格）两条来源并存。
++        # - 定时：仍受 ``_jump_started`` 的"整轮一次"约束，语义不变；
++        # - 请求：只多一个 OR 分支，相位判据在 ``sim.request_jump()`` 里（只在 IDLE 受理），
++        #   这里**不加** ``phase == "IDLE"``（上一版就是在这里改坏的）。
++        _jump_requested = bool(sim._jump_requested)
++        _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
++        if sim.jump is not None and (_timed_due or _jump_requested):
++            sim._jump_requested = False          # 请求已被消费
++            if _timed_due:
++                sim._jump_started = True         # 只由定时来源推进该锁
+             sim._precheck_jump()
+             jump_command = sim.jump.start(float(d.time))
++            flight_leg_ref = None                # 每跳复位飞行腿剖面状态
+ 
+         # ------------------------------------------------------ 采样级（每物理步）
+         if jump_command is None:
+@@ -702,3 +713,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.stop_reason = "viewer_closed"
+                 break
+         step += 1
++    # PERF（第 22 节）：缓存统计写进日志（22.4 要求"每步 rowset 重算次数 = 1"可核对）。
++    stats = sim.dyn.cache_stats
++    if stats["steps"]:
++        _LOGGER.info("PERF 缓存统计：步数=%d | rowset 重算/步=%.3f（命中 %d）| "
++                     "joint_limit 重算/步=%.3f（命中 %d）| lengths 重算/步=%.3f（命中 %d）",
++                     stats["steps"], stats["rowset_recompute"] / stats["steps"], stats["rowset_hit"],
++                     stats["joint_limit_recompute"] / stats["steps"], stats["joint_limit_hit"],
++                     stats["lengths_recompute"] / stats["steps"], stats["lengths_hit"])
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index a9d98bc..696e526 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -301,7 +301,6 @@ class SimulationConfig:
+ class Gbc486MpcWbcSimulation:
+     def __init__(self, config: SimulationConfig = SimulationConfig(), mpc_settings: MPCSettings | None = None):
+         self.config = config
+-        self._viewer_sync_time = -1.0e9      # 上次 viewer.sync() 的仿真时刻
+         self.model, self.data = R.load()
+         self._apply_torque_limits()
+         self.pose = R.standing_pose(self.model, self.data, config.nominal_length)
+@@ -344,6 +343,8 @@ class Gbc486MpcWbcSimulation:
+         self.solution = None
+         self._normal_violation_time = 0.0
+         self._infeasible_active = False
++        self._viewer_sync_time = -1.0e9      # 上次 viewer.sync() 的仿真时刻
++        self._jump_requested = False         # 外部（view 空格）请求起跳；由 loop 消费
+         self.records: list[dict] = []
+         self.stop_reason = None
+         self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
+@@ -445,6 +446,23 @@ class Gbc486MpcWbcSimulation:
+                         flight_leg_extend=flight_leg_extend,
+                         mpc_force_feedforward=mpc_force_feedforward)
+ 
++    def request_jump(self) -> bool:
++        """外部请求起跳（view 按空格）。返回是否受理。
++
++        相位判据放在**请求侧**（只接受 IDLE），不放进 loop 的定时触发路径：
++        定时触发是"整轮一次"的既有语义，不能被请求侧的状态判断改写。
++        没有跳跃对象（``jump_height is None``）时不受理并记 WARN。
++        """
++        if self.jump is None:
++            _LOGGER.warning("跳跃请求被忽略：未配置 jump_height（需 --jump-height）")
++            return False
++        if self.jump.phase.value != "IDLE":
++            _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 接受，t=%.3f s）",
++                         self.jump.phase.value, float(self.data.time))
++            return False
++        self._jump_requested = True
++        return True
++
+     def _precheck_jump(self) -> None:
+         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。
+ 
+diff --git a/wheel_leg_mujoco/tools/view.py b/wheel_leg_mujoco/tools/view.py
+index cb61ea4..b838f73 100644
+--- a/wheel_leg_mujoco/tools/view.py
++++ b/wheel_leg_mujoco/tools/view.py
+@@ -41,7 +41,9 @@ from gbc_mpc_wbc.simulation import Gbc486MpcWbcSimulation, SimulationConfig  # n
+ from Algorithm.mpc import MotionCommand  # noqa: E402
+ from APP.mujoco_mpc_wbc import _PRESETS  # noqa: E402
+ from gbc_mpc_wbc.simulation import MAX_SPEED
+-from gbc_mpc_wbc.logging_setup import setup_logging  # noqa: E402
++from gbc_mpc_wbc.logging_setup import get_logger, setup_logging  # noqa: E402
++
++_LOGGER = get_logger(__name__)
+ 
+ RESULTS = ROOT / "results"
+ 
+@@ -67,6 +69,18 @@ def main():
+                         help="启用跳跃并给定目标质心抬升 [m]（例如 0.10）")
+     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
+     parser.add_argument("--jump-time", type=float, default=2.0, help="起跳指令时刻 [s]")
++    # 第 24 节：与 tools/jump_diagnostic.py 同名的 5 个跳跃工况开关，只做透传；
++    # 默认全 False，不传时与既有行为一致（裸跳）。
++    parser.add_argument("--leg-length-compression", action="store_true",
++                        help="VL1：COMPRESS/COMPRESS_BRAKE 用腿长行加速度驱动，不创建 com_vertical")
++    parser.add_argument("--leg-length-thrust", action="store_true",
++                        help="TR1：THRUST 用腿长行加速度驱动，不创建 com_vertical")
++    parser.add_argument("--flight-zero-torque", action="store_true",
++                        help="FL1：FLIGHT 或真离地时输出显式零力矩，不保持地面力矩")
++    parser.add_argument("--flight-leg-retract", action="store_true",
++                        help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
++    parser.add_argument("--flight-leg-extend", action="store_true",
++                        help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
+     parser.add_argument("--leg-length", type=float, default=None,
+                         help="标称腿长 [m]，默认 0.28（行程带中点）；机构范围约 0.14–0.43")
+     parser.add_argument("--output", type=Path, default=None, help="结束时写入的记录（JSON.gz）")
+@@ -74,6 +88,11 @@ def main():
+     if hasattr(sys.stdout, "reconfigure"):
+         sys.stdout.reconfigure(encoding="utf-8")
+     setup_logging(default_level="INFO")
++    _LOGGER.info("view 配置：jump_height=%s jump_stroke=%.4g jump_time=%.4g "
++                 "compression=%s thrust=%s zero_torque=%s retract=%s extend=%s",
++                 args.jump_height, args.jump_stroke, args.jump_time,
++                 args.leg_length_compression, args.leg_length_thrust,
++                 args.flight_zero_torque, args.flight_leg_retract, args.flight_leg_extend)
+ 
+     from mujoco import viewer as mujoco_viewer
+     from APP.keyboard_task import KeyboardCommandSource
+@@ -121,12 +140,21 @@ def main():
+         # 键盘步长跟本工作区的速度上限（circleg 共享配置里是 2.5；不改那个文件）
+         keyboard = KeyboardCommandSource(_replace(
+             DEFAULT_CONFIG, keyboard=_replace(DEFAULT_CONFIG.keyboard, speed_step=MAX_SPEED)))
+-        print(f"键盘指令源可用：{keyboard.available}（方向键上/下=速度，左/右=偏航；"
++        print(f"键盘指令源可用：{keyboard.available}（方向键上/下=速度，左/右=偏航，空格=起跳；"
+               f"有速度输入的模式尚未测试）")
+ 
++    # 空格触发（第 24 节）：只取按下沿，按住不重复请求；相位判据在 sim.request_jump() 里。
++    _space_was_down = [False]
++
+     def command(_time):
+         if keyboard is None:
+             return MotionCommand(velocity=0.0, yaw_rate=0.0)
++        # 空格键名实测是 "space"（pynput 送 Key.space，_key_name 取 name 分支）；
++        # 某些布局/平台会送字符型 KeyCode(char=" ")，两种都认，避免按键静默失效。
++        _space_down = bool(keyboard.pressed_key("space") or keyboard.pressed_key(" "))
++        if _space_down and not _space_was_down[0]:
++            simulation.request_jump()
++        _space_was_down[0] = _space_down
+         return MotionCommand(velocity=keyboard.read(), yaw_rate=keyboard.read_yaw_rate())
+ 
+     with mujoco_viewer.launch_passive(model, simulation.data) as viewer:
+@@ -142,7 +170,16 @@ def main():
+                 pass
+         viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+         viewer.cam.trackbodyid = int(model.body("base").id)
+-        summary = simulation.run(command, args.duration, viewer=viewer)
++        summary = simulation.run(command, args.duration, viewer=viewer,
++                                 leg_length_compression=args.leg_length_compression,
++                                 leg_length_thrust=args.leg_length_thrust,
++                                 flight_zero_torque=args.flight_zero_torque,
++                                 flight_leg_retract=args.flight_leg_retract,
++                                 flight_leg_extend=args.flight_leg_extend)
++    if summary is None:
++        # run_loop 不返回值（它只负责推进），汇总要自己取；否则下面 items() 必抛
++        # AttributeError，--output 那段永远执行不到（既有缺陷，本轮顺手修掉）。
++        summary = simulation.summary(args.duration)
+ 
+     print(json.dumps({k: v for k, v in summary.items() if k != "model"}, ensure_ascii=False, indent=1))
+     if args.output is not None:
+```
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/{jump,simulation,loop}.py tools/view.py APP/keyboard_task.py`：**通过**。
+- 静态：触发点里 `_jump_started` 只在 `if _timed_due:` 分支内被置真（见 diff），
+  请求路径不碰它；`phase == "IDLE"` 的判断只出现在 `simulation.request_jump()` 里。
+- 执行器下标：`leg_actuators=(0,1,2,3)`、`wheel_actuators=(4,5)`。
+- 运行当时 `git_status_short_raw`（完整）：
+
+```text
+ M APP/keyboard_task.py
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\225\260\346\215\256\344\270\216\346\265\213\350\257\225\347\273\223\346\236\234\345\217\215\351\246\210.txt"
+ M "docs/agent\344\272\244\344\272\222\346\226\207\346\241\243_\350\220\275\345\234\260\345\247\277\346\200\201_\346\265\213\350\257\225\346\226\271\346\241\210\351\203\250\347\275\262.txt"
+ M wheel_leg_mujoco/gbc_mpc_wbc/dynamics.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/sampling.py
+ M wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+ M wheel_leg_mujoco/tools/view.py
+ D "\344\270\262\350\201\224\350\205\277\346\234\272\345\231\250\344\272\272\345\273\272\346\250\241\344\270\216\346\216\247\345\210\266\345\274\200\346\272\220\346\226\207\346\241\243 copy.pdf"
+?? URDF_Model/mjcf/URDF_Model_field.xml
+?? URDF_Model/mjcf/field_meshes/
+?? _cmd_diff.txt
+?? _cmd_entry.tpl
+?? _git_status_cmd.txt
+?? _git_status_ja.txt
+?? _git_status_ja2.txt
+?? _git_status_na.txt
+?? _git_status_perf.txt
+?? _git_status_perf2.txt
+?? _git_status_vj.txt
+?? _ja2_diff.txt
+?? _ja2_entry.tpl
+?? _ja_diff.txt
+?? _ja_entry.tpl
+?? _na_diff.txt
+?? _na_entry.tpl
+?? _perf2_diff.txt
+?? _perf2_diff_a.txt
+?? _perf2_diff_b.txt
+?? _perf2_entry.tpl
+?? _perf_diff.txt
+?? _perf_entry.tpl
+?? _vj_diff.txt
+?? _vj_entry.tpl
+?? _vv_diff.txt
+?? build/
+?? field_assets/
+?? rmuc2026-mujoco/
+?? videos/
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/ANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/BAREJUMP_baseline_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.json.gz
+?? wheel_leg_mujoco/results/CMD1_command_velocity_run02.log
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1b_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1c_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1d_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1e_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1p_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1q_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1q_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1s_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1s_command_velocity_run01.log
+?? wheel_leg_mujoco/results/CMD1t_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/CMD1t_command_velocity_run01.log
+?? wheel_leg_mujoco/results/FL55_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/FL55_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR2_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPg_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPp_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPp_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPq_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPq_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPr_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/JUMPr_baseline_run01.log
+?? wheel_leg_mujoco/results/JUMPt_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND0_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND1A_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2B_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND2_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND4_baseline_run01.log
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/LAND5_baseline_run01.log
+?? wheel_leg_mujoco/results/N1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/N1_baseline_run01.log
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/NOANCHOR_baseline_run01.log
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/OBS1_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.json.gz
+?? wheel_leg_mujoco/results/PURGE_baseline_run02.log
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEb_baseline_run01.log
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PURGEc_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb2_baseline_run01.log
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/PbOff_baseline_run01.log
+?? wheel_leg_mujoco/results/Pb_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/Pb_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_baseline_run01.log
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/R1_LAND3_d8_baseline_run01.log
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/RAMP1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/S1_baseline_run01.log
+?? wheel_leg_mujoco/results/S1_tableB_t2.3-2.8.csv
+?? wheel_leg_mujoco/results/S1_tableB_t4.5-5.8.csv
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SPACE_REG_baseline_run01.log
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/SW1_f016_t36_baseline_run01.log
+?? wheel_leg_mujoco/results/T1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1_baseline_run01.log
+?? wheel_leg_mujoco/results/T1b_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1b_baseline_run01.log
+?? wheel_leg_mujoco/results/T1c_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1c_baseline_run01.log
+?? wheel_leg_mujoco/results/T1d_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1d_baseline_run01.log
+?? wheel_leg_mujoco/results/T1e_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1e_baseline_run01.log
+?? wheel_leg_mujoco/results/T1f_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1f_baseline_run01.log
+?? wheel_leg_mujoco/results/T1g_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1g_baseline_run01.log
+?? wheel_leg_mujoco/results/T1p_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1p_baseline_run01.log
+?? wheel_leg_mujoco/results/T1q_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1q_baseline_run01.log
+?? wheel_leg_mujoco/results/T1s_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1s_baseline_run01.log
+?? wheel_leg_mujoco/results/T1t_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/T1t_baseline_run01.log
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2a_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2c_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2d_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2e_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2f_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2g_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2p_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2q_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2q_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2s_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2s_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T2t_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T2t_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3A_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/T3B_delta_velocity_run01.log
+?? wheel_leg_mujoco/results/TR1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/TR1_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMPVIEW_baseline_run01.log
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.json.gz
+?? wheel_leg_mujoco/results/VJUMP_command_velocity_run01.log
+?? wheel_leg_mujoco/results/VL1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VL1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R1_baseline_run01.log
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/VP1_R2_baseline_run01.log
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.json.gz
+?? wheel_leg_mujoco/results/WLIM_baseline_run01.log
+?? wheel_leg_mujoco/sw1_eval.json
+?? wheel_leg_mujoco/tools/sw1_scan_eval.py
+?? wheel_leg_mujoco/tools/wbc_frame_replay.py
+```
+
+## 三、验收
+
+### 3.1 不按空格、不传开关 -> 与当前工作区逐位一致（通过）
+
+| 对比 | 帧数 | `max|dqpos|` | `max|dqvel|` | `max|dctrl|` | 首差 |
+|---|---|---|---|---|---|
+| T1t vs T1s | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| T2t vs T2s | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| CMD1t vs CMD1s | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+| JUMPt vs JUMPr | 12000 | **0.000e+00** | **0.000e+00** | **0.000e+00** | 无 |
+
+### 3.2 jump_diagnostic 6 项（`JUMPt`，与改前 JUMPr 逐位相同）
+
+| 项 | 要求 | 实测 |
+|---|---|---|
+| 轮最大离地间隙 | 0.2218 | **0.22180** |
+| ABORT | 0 | **0** |
+| 腿长越界 | 0 | **0** |
+| 单支撑 | 0 | **0** |
+| `airborne_zero` | 0 | **0** |
+| 瞬态后 `max|pitch|` | 与改前相同 | **0.24452**（改前同值） |
+
+### 3.3 连续跳（headless，与 view 同一条调用路径：在 `command` 回调里 `request_jump()`）
+
+5 次请求 -> **5 次起跳，每次回 IDLE**：
+
+| 请求时刻 | 受理 | 起跳 | 落地 | 回 IDLE | 该跳最大离地间隙 |
+|---|---|---|---|---|---|
+| 1.00 s | 是 | 1.001 | 1.751 | 1.770 | 0.22180 m |
+| 4.02 s | 是 | 4.021 | 4.771 | 4.790 | 0.22181 m |
+| 5.00 s | 是 | 5.001 | 5.844 | 5.864 | 0.22378 m |
+| 7.50 s | 是 | 7.501 | 8.251 | 8.270 | 0.22183 m |
+| 11.02 s | 是 | 11.021 | 11.771 | 11.790 | 0.22180 m |
+
+`ABORT` 帧 **0**；每跳都回到 `IDLE`（相位机未卡在 LANDING/RECOVER）。
+
+### 3.4 非 IDLE 时按空格被拒并记 INFO，不崩溃（通过）
+
+```
+23:47:46 INFO gbc_mpc_wbc.simulation: 跳跃请求被拒绝：当前相位 FLIGHT（只在 IDLE 接受，t=1.52 s）
+23:47:47 INFO gbc_mpc_wbc.simulation: 跳跃请求被拒绝：当前相位 LANDING（只在 IDLE 接受，t=1.76 s）
+```
+
+两次拒绝均在跳跃进行中，起跳次数仍为 1，无异常、无崩溃。
+
+### 3.5 GUI 会话（真实键盘空格，`pynput.Key.space` 合成）
+
+会话 1（duration 30 s）：5 次按键 -> **5 次「跳跃开始」，每次都有 `RECOVER -> IDLE`**：
+
+```
+23:54:21 跳跃开始 ... 23:54:24 RECOVER -> IDLE（t=1.970 s）
+23:54:31 跳跃开始 ... 23:54:34 RECOVER -> IDLE（t=4.950 s）
+23:54:40 跳跃开始 ... 23:54:43 RECOVER -> IDLE（t=7.550 s）
+23:54:50 跳跃开始 ... 23:54:52 RECOVER -> IDLE（t=10.430 s）
+23:54:59 跳跃开始 ... 23:55:02 RECOVER -> IDLE（t=13.170 s）
+```
+
+启动配置行（E 项）：
+
+```
+view 配置：jump_height=0.18 jump_stroke=0.12 jump_time=inf compression=True thrust=True
+zero_torque=True retract=True extend=True
+```
+
+会话 2（duration 15 s，故意在跳跃中补按一次）：3 次跳跃 + 1 次拒绝：
+
+```
+跳跃开始 ...（第 1 跳）
+跳跃请求被拒绝：当前相位 COMPRESS_BRAKE（只在 IDLE 接受，t=...）
+RECOVER -> IDLE（t=1.530 s） ... 第 2 跳 ... 第 3 跳 ...
+```
+
+## 四、与规格的一处不符（已核实并对齐，请你确认）
+
+**D 项写「空格键名是 `" "`」——在本机不成立**。实测证据：
+
+```
+Key.space 按下时集合: {'space'} | pressed_key(" ") = False | pressed_key("space") = True
+```
+
+pynput 送的是 `Key.space`，`_key_name()` 先取 `key.char`（`Key.space` 没有 char）再取 `name`，
+得到 **`"space"`**。若照字面只查 `" "`，空格会**静默失效**（我第一次端到端就是这样：日志里只有配置行，
+5 次按键一次都没进到 `request_jump()`）。
+
+处理：`view.py` 里改为 `keyboard.pressed_key("space") or keyboard.pressed_key(" ")`
+（两种形态都认，字符型 `KeyCode(char=" ")` 的平台也能用），`pressed_key()` 本身仍是纯读。
+如果你要求严格只认 `" "`，那就需要改 `_key_name()` 的取值顺序，属于另一处改动，我没有动。
+
+## 五、额外发现（本轮实测，未改）
+
+1. **一次漏按（未定位）**：会话 2 里第 4 次按下既没触发跳跃、也没有「请求被拒绝」日志，
+   即按键事件没进到 view 进程。同一按键逻辑在隔离测试中 4 个 press/release 周期全部正常，
+   会话 1 的 5 次按键也 5/5 成功。**正常节奏下可用，偶发漏按需要单独加输入日志才能定位**，本轮不猜原因。
+2. `view.py` 的 `--output` 之前是坏的（`run_loop` 无返回值 -> `summary.items()` 抛 `AttributeError`，
+   进程以 traceback 结束且 `--output` 永不执行）。上一轮已修（`summary is None` 时取
+   `simulation.summary(...)`），本轮 GUI 验收依赖它。
+3. 第 24 节没有改 `view.py` 的任何默认值：`--jump-height` 仍为 `None`、`--jump-time` 仍为 `2.0`。
+   要用空格跳，命令行必须显式给 `--jump-height 0.18 --jump-time inf`（如规格给的用法）。
+
+## 六、结论（只写数据支持的现象）
+
+1. A-E 五处改动全部落地：每跳复位齐备、`request_jump()` 只在 IDLE 受理、
+   触发点只有 OR 分支且请求路径不动 `_jump_started`、`view` 有 5 个开关与空格触发、默认值未改。
+2. 不按空格不传开关时与改前**逐位全 0**（四份 12000 帧）；`jump_diagnostic` 6 项不变。
+3. 一次会话**连跳 5 次**（headless）与 **5 次 GUI 真实按键**全部成功，每次回到 `IDLE`，
+   间隙 0.2218~0.2238 m >= 0.20，`ABORT` 0；非 IDLE 请求被拒并记 INFO，不崩溃。
+4. 规格 D 项的「空格键名是 `" "`」与实测不符（实为 `"space"`），已按两种形态兼容处理并在此标注；
+   按字面实现会让空格静默失效。
+
+================================================================

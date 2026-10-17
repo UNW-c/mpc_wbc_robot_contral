@@ -51,7 +51,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
              flight_zero_torque: bool = False,
              flight_leg_retract: bool = False,
              flight_leg_extend: bool = False,
-             mpc_force_feedforward: bool = False) -> None:
+             mpc_force_feedforward: bool = False,
+             reset_key=None) -> None:
     """积分情景；传入 viewer 时按实时步长同步（与 circleg ``run`` 相同）。
 
     ``sim`` 是 ``Gbc486MpcWbcSimulation``：本函数只读它的装配好的零件
@@ -107,6 +108,30 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     while steps is None or step < steps:
         step_wall_start = time.perf_counter()
         step_time = float(d.time)
+        # PERF（第 22 节）：缓存生命周期 = 一个物理步；这里清空，保证不跨步复用。
+        sim.dyn.begin_step()
+        # 手动复位（第 24 节）：view 里按 R。实体与控制栈由 sim.reset_run 负责，
+        # 本函数自己持有的跳跃/帧计时状态在这里一并清掉（它们不属于 sim）。
+        if reset_key is not None and reset_key():
+            _LOGGER.info("用户按 R 手动复位：t=%.3f s", float(d.time))
+            sim.reset_run(viewer)
+            jump_command = None
+            jump_reference = None
+            jump_holds = None
+            previous_phase = "IDLE"
+            last_thrust_applied = thrust_applied_last = False
+            previous_com_xz = previous_com_time = None
+            flight_leg_ref = None
+            jump_landed = False
+            landed_frames = 0
+            landing_reanchor_pending = False
+            feedback = None
+            solution = None
+            normal_violation_time = 0.0
+            infeasible_active = False
+            airborne_active = False
+            airborne_since = 0.0
+            torque = np.zeros(m.nu)
         mpc_called = False
         wbc_called = False
         outcome = None
@@ -129,10 +154,19 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             mujoco.mjv_applyPerturbForce(m, d, viewer.perturb)
 
         # -------------------------------------------------- 起跳触发（跳跃级）
-        if sim.jump is not None and not sim._jump_started and float(d.time) >= sim.config.jump_time:
-            sim._jump_started = True
+        # 第 24 节：定时触发与外部请求（view 空格）两条来源并存。
+        # - 定时：仍受 ``_jump_started`` 的"整轮一次"约束，语义不变；
+        # - 请求：只多一个 OR 分支，相位判据在 ``sim.request_jump()`` 里（只在 IDLE 受理），
+        #   这里**不加** ``phase == "IDLE"``（上一版就是在这里改坏的）。
+        _jump_requested = bool(sim._jump_requested)
+        _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
+        if sim.jump is not None and (_timed_due or _jump_requested):
+            sim._jump_requested = False          # 请求已被消费
+            if _timed_due:
+                sim._jump_started = True         # 只由定时来源推进该锁
             sim._precheck_jump()
             jump_command = sim.jump.start(float(d.time))
+            flight_leg_ref = None                # 每跳复位飞行腿剖面状态
 
         # ------------------------------------------------------ 采样级（每物理步）
         if jump_command is None:
@@ -702,3 +736,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 sim.stop_reason = "viewer_closed"
                 break
         step += 1
+    # PERF（第 22 节）：缓存统计写进日志（22.4 要求"每步 rowset 重算次数 = 1"可核对）。
+    stats = sim.dyn.cache_stats
+    if stats["steps"]:
+        _LOGGER.info("PERF 缓存统计：步数=%d | rowset 重算/步=%.3f（命中 %d）| "
+                     "joint_limit 重算/步=%.3f（命中 %d）| lengths 重算/步=%.3f（命中 %d）",
+                     stats["steps"], stats["rowset_recompute"] / stats["steps"], stats["rowset_hit"],
+                     stats["joint_limit_recompute"] / stats["steps"], stats["joint_limit_hit"],
+                     stats["lengths_recompute"] / stats["steps"], stats["lengths_hit"])

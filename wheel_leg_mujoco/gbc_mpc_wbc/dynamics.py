@@ -153,6 +153,31 @@ class Gbc486Dynamics:
         self.leg_actuators = tuple(int(model.actuator(n).id) for n in (
             "Right_front_joint_act", "Right_rear_joint_act", "Left_front_joint_act", "Left_rear_joint_act"))
         self.wheel_actuators = tuple(int(model.actuator(n).id) for n in ("Right_Wheel_act", "Left_Wheel_act"))
+        # PERF（第 22 节）：按物理步复用同一次计算的结果。缓存的两条硬约束：
+        #   1) 生命周期 = 一个物理步（``begin_step`` 清空，``run_loop`` 每拍开头调用）；
+        #   2) 复用判据是 (qpos, qvel) 的字节快照完全一致 —— 任何状态改动（mj_step /
+        #      积分 / 直接写 qpos）都会自动 miss，不需要依赖调用方记得失效。
+        # 缓存返回的是首次算出的原对象，不重排运算、不改 dtype 与形状，所以逐位一致。
+        self._cache_signature: tuple[bytes, bytes] | None = None
+        self._cache_rowset: RowSet | None = None
+        self._cache_joint_limit: tuple[tuple, list[str]] | None = None
+        self._cache_lengths: dict[tuple, tuple[float, float]] = {}
+        self.cache_stats = {"steps": 0, "rowset_recompute": 0, "rowset_hit": 0,
+                            "joint_limit_recompute": 0, "joint_limit_hit": 0,
+                            "lengths_recompute": 0, "lengths_hit": 0}
+
+    # ------------------------------------------------------------------ cache
+    def begin_step(self) -> None:
+        """一个物理步开始：清空本拍缓存（缓存生命周期 = 一个物理步）。"""
+        self._cache_signature = None
+        self._cache_rowset = None
+        self._cache_joint_limit = None
+        self._cache_lengths.clear()
+        self.cache_stats["steps"] += 1
+
+    def _signature(self) -> tuple[bytes, bytes]:
+        """当前 (qpos, qvel) 的字节快照，用作"状态是否变过"的判据。"""
+        return (self.data.qpos.tobytes(), self.data.qvel.tobytes())
 
     # ------------------------------------------------------------------ model
     def _selection(self) -> np.ndarray:
@@ -235,14 +260,25 @@ class Gbc486Dynamics:
         return self._evaluate(s)
 
     def rowset(self) -> RowSet:
-        """当前 ``data`` 状态的全部行与偏置。调用前 ``data`` 需已 ``mj_forward``。"""
+        """当前 ``data`` 状态的全部行与偏置。调用前 ``data`` 需已 ``mj_forward``。
+
+        PERF：同一物理步内重复调用直接返回首次结果（多个采样入口共用，行集是纯函数）。
+        """
+        signature = self._signature()
+        if self._cache_rowset is not None and signature == self._cache_signature:
+            self.cache_stats["rowset_hit"] += 1
+            return self._cache_rowset
         data = self.data
         rows = self._evaluate(data)
         plus, minus = data.qpos.copy(), data.qpos.copy()
         mujoco.mj_integratePos(self.model, plus, data.qvel, _DIFFERENCE_DT)
         mujoco.mj_integratePos(self.model, minus, data.qvel, -_DIFFERENCE_DT)
         bias = (self._evaluate_at(plus) - self._evaluate_at(minus)) @ data.qvel / (2 * _DIFFERENCE_DT)
-        return RowSet(rows, bias)
+        result = RowSet(rows, bias)
+        self._cache_rowset = result
+        self._cache_signature = signature
+        self.cache_stats["rowset_recompute"] += 1
+        return result
 
 
 
@@ -283,6 +319,22 @@ class Gbc486Dynamics:
     def attitude(self) -> np.ndarray:
         return euler_zyx(self.data.qpos[3:7])
 
+    def _lengths(self, leg, angles: dict[str, float]) -> tuple[float, float]:
+        """``LegKinematics.lengths`` 的按拍缓存（同一拍角度未变即命中）。
+
+        PERF：``_chain`` 占 7%，每步 3 次调用；同一拍内 ``leg_state`` 与 ``thrust_torque``
+        读的是同一组 qpos，所以键取 ``tuple(angles)`` 即足以判等。
+        """
+        key = (leg.name, tuple(angles.items()))
+        cached = self._cache_lengths.get(key)
+        if cached is not None:
+            self.cache_stats["lengths_hit"] += 1
+            return cached
+        value = self._leg_kinematics[leg.name].lengths(angles)
+        self._cache_lengths[key] = value
+        self.cache_stats["lengths_recompute"] += 1
+        return value
+
     def leg_state(self) -> np.ndarray:
         """[L_R, phi_R, L_L, phi_L]：腿长与腿摆角，由关节角**解析推导**。
 
@@ -297,7 +349,7 @@ class Gbc486Dynamics:
         for leg in R.LEGS:
             angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
                       for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
-            values.extend(self._leg_kinematics[leg.name].lengths(angles))
+            values.extend(self._lengths(leg, angles))
         return np.asarray(values)
 
     def leg_velocity(self, rows: RowSet | None = None) -> np.ndarray:
@@ -338,7 +390,7 @@ class Gbc486Dynamics:
             kin = self._leg_kinematics[leg.name]
             angles = {name: float(self.data.qpos[self.model.joint(name).qposadr[0]])
                       for name in (leg.front_joint, leg.rear_joint) + leg.passive_joints}
-            length, phi = kin.lengths(angles)
+            length, phi = self._lengths(leg, angles)
             wrench = np.array([float(forces[side]) * np.cos(phi),
                                -float(forces[side]) * float(length) * np.sin(phi)])
             tau = kin.jacobian(angles).T @ wrench
@@ -396,8 +448,17 @@ class Gbc486Dynamics:
     def joint_limit_active(self) -> list[str]:
         """当前被 MuJoCo 关节限位约束顶住的关节名。"""
         data = self.data
+        # PERF：纯 numpy 循环，每步被 2.25 次调用。限位激活只由 qpos 决定（mj_forward 重建
+        # efc 表是同值再推导），所以键用状态快照即可；缓存本身按物理步清空，不会跨步复用。
+        count = int(data.nefc)
+        key = self._signature()
+        if self._cache_joint_limit is not None and self._cache_joint_limit[0] == key:
+            self.cache_stats["joint_limit_hit"] += 1
+            return self._cache_joint_limit[1]
         names = []
-        for i in range(data.nefc):
+        for i in range(count):
             if data.efc_type[i] == mujoco.mjtConstraint.mjCNSTR_LIMIT_JOINT:
                 names.append(self.model.joint(int(data.efc_id[i])).name)
+        self._cache_joint_limit = (key, names)
+        self.cache_stats["joint_limit_recompute"] += 1
         return names

@@ -83,6 +83,7 @@ class FeedbackSampler:
         self.equilibrium_pitch = float(reduced.metadata["equilibrium_pitch"])
         self.nominal_angle = float(nominal_angle)
         self.pitch_limit = float(pitch_limit)
+        self._contact_cache = None      # PERF：采样侧接触力反解的按拍缓存
 
     def update(self, distance: float, phase_hint: JumpPhaseHint = JumpPhaseHint.NONE) -> Feedback:
         """取一拍反馈：运动学 -> 接触几何 -> 力雅可比反解接触力 -> 接触判定 -> 状态/监督层。
@@ -99,8 +100,19 @@ class FeedbackSampler:
         flags = tuple(bool(n) for n in counts)
         if any(flags):
             blocks = self.tasks.contact_blocks(rows, flags)
-            recovered = self.dynamics.recover_contact_force(
-                blocks, self.data.qacc, self.data.ctrl, external=self.data.qfrc_applied)
+            # PERF（第 22 节）：只缓存采样侧这一路（WBC 级 control.py 的调用不缓存，
+            # 它的输入是解出来的 qacc，语义不同）。同一物理步内 (qpos, qvel, qacc, ctrl,
+            # 外部力) 不变即复用首次结果，返回的是原数组。
+            cache_key = (self.dynamics._signature(),  # noqa: SLF001 - 同一包内的状态快照
+                         self.data.qacc.tobytes(), self.data.ctrl.tobytes(),
+                         np.asarray(self.data.qfrc_applied, dtype=float).tobytes(),
+                         flags, tuple(int(len(b.jacobian)) for b in blocks))
+            if self._contact_cache is not None and self._contact_cache[0] == cache_key:
+                recovered = self._contact_cache[1]
+            else:
+                recovered = self.dynamics.recover_contact_force(
+                    blocks, self.data.qacc, self.data.ctrl, external=self.data.qfrc_applied)
+                self._contact_cache = (cache_key, recovered)
             values = self.tasks.contact_forces(recovered, flags)
             for pair, side in zip(values, [i for i, f in enumerate(flags) if f]):
                 # [切向, 法向]：切向给 x 分量，法向给 z（横向 y 在本构型是共模量，不按轮拆分）
