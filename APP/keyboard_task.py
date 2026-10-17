@@ -100,6 +100,10 @@ class KeyboardCommandSource:
     def read_reset_posture(self) -> bool:
         return False
 
+    def pressed_key(self, name: str) -> bool:
+        """某个键当前是否按下（只读）。``name`` 用 ``_key_name`` 的口径：空格是 ``" "``。"""
+        return self._pressed(name)
+
     def command(self) -> MotionCommand:
         return MotionCommand(
             self.read(),

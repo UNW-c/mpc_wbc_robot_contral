@@ -206,7 +206,14 @@ class JumpPlanner:
         self.started_at = float(time)
         self.phase_since = float(time)
         self.transition_reason = "跳跃开始"
+        # 每跳复位（第 24 节）：这些是"本跳内"的状态，不复位会让第二跳沿用第一跳的离地锁存
+        # 与方向丢失记录，导致第二跳的 LANDING 判据被前一次结果污染。
         self._airborne_confirmed = False
+        self.direction_lost_R = False
+        self.direction_lost_L = False
+        self.direction_lost_isolated_R = False
+        self.direction_lost_isolated_L = False
+        self._direction_lost_seen = {"R": False, "L": False}
         config = self.config
         _LOGGER.info(
             "跳跃开始：目标高度 %.3f m | 压缩行程 %.3f m | 压缩终点 %.4f m | "
