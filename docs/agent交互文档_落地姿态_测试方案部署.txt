@@ -2614,7 +2614,176 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
      验收里需同时报落地瞬间的 `v` 与 `ref_v` 首值。
 
 ================================================================
-28. 交付队列
+28. 排查：跳跃脱离 vs 落地锚定 vs 速度/位移规划 三方冲突（2026-10-17）
+================================================================
+
+28.1 用户判断
+
+  跳跃把控制从正常链路里切出去；落地后的"位置锚定"与"有速度输入时的速度/位移规划"
+  同时写同一个斜坡状态 -> 冲突 -> 位置误差每次被清零 -> 只后退不回收。
+
+  支持证据（MANUAL_keys_run10.log，第 1 跳落地，共 13 条）：
+
+  ```
+  event=align Reference reset: jump_landing, s=1.2528 v=0.9691 reset_position=True
+  event=align Reference reset: jump_landing, s=1.2717 v=0.9666 reset_position=True
+  event=align Reference reset: jump_landing, s=1.3204 v=1.4295 reset_position=True
+  event=align Reference reset: jump_landing, s=1.5571 v=1.2075 reset_position=True
+  ```
+
+  每次重锚把位置与速度同时改成当时实测 -> 位置误差恒为 0 -> 不存在恢复力。
+  实测 run10 J3：后退 0.262 m 后不再回（无用户指令的干净窗口）。
+
+28.2 已确认的代码事实（三方各自的位置）
+
+  | 方 | 代码位置 | 写入什么 | 何时 |
+  |---|---|---|---|
+  | 跳跃脱离 | `control.py:282` `jump.active -> sample=None` | WBC 不读规划器参考，只做速度阻尼 | 整个跳跃期 |
+  | 落地锚定 | `controller.py:492` -> `planner._align()` | 位置/速度/角速度按实测重写 | 落地窗口内反复 |
+  | 速度/位移规划 | `planner.advance()` | 每拍推进 `_forward` | `motion_enabled=True` 时 |
+
+  同一个持有者 `planner._forward` 被后两方轮流写——§15.1 第 1 条要避免的形态。
+
+28.3 必须先查清的三条（只读）
+
+  （a）跳跃期间 `planner._forward` 到底被推进了没有？
+      看 `advance()` 在 `motion_enabled=False` 时的行为；需 `planner_forward_pos/vel` 记录。
+  （b）落地窗口内 `mpc.reset(soft=True)` 为何被调用 13 次？
+      看 `Algorithm/supervision.py` 调用点与判据；需每次的 `reset_reason`。
+  （c）`_align()` 与 `advance()` 在同一步内的先后，谁覆盖谁？
+      看 `loop.py` 中 `mpc_stage` 与 `reset` 的调用顺序。
+
+28.4 需新增的诊断记录（均只读）
+
+  `planner_forward_pos` / `planner_forward_vel` / `planner_mode` /
+  `reset_reason`（含次数）/ `output_source` / `geometrically_airborne`。
+  `planner.reset()`（硬重锚）目前无日志，需补一行 INFO。
+
+28.5 本轮只交三张表（不归因、不改代码）
+
+  | 表 | 行 | 列 |
+  |---|---|---|
+  | H1 持有者时序 | 起跳前 0.5 s ~ 落地后 2 s | t、`planner_mode`、`_forward.position`、`_forward.velocity`、实测 `s`、实测 `v`、写入者 |
+  | H2 重锚事件 | 每次一行 | t、reason、写入的 position/velocity、当时实测 position/velocity |
+  | H3 跳跃期推进 | 跳跃期每 4 帧 | t、`phase`、`motion_enabled`、`_forward.position/velocity` |
+
+  判读（只报现象）：H2 每次写入 position 都等于当时实测 -> 锚定跟随漂移；
+  H3 若显示跳跃期 `_forward` 仍在推进 -> 参考与实体脱节；
+  H3 若显示冻结且 H2 连续 13 次 -> 冲突确实在"锚定反复覆写"上。
+
+28.6 本轮不改的事（接 28.9）
+
+  不改 `_align`/`soft_reanchor`/`reset` 语义；不改 `control.py:282`；
+  不改任何参数；不改重锚次数（先查清）。ABORT 出口优先（第 29 节）。
+
+28.7 用户诊断（2026-10-17，待数据确认）
+
+  原话要点：落地之后重新锚定了位置，然后被速度规划接管，出现一个**前向的减速过程**
+  （可以看到是向前摆腿进行减速），减速之后又收敛回锚定的那个位置，
+  于是表现为"向后退"。
+
+  拆成三个可检验的子命题：
+
+  | 编号 | 命题 | 需要的数据 |
+  |---|---|---|
+  | H-1 | 落地后位置锚点被固定在触地点，不再跟进 | `planner_forward_pos` 在落地后是否恒定 |
+  | H-2 | 速度参考仍是起跳前的前向速度，车子先向前减速 | `ref_v` 在落地后为正值且大于实测 |
+  | H-3 | 制动结束位置已超过锚点，位置误差反向拉回 -> 后退 | `ref0 - s` 由 0 变负后又收敛回 0 |
+
+  三者同时成立才能解释"先向前一大段、再后退"；缺任一条则为其它机理。
+
+28.8 判别实验（只读记录 + A/B，不改控制）
+
+  工况：`--case command_velocity --command-velocity 1.5 --command-hold 1.96 --jump-time 1.873`
+  （对齐 run10 J1 的输入），时长 6 s。
+
+  帧内新增：`planner_forward_pos`、`planner_forward_vel`、`planner_mode`、`ref_v`。
+
+  A/B：`reference_frozen` 分别强制 True / False（现有两种分支），对比 `s` 轨迹与 `ref0 - s` 符号变化。
+
+  判据：
+
+  | 表 | 看什么 |
+  |---|---|
+  | H-1 | 落地后 `planner_forward_pos` 是否恒定；若恒定，值等于触地时的 s 还是收敛后的 s |
+  | H-2 | 落地后 0.5 s 内 `ref_v` 与实测 `v` 的差、`v` 是否先升后降 |
+  | H-3 | `ref0 - s` 何时变负、峰值多大、何时回 0 |
+  | H-4 | 减速段的轮/腿力矩符号（是否"向前摆腿"） |
+
+28.9 修法候选（待数据确认后选定，不得先实现）
+
+  | 方案 | 内容 | 后果 |
+  |---|---|---|
+  | (a) 锚点设到预测停止点 | 触地时锚点 = 触地位 + 制动距离，速度斜坡从触地 v 减速到 0 | 停在锚点，无后退；距离由现有 `max_braking` 推出，不新阈值 |
+  | (b) 锚点固定 + 速度立即为 0 | 触地即把 `ref_v` 置 0 | 停得最快，制动硬，可能伤落地姿态 |
+  | (c) 一次性重锚 + 不再跟漂 | 只保留触地那一次重锚，后续软重锚不得再搬位置/速度 | 依赖 H-1：若锚现在在跟进，这条才生效 |
+
+  **三个方案都不写参数**；本节不实现。
+
+================================================================
+29. ABORT 出口：中止后无法再起跳（2026-10-17）
+================================================================
+
+29.1 现象（已复现两次）
+
+  run08：第 2 跳 8.623 s `leg_length_out_of_range:R(0.4313 m, range [0.114, 0.430])` 中止，
+  之后 12.280~21.100 s 共 **26 条** `跳跃请求被拒绝：当前相位 ABORT`。
+  run09 同型：24.704 ABORT（`R(0.4309 m)`），之后 31 条拒绝。
+
+29.2 代码事实
+
+  - `jump.py::update()`：`if self.phase is JumpPhase.ABORT: return ...` -> **无任何出口分支**；
+  - `simulation.py::request_jump()`：`if phase != IDLE: return False` -> ABORT 下永不接受；
+  - `start()` 能把相位置回 COMPRESS，但 ABORT 下无调用路径。
+
+29.3 用户定案（2026-10-17）：可重复空格跳，等姿态稳定后才允许触发
+
+  设计（不新增阈值，复用已有判据）：
+
+  （a）`jump.py` 新增 `reset_to_idle()`：把相位置回 IDLE、清 `reason`，
+      并清与 `start()` 同一组每跳锁存（`_airborne_confirmed`、`direction_lost_*`、
+      `_direction_lost_seen`、`transition_reason`）。**不重置 `started_at` 以外的任何参数**。
+
+  （b）`simulation.request_jump()` 受理条件改为：
+
+  ```python
+  if self.jump is None: return False                       # 未配置 jump_height
+  phase = self.jump.phase.value
+  if phase == "IDLE": 接收
+  elif phase == "ABORT" and 姿态稳定():            # 先 reset_to_idle() 再接收
+       self.jump.reset_to_idle()
+  else: 拒绍（INFO 记录当前相位与不满足的条件）
+  ```
+
+  （c）“姿态稳定”用**已有**判据，不新建阈值：
+      - `sim.mpc.planner.mode == ReferenceMode.HOLD`（即已满足 `hold_dwell`、
+        `hold_speed`、`hold_yaw_rate`、`hold_pitch`、`hold_pitch_rate`、全接触、不打滑）；
+      - 且腿长在 `[leg_length_min, leg_length_max]` 区间内（直接用现成上下限，
+        否则下一次 `_precheck_jump` 会立即再次越界中止）。
+
+  （d）用户侧语义：一次中止后，**等车体停稳（进入 HOLD）再按空格**即可重新起跳，不需按 R。
+      未稳时按空格：拒绝 + INFO，不崩、不卡死；再按一次即可。
+
+29.4 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 功能 | 连续跳 | 一次会话不按 R 连续跳 **>=3 次**，每次相位回到 IDLE |
+  | 功能 | ABORT 后恢复 | 造一次 ABORT（行进中高速起跳），停稳后按空格能再次起跳 |
+  | 功能 | 未稳拒绝 | 未稳定时按空格：拒绝 + INFO 日志，不崩、不影响后续 |
+  | 回归 | `jump_diagnostic` 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+  | 回归 | T1x/CMD1x | 逐位全 0（不按空格时路径未变） |
+  | 静态 | 新增阈值 | **零**（只引用现成的 `hold_*` 与 `leg_length_*`） |
+
+  记录：每次空格按下时刻、受理/拒绝原因、跳后相位序列。
+
+29.5 不做的事
+
+  不改 `leg_length_max=0.430`，不改 `hold_*` 任何阈值，不改跳跃相位机的转移条件。
+  越界中止的**根源**（行进中起跳伸展到 0.4309）单独开一轮，不以本改动掩护。
+
+================================================================
+30. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |

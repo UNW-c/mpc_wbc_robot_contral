@@ -13199,3 +13199,334 @@ T2 偏差的定位（有证据）：**首差 t=1.177 s**，正好是 1.0 s 竖�
    要哪个，等你指令。
 
 ================================================================
+
+
+================================================================
+26/27 节实测：用户键鼠会话（run07/run09/run10）+ 输入复刻录像 + ABORT 死锁
+测试agent-ds，2026-10-18
+================================================================
+
+本轮**无代码改动**（第 26/27 节的 diff 见上一节，工作区未再修改）。
+数据来源：view 手工会话 4 次（`results/MANUAL_keys_run07/08/09/10.json.gz`，250 Hz）。
+说明：run08 因下述 ABORT 死锁作废，判据只用 run07/run09/run10。
+
+## 一、输入复刻（只回放指令，不回放状态）
+
+复刻实现：`tools/video.py --replay <记录> --jump-times ...`——按时间读记录里的 `cmd_v`/`cmd_w`
+压成段，每步只把这两个数交给 `MotionCommand`；`--jump-times` 给的时刻调 `request_jump()`。
+**不注入任何 qpos / 速度 / 偏航状态。** 起跳时刻用"腿长首次低于 0.2795 m 那一拍"从记录里定位
+（等价于空格按下时刻，误差 <=4 ms）。
+
+### 会话输入（从记录逐帧还原）
+
+| 会话 | 时长 | cmd_v 段（值 1.5 m/s） | cmd_w 段（值 -9.6 rad/s） | 起跳时刻 |
+|---|---|---|---|---|
+| run07 | 28.86 s | 6.140-7.716、11.220-11.256、11.740-13.056、16.100-17.216、21.380-22.596、25.700-26.976 | 3.760-4.096 | 4.700 |
+| run09 | 31.61 s | 22.800-23.896、29.900-30.236 | 26.460-27.096 | 21.020、24.056 |
+| run10 | 18.20 s | 1.460-2.988、6.240-9.576、13.240-14.648 | 10.840-11.336 | 2.516、7.436、11.860、14.176 |
+
+### 复刻相位对照（复刻侧日志 vs 用户侧日志）
+
+| 会话 | 相位 | 用户 | 复刻 | 差 |
+|---|---|---|---|---|
+| run09 | brake | 21.161 | 21.181 | +20 ms |
+| | thrust | 21.320 | 21.340 | +20 ms |
+| | flight | 21.429 | 21.449 | +20 ms |
+| | land | 21.751 | 21.771 | +20 ms |
+| | ABORT | 24.704 | 24.749 | +45 ms |
+| run10 J1 | brake/flight/land | 2.621 / 2.989 / 3.347 | 2.642 / 2.997 / 3.343 | <=21 ms |
+| run10 J2 | | 7.558 / 7.853 / 8.180 | 7.582 / 7.873 / 8.199 | <=24 ms |
+| run10 J3 | | 12.001 / 12.269 / 12.591 | 12.041 / 12.309 / 12.631 | <=40 ms |
+| run10 J4 | | 14.282 / 14.649 / 15.006 | 14.302 / 14.669 / 15.024 | <=20 ms |
+
+### 录像
+
+| 文件 | 时长/帧率 | 内容 |
+|---|---|---|
+| `videos/REPLAY_run09_keys_25fps.mp4` | 31.7 s / 25 fps / 793 帧 | 2 跳：第 1 跳正常、第 2 跳行进中越界 ABORT |
+| `videos/REPLAY_run10_keys_25fps.mp4` | 18.3 s / 25 fps / 458 帧 | 4 跳：行进中 2 次、转向后 2 次 |
+
+**里程不一致是必然的**（run09 用户 s 末 10.340 m vs 复刻 2.228 m）：两次会话里约 8 m 位移发生在
+`cmd_v=cmd_w=0` 期间，来自鼠标拖拽与翻滚，鼠标事件不在记录里，无法回放。输入（指令段+起跳时刻）
+是逐条对上的，见上表。
+
+## 二、26 判据（偏航不归中）——真实会话实测
+
+`Y` = 空格触发那一拍的 yaw。窗口区分「跳跃期」与「落地后」（后者排除用户指令窗口）。
+
+| 会话/跳 | Y [rad] | 压缩+推力+飞行 `max|yaw-Y|` | 落地后 `max|yaw-Y|` | 落地后末值 | 备注 |
+|---|---|---|---|---|---|
+| run07 J1 | **-0.6877** | **0.0013** | 0.1813（6 s 窗口） | -0.6469（仍在 Y 附近） | 偏差出现在 9.0 s，`yaw_rate=+0.09`，当时在 1.5 m/s 行驶中，属行驶滑移 |
+| run09 J1 | -0.0112 | **0.0000** | 1.3201 | -1.3270 | 窗口内含用户 26.46 s 的 `cmd_w=-9.6` 转向 |
+| run10 J1 | +0.0001 | **0.0007** | 0.0556 | +0.0015 | 窗口内含第 2 跳触发（7.436 s） |
+| run10 J2 | +0.0008 | **0.0005** | 1.0110 | -1.0068 | 窗口内含用户 10.84 s 的 `cmd_w=-9.6` 转向 |
+| **run10 J3** | **-1.0097** | **0.0012** | **0.0455** | **-1.0078** | 转向后起跳，窗口内无用户指令 |
+| **run10 J4** | **-1.0068** | **0.0006** | **0.0484** | **-1.0078** | 同上 |
+
+跳跃期（压缩+推力+飞行）偏航偏移：**0.0000~0.0013 rad**，六跳全部通过；改前同工况为 **0.3876 rad**
+（CASE-B headless，见上一节）。
+
+落地后纯净窗口（无用户指令）：run10 J3 = 0.0455、J4 = 0.0484，均 <=0.05 且末值停在 Y 上（-1.0078），
+**不向 0 靠**，通过。其余被用户转向或行驶滑移污染的行已注明，不能作为判据。
+
+## 三、27 判据（落地参考不再高于实测）
+
+落地后干净窗口（从落地到下一次用户指令之前，最长 2 s）：
+
+| 会话/跳 | 落地 t | 落地瞬时 v | `max(ref_v - v)` | s 前冲 | s 回退 |
+|---|---|---|---|---|---|
+| run09 J1 | 21.751 | -0.0952 | **+0.0128** | 0.0000 | 0.2615 |
+| run10 J1 | 3.347 | +1.1090 | **+0.0037** | 0.8415 | 0.0000 |
+| run10 J3 | 12.591 | -0.0952 | **+0.0253** | 0.0000 | 0.2620 |
+| run10 J4 | 15.006 | +0.9983 | **+0.0032** | 0.6763 | 0.0000 |
+
+- `ref_v` 高于实测的幅度最大 **0.0253 m/s**（改前 P1 现场是 `ref_a=+41.87 m/s^2`、`ref_v` 比实测高
+  0.0151 却仍在加速）。参考不再把机器人往前推。
+- 位置变化：落地时速度为 0 的两跳（run09 J1、run10 J3）**前冲 0.0000 m**，只有 0.26 m 的**反向回退**；
+  落地时仍以 1.1 / 1.0 m/s 前进的两跳前冲 0.84 / 0.68 m，该位移是落地瞬时动量 + 制动距离
+  （`cmd_v=0` 后制动限值 3.8 m/s^2），不是参考驱动的加速。
+- 27.5 写的"前冲 <=0.05 m"按字面口径在这两跳不成立；按"参考驱动的额外前冲"口径成立（0.0000 m）。
+  这条口径需要你确认，我不擅自改判据。
+
+## 四、BUG（本轮新发现，证据完整）：ABORT 是终态，一跳中止后空格永久失效
+
+### 现象（run08）
+
+| 时刻 | 事件 |
+|---|---|
+| 4.70 | 第 1 跳开始 → 落地 5.452 → RECOVER → IDLE 5.471（正常） |
+| 8.11 | 第 2 跳开始（行进中，v≈1.3433） |
+| **8.623** | `跳跃中止（t=8.623 s）：leg_length_out_of_range:R(0.4313 m, range [0.114, 0.430])` |
+| 12.280~21.100 | **26 条** `跳跃请求被拒绝：当前相位 ABORT（只在 IDLE 接受）` |
+
+run09 同型复现：第 2 跳 24.056 触发、24.704 ABORT（`R(0.4309 m)`），之后 31 条拒绝直到会话结束。
+
+### 代码证据
+
+1. `gbc_mpc_wbc/jump.py::update()`：`if self.phase is JumpPhase.ABORT: return self._command(JumpPhase.ABORT, abort=self.reason)`
+   —— **ABORT 没有任何出口分支**。
+2. `gbc_mpc_wbc/simulation.py::request_jump()`：`if self.jump.phase.value != "IDLE": return False`
+   —— ABORT 下永不接受。
+3. `jump.py::start()` 能把相位置为 COMPRESS，但没有任何路径在 ABORT 下调用 `start()`。
+
+结论：一次 ABORT 之后，除按 R 复位（`reset_run()` 把相位置回 IDLE，已验证可用）或重开会话，**无法再起跳**。
+用户侧表现就是"按空格不跳"。按键事件本身没有丢失——每次按下都有拒绝日志。
+（无法排除"完全无日志的丢按"是否存在：按键回调目前没有逐次日志，要查需加一行按键日志，等你同意。）
+
+附带的越界条件：两跳都是在 1.3 m/s 行进中起跳时右腿冲到 0.4309/0.4313 m（上限 0.430），
+差 0.0009/0.0013 m 就中止，余量极小。
+
+## 五、结论
+
+1. **26 通过**：真实会话六跳跳跃期偏航偏移 0.0000~0.0013 rad（改前 0.3876），落地后纯净窗口
+   0.0455/0.0484 且停在 Y 上；未见任何向 0 靠的行为。
+2. **27 机制生效但位置主判据口径待定**：`max(ref_v-v)` <=0.0253 m/s，落地瞬时静止的两跳前冲 0.0000 m；
+   落地仍带 1.0~1.1 m/s 的两跳前冲 0.68~0.84 m，来源是落地动量/制动距离而非参考。
+   27.5 的字面判据（<=0.05 m）在两跳不成立，需你确认口径（"总位移" or "参考驱动部分"）。
+3. **新 BUG 优先修**：ABORT 终态导致后续空格全部失效，且触发余量只有 0.9~1.3 mm（`leg_length_max` 0.430）。
+   这会直接毁掉任何"多跳"手工测试，建议在修 26/27 之前先定 ABORT 出口（或行进中起跳的腿长保护）。
+4. 需要你决定：(a) 27 的位置判据口径；(b) 是否给按键回调加逐次日志以排查"无日志丢按"；
+   (c) ABORT 出口由排查agent设计后我实现并复测。
+
+================================================================
+
+
+================================================================
+29 节 ABORT 出口 + 可重复空格跳：实现与验收
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：ABORT-EXIT（第 29 节）
+
+## 一、代码改动（完整 diff）
+
+按 29.3（a)(b)(c) 实现，无参数改动、无新增阈值：
+
+- `jump.py`：新增 `reset_to_idle()`——相位置回 IDLE、清 `reason`/`transition_reason`，清与 `start()` 同一组每跳锁存
+  （`_airborne_confirmed`、`direction_lost_R/L`、`direction_lost_isolated_R/L`、`_direction_lost_seen`）。
+- `simulation.py`：新增 `_jump_takeoff_ready()`；`request_jump()` 改为 IDLE 直接受理、
+  ABORT 且（`planner.mode == hold` 且两腿腿长在 `[leg_length_min, leg_length_max]`）时先 `reset_to_idle()` 再受理、
+  其余相位拒绝并 INFO 记录相位与不满足的条件。
+
+```diff
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/jump.py b/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+index 4650084..c0dd60e 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/jump.py
+@@ -222,6 +222,23 @@ class JumpPlanner:
+             config.com_rise(), config.takeoff_speed(), config.leg_force(),
+             1.0e3 * config.thrust_time())
+ 
++    def reset_to_idle(self) -> None:
++        """中止后复位到 IDLE（第 29 节）：清相位与中止原因，并清与 start() 同一组每跳锁存。
++
++        只动相位机内部状态，不触碰任何参数（阈值、行程、高度、时间常数一律不改）。
++        """
++        if self.phase is not JumpPhase.IDLE:
++            _LOGGER.info("跳跃相位 %s -> IDLE（reset_to_idle 复位）", self.phase.value)
++        self.phase = JumpPhase.IDLE
++        self.reason = None
++        self.transition_reason = None
++        self._airborne_confirmed = False
++        self.direction_lost_R = False
++        self.direction_lost_L = False
++        self.direction_lost_isolated_R = False
++        self.direction_lost_isolated_L = False
++        self._direction_lost_seen = {"R": False, "L": False}
++
+     def _abort(self, time: float, reason: str) -> JumpCommand:
+         if self.phase is not JumpPhase.ABORT:
+             _LOGGER.warning("跳跃中止（t=%.3f s）：%s", time, reason)
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index f23e65b..d5cca91 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -487,22 +487,54 @@ class Gbc486MpcWbcSimulation:
+         self._normal_violation_time = 0.0
+         self._infeasible_active = False
+ 
++    def _jump_takeoff_ready(self) -> tuple[bool, str]:
++        """第 29 节"姿态稳定"判据：只引用现成判据，不新建任何阈值。
++
++        - ``planner.mode == HOLD``：仓库里现成的"停稳"定义，已包含 hold_dwell / hold_speed /
++          hold_yaw_rate / hold_pitch / hold_pitch_rate / 全接触 / 不打滑；
++        - 且两腿腿长在 ``[leg_length_min, leg_length_max]`` 内：否则下一次越界检查会立刻再次中止。
++        """
++        mode = self.mpc.planner.mode.value
++        if mode != "hold":
++            return False, "planner.mode=%s（需 hold）" % mode
++        config = self.jump.config
++        legs = self.dyn.leg_state()
++        for side, index in (("R", 0), ("L", 2)):
++            length = float(legs[index])
++            if not (config.leg_length_min <= length <= config.leg_length_max):
++                return False, "leg_length_out_of_range:%s(%.4f m, range [%.3f, %.3f])" % (
++                    side, length, config.leg_length_min, config.leg_length_max)
++        return True, ""
++
+     def request_jump(self) -> bool:
+         """外部请求起跳（view 按空格）。返回是否受理。
+ 
+-        相位判据放在**请求侧**（只接受 IDLE），不放进 loop 的定时触发路径：
++        相位判据放在**请求侧**，不放进 loop 的定时触发路径：
+         定时触发是"整轮一次"的既有语义，不能被请求侧的状态判断改写。
++        第 29 节：IDLE 直接受理；ABORT 且姿态已稳定时先复位到 IDLE 再受理，
++        使中止后不需要按 R 就能重新起跳；其余相位拒绝并记录原因。
+         没有跳跃对象（``jump_height is None``）时不受理并记 WARN。
+         """
+         if self.jump is None:
+             _LOGGER.warning("跳跃请求被忽略：未配置 jump_height（需 --jump-height）")
+             return False
+-        if self.jump.phase.value != "IDLE":
+-            _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 接受，t=%.3f s）",
+-                         self.jump.phase.value, float(self.data.time))
+-            return False
+-        self._jump_requested = True
+-        return True
++        phase = self.jump.phase.value
++        if phase == "IDLE":
++            self._jump_requested = True
++            return True
++        if phase == "ABORT":
++            ready, reason = self._jump_takeoff_ready()
++            if not ready:
++                _LOGGER.info("跳跃请求被拒绝：相位 ABORT 且未停稳（%s，t=%.3f s）",
++                             reason, float(self.data.time))
++                return False
++            self.jump.reset_to_idle()
++            _LOGGER.info("跳跃请求受理：相位 ABORT 已复位到 IDLE（t=%.3f s）", float(self.data.time))
++            self._jump_requested = True
++            return True
++        _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 或已停稳的 ABORT 受理，t=%.3f s）",
++                     phase, float(self.data.time))
++        return False
+ 
+     def _precheck_jump(self) -> None:
+         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。
+```
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/jump.py gbc_mpc_wbc/simulation.py`：通过。
+- 静态检查（29.4 要求"新增阈值数量为零"）：diff 中新增的数值只有腿长数组下标 `0`/`2` 与格式化位数，
+  阈值全部引用现成的 `config.leg_length_min/leg_length_max` 与 `planner.mode`。**新增阈值 0 个。**
+- 默认路径未变：非跳跃工况仍走 `request_jump()` 的 IDLE 分支，回归逐位 0（见四）。
+
+## 三、判据表
+
+| 类别 | 项 | 要求 | 实测 | 结果 |
+|---|---|---|---|---|
+| 功能 | 连续跳 | 一次会话不按 R 连跳 >=3，每跳回 IDLE | **4 跳，全回 IDLE**（2.79 / 6.77 / 10.79 / 14.79 s） | 通过 |
+| 功能 | ABORT 后恢复 | 停稳后按空格能再起跳 | 强制 ABORT（t=1.52）后：t=5.00 `planner=hold` 腿长 0.2800/0.2800 -> **受理**，ABORT->COMPRESS 正常跳完 | 通过 |
+| 功能 | 未稳拒绝 | 未稳时按空格：拒绝 + INFO，不崩、不影响后续 | t=2.02（`drive`）拒绝、t=4.02（`brake`）拒绝；会话继续、后续受理 | 通过 |
+| 回归 | jump_diagnostic 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 | 间隙 **0.22180**、ABORT **0**、越界 **0**、单支撑 **0**、`airborne_zero` **0**、瞬态后 `max\|pitch\|` 0.24452 | 通过 |
+| 回归 | T1z / CMD1z | 逐位全 0 | T1z vs T1y：`dqpos=dqvel=dctrl=0.000e+00`；CMD1z vs CMD1y：同 | 通过 |
+| 静态 | 新增阈值 | 零 | 0 个 | 通过 |
+
+## 四、关键序列
+
+### 4.1 连续跳 4 次（原地，不按 R）
+
+```
+[请求] t=2.020 planner=hold -> 受理
+[请求] t=6.000 planner=hold -> 受理
+[请求] t=10.020 planner=hold -> 受理
+[请求] t=14.020 planner=hold -> 受理
+相位: IDLE@0.00 -> COMPRESS@2.02 -> ... -> RECOVER@2.79 -> IDLE@2.79
+      -> COMPRESS@6.00 -> ... -> IDLE@6.77
+      -> COMPRESS@10.02 -> ... -> IDLE@10.79
+      -> COMPRESS@14.02 -> ... -> IDLE@14.79
+ABORT 帧数: 0
+```
+
+### 4.2 ABORT 出口（强制进入 ABORT 后逐次按空格）
+
+```
+[强制] t=1.520 -> phase=ABORT
+[请求] t=2.020 phase=ABORT planner=drive  legs=(0.2799,0.2799) -> 拒绝
+[请求] t=4.020 phase=ABORT planner=brake  legs=(0.2800,0.2800) -> 拒绝
+[请求] t=5.000 phase=ABORT planner=hold   legs=(0.2800,0.2800) -> 受理   (reset_to_idle -> COMPRESS)
+[请求] t=6.000 phase=IDLE  planner=reset  legs=(0.2520,0.2519) -> 受理
+[请求] t=7.000 phase=IDLE  planner=reset  legs=(0.2265,0.2276) -> 受理
+相位: IDLE@0.00 -> ABORT@1.52 -> COMPRESS@5.00 -> ... -> IDLE@5.77 -> ... -> IDLE@6.85 -> ... -> IDLE@7.89
+```
+
+### 4.3 非 IDLE 相位按空格
+
+```
+[请求] t=2.320 phase=COMPRESS_BRAKE -> 拒绝（INFO 记录当前相位）
+[请求] t=2.620 phase=FLIGHT         -> 拒绝
+[请求] t=3.020 / t=3.520 phase=RECOVER -> 拒绝
+```
+以上均只记 INFO，不中断会话；后续请求正常受理。
+
+## 五、完整回归对比
+
+| 对比 | max\|dqpos\| | max\|dqvel\| | max\|dctrl\| |
+|---|---|---|---|
+| T1z vs T1y（零输入 12 s） | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| CMD1z vs CMD1y（0.5 m/s 3 s） | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| JUMPz vs JUMPy（原地跳） | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+
+## 六、额外发现（未改动，仅报告）
+
+1. **IDLE 立即受理带来的边界**：第 3、4 次请求发生在 `RECOVER -> IDLE` 刚切换后（腿长 0.2520、0.2265 m），
+   因为 29.3(b) 只对 ABORT 加"稳定"判据，IDLE 一律受理，所以这类"刚回 IDLE 就按空格"的请求会被立即接受，
+   并在压缩中途接着压缩。当前是规格行为，我不擅自改；如果排查agent认为需要"IDLE 也要停稳"，
+   那是一次新的判据改动。
+2. **物理 ABORT 在 headless 未复现**：以 v=1.5 m/s 行进中起跳（压缩/推力/飞行全开）成功完成，
+   没有触发 `leg_length_out_of_range`。因此 4.2 的 ABORT 出口是用 `_abort()` 强制置相位验证的——
+   验证的是**状态机出口逻辑**，不是"越界中止的物理复现"。真实越界中止的复现仍以 run08/run09 的现场为准。
+3. **腿长越界分支未实测**：要造出"hold 但腿长越界"需要改 `leg_length_max` 或人为破坏位形，本轮不允许改参数，
+   该分支目前只有代码审查（`_jump_takeoff_ready()` 第二段判断 + 越界时返回具体腿长与上下限）。
+4. 行进中起跳的越界中止根源（0.4309 vs 0.430，余量 0.9 mm）本轮按 29.5 未动。
+
+## 七、结论
+
+29.3 规格已实现且通过验收：连跳 4 次不按 R、ABORT 停稳后可重新起跳（未稳时拒绝并记 INFO、不影响后续）、
+非 IDLE 相位拒绝不崩、jump_diagnostic 6 项不变、T1z/CMD1z 逐位全 0、新增阈值 0 个。
+两处未覆盖：腿长越界分支（仅代码审查）、物理越界中止的 headless 复现（以现场会话为准）。
+
+（关于交付队列状态：那是排查agent的文档，我这边不改。等你/排查agent给下一节，我按同样流程执行。）
+
+================================================================

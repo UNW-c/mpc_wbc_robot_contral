@@ -222,6 +222,23 @@ class JumpPlanner:
             config.com_rise(), config.takeoff_speed(), config.leg_force(),
             1.0e3 * config.thrust_time())
 
+    def reset_to_idle(self) -> None:
+        """中止后复位到 IDLE（第 29 节）：清相位与中止原因，并清与 start() 同一组每跳锁存。
+
+        只动相位机内部状态，不触碰任何参数（阈值、行程、高度、时间常数一律不改）。
+        """
+        if self.phase is not JumpPhase.IDLE:
+            _LOGGER.info("跳跃相位 %s -> IDLE（reset_to_idle 复位）", self.phase.value)
+        self.phase = JumpPhase.IDLE
+        self.reason = None
+        self.transition_reason = None
+        self._airborne_confirmed = False
+        self.direction_lost_R = False
+        self.direction_lost_L = False
+        self.direction_lost_isolated_R = False
+        self.direction_lost_isolated_L = False
+        self._direction_lost_seen = {"R": False, "L": False}
+
     def _abort(self, time: float, reason: str) -> JumpCommand:
         if self.phase is not JumpPhase.ABORT:
             _LOGGER.warning("跳跃中止（t=%.3f s）：%s", time, reason)

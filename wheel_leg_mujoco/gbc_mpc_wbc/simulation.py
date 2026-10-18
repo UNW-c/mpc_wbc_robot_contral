@@ -487,22 +487,54 @@ class Gbc486MpcWbcSimulation:
         self._normal_violation_time = 0.0
         self._infeasible_active = False
 
+    def _jump_takeoff_ready(self) -> tuple[bool, str]:
+        """第 29 节"姿态稳定"判据：只引用现成判据，不新建任何阈值。
+
+        - ``planner.mode == HOLD``：仓库里现成的"停稳"定义，已包含 hold_dwell / hold_speed /
+          hold_yaw_rate / hold_pitch / hold_pitch_rate / 全接触 / 不打滑；
+        - 且两腿腿长在 ``[leg_length_min, leg_length_max]`` 内：否则下一次越界检查会立刻再次中止。
+        """
+        mode = self.mpc.planner.mode.value
+        if mode != "hold":
+            return False, "planner.mode=%s（需 hold）" % mode
+        config = self.jump.config
+        legs = self.dyn.leg_state()
+        for side, index in (("R", 0), ("L", 2)):
+            length = float(legs[index])
+            if not (config.leg_length_min <= length <= config.leg_length_max):
+                return False, "leg_length_out_of_range:%s(%.4f m, range [%.3f, %.3f])" % (
+                    side, length, config.leg_length_min, config.leg_length_max)
+        return True, ""
+
     def request_jump(self) -> bool:
         """外部请求起跳（view 按空格）。返回是否受理。
 
-        相位判据放在**请求侧**（只接受 IDLE），不放进 loop 的定时触发路径：
+        相位判据放在**请求侧**，不放进 loop 的定时触发路径：
         定时触发是"整轮一次"的既有语义，不能被请求侧的状态判断改写。
+        第 29 节：IDLE 直接受理；ABORT 且姿态已稳定时先复位到 IDLE 再受理，
+        使中止后不需要按 R 就能重新起跳；其余相位拒绝并记录原因。
         没有跳跃对象（``jump_height is None``）时不受理并记 WARN。
         """
         if self.jump is None:
             _LOGGER.warning("跳跃请求被忽略：未配置 jump_height（需 --jump-height）")
             return False
-        if self.jump.phase.value != "IDLE":
-            _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 接受，t=%.3f s）",
-                         self.jump.phase.value, float(self.data.time))
-            return False
-        self._jump_requested = True
-        return True
+        phase = self.jump.phase.value
+        if phase == "IDLE":
+            self._jump_requested = True
+            return True
+        if phase == "ABORT":
+            ready, reason = self._jump_takeoff_ready()
+            if not ready:
+                _LOGGER.info("跳跃请求被拒绝：相位 ABORT 且未停稳（%s，t=%.3f s）",
+                             reason, float(self.data.time))
+                return False
+            self.jump.reset_to_idle()
+            _LOGGER.info("跳跃请求受理：相位 ABORT 已复位到 IDLE（t=%.3f s）", float(self.data.time))
+            self._jump_requested = True
+            return True
+        _LOGGER.info("跳跃请求被拒绝：当前相位 %s（只在 IDLE 或已停稳的 ABORT 受理，t=%.3f s）",
+                     phase, float(self.data.time))
+        return False
 
     def _precheck_jump(self) -> None:
         """起跳前可行性预检：把跳跃等效力经力雅可比解算成关节力矩，与执行器限幅比较。
