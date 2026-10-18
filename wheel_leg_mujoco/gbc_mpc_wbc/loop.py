@@ -138,6 +138,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             torque = np.zeros(m.nu)
         mpc_called = False
         wbc_called = False
+        # 第 33 节（LAND-REFRESH）：落地重锚那一拍强制 MPC/WBC 重算，只在本拍生效。
+        landing_refresh = False
         outcome = None
         while pending and d.time >= pending[0].time - 1e-12:
             push = pending.pop(0)
@@ -169,6 +171,12 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             if _timed_due:
                 sim._jump_started = True         # 只由定时来源推进该锁
             sim._precheck_jump()
+            # 第 32 节（c）：起跳那一刻是否存在非零速度指令（用现成的 velocity_deadband 判据，
+            # 不新增阈值）。与跳跃锁存同生命周期，下一跳 COMPRESS 时在 reset_landing_reanchor() 里清。
+            _jump_cmd = command(float(d.time)) if callable(command) else command
+            sim.mpc.planner.mark_jump_velocity_command(
+                abs(float(getattr(_jump_cmd, "velocity", 0.0) or 0.0))
+                > sim.mpc.planner.limits.velocity_deadband)
             jump_command = sim.jump.start(float(d.time))
             flight_leg_ref = None                # 每跳复位飞行腿剖面状态
 
@@ -197,6 +205,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             sim.contact_estimator.reset()
             sim.supervisor.reset()
             landing_reanchor_pending = False
+            # 第 33 节（a）：丢弃落地前那次 MPC 解（WBC 不再采落地前轨迹），并在本拍强制重算。
+            solution = None
+            landing_refresh = True
             _LOGGER.info("落地重锚定：reset_reference=True @ t=%.3f s，mpc/estimator/supervisor 已重锚",
                          float(d.time))
         # ---------------- 跳跃级：每物理步推进一次（纯计算，只用测量量）----------------
@@ -279,7 +290,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
 
         # FL16B（2026-10-10）：释放段前馈斜坡计时（与 FL17B 共用同一相位计时）。
         # ---------------------------- 控制级 A：MPC（自己的节拍，与 WBC 异步）
-        if sim.timing.mpc_due(step):
+        if landing_refresh or sim.timing.mpc_due(step):
             mpc_called = True
             solution, sim._command = mpc_stage(
                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
@@ -303,6 +314,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         elif _landed_phase == "COMPRESS":
             jump_landed = False          # 新一跳开始，解锁
             landed_frames = 0            # 新一跳开始，落地帧计时清零
+            # 第 31 节：新一跳开始 -> 允许下一次落地再做一次播种重锚（每次落地恰好一次）。
+            sim.mpc.planner.reset_landing_reanchor()
         # 落地后 ground 模式的连续帧数：只用于 landing_window 的帧计时（NOANCHOR，2026-10-17）。
         landed_frames = (landed_frames + 1
                          if jump_landed and feedback.decision.mode == "ground" else 0)
@@ -325,7 +338,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         contact_available = bool(feedback is not None and any(feedback.decision.contact))
         # 腿角目标回到 _apply_zmp_reference 写入的 reference[:,6]/[:,7]（NOANCHOR 删去覆盖）。
         wbc_holds = jump_holds
-        if (sim.timing.wbc_due(step) and not airborne_active
+        if ((landing_refresh or sim.timing.wbc_due(step)) and not airborne_active
                 and jump_phase_now != "FLIGHT" and contact_available):
             wbc_called = True
             outcome = wbc_stage(
@@ -635,6 +648,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "flight_leg_retract": bool(flight_leg_retract),
                 "flight_leg_extend": bool(flight_leg_extend),
                 "mpc_called": bool(mpc_called),
+                "mpc_due": bool(sim.timing.mpc_due(step)),
+                "landing_refresh": bool(landing_refresh),
                 "wbc_due": bool(sim.timing.wbc_due(step)),
                 "mpc_solution": None if solution is None else {
                     "fallback": bool(solution.fallback),
@@ -650,6 +665,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     "state": np.asarray(sample.state, dtype=float).copy(),
                     "acceleration": np.asarray(sample.acceleration, dtype=float).copy(),
                 },
+                # 第 28.8 节判别实验：只读记录，不参与任何控制量计算。
+                "planner_forward_pos": float(sim.mpc.planner._forward.position),  # noqa: SLF001
+                "planner_forward_vel": float(sim.mpc.planner._forward.velocity),  # noqa: SLF001
+                "planner_mode": sim.mpc.planner.mode.value,
+                "ref_v": None if sample is None else float(sample.state[1]),
                 "explicit_jump_reference_active": bool(explicit_jump_reference
                                                         and jump_command is not None
                                                         and jump_command.active

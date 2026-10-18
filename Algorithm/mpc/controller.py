@@ -492,10 +492,15 @@ class WheelMPC:
         if soft and self.settings.preserve_ramp_on_recontact and state is not None:
             # ANCHOR-3（2026-10-17，用户同意）：位置锚点仅在真正驱动过时才跟到实际位置。
             # 零输入（commanded_motion=False）保持原锚点，否则扰动/离地会把目标改写成“被推到的位置”。
-            if self.planner.reference_frozen:
-                # 第 27 节：跳跃把斜坡冻结过，旧速度/加速度与实测不同源，改用实测重新播种。
+            if self.planner.reference_frozen and not self.planner.landing_reanchored:
+                # 第 31 节：触地那一拍用（触地位置, 触地速度）播种，只此一次。之后斜坡自身按
+                # max_braking 减速到 0，位置自然推进到制动停止点，车体沿参考停下。
                 self.planner.reanchor_from_measurement(
-                    state.position, state.yaw, state.velocity, 0.0, "jump_landing")
+                    state.position, state.yaw, state.velocity, 0.0, "jump_landing_once",
+                    keep_commanded=self.planner.jump_had_velocity_command)
+            elif self.planner.reference_frozen:
+                # 同一次落地的后续软重锚：位置与速度都不碰（否则参考速度会跟实测速度跑）。
+                self.planner.mark_landing_reanchor_noop()
             else:
                 self.planner.soft_reanchor(state.position, state.yaw,
                                            reset_position=bool(self.planner.commanded_motion))

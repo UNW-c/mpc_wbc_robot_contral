@@ -300,6 +300,12 @@ class VelocityPlanner:
             raise ValueError("Reference reset must be finite")
         self._forward = _RampState(position or 0.0, speed)
         self._reference_frozen = False
+        self._landing_reanchored = False   # 第 31 节：一次性锁存
+        # 第 32 节：起跳速度指令标记在跳跃窗口内必须跨越硬复位存活——落地后 0.32 s 内会
+        # 连做十几次 planner.reset()，若在这里清掉，一次性播种就永远拿不到 keep_commanded。
+        # 只有完全复位（position is None，启动 / R）才清。
+        if position is None:
+            self._jump_had_velocity_command = False
         self._yaw = _RampState(yaw or 0.0, yaw_rate)
         self._initialized = position is not None and yaw is not None
         self.mode = ReferenceMode.RESET
@@ -309,7 +315,10 @@ class VelocityPlanner:
         self.capability = 1.0
         self._hold_time = self._touchdown_time = self._saturation_time = 0.0
         self._suspended = False
-        self._commanded = False
+        # 第 32 节（d）：硬复位（带实测状态）不得清掉已经在行驶的标志；只有完全复位
+        # （position is None，启动 / R 复位）才清零。
+        if position is None:
+            self._commanded = False
 
     def soft_reanchor(self, position: float, yaw: float, *, reset_position: bool = False) -> None:
         """只重锚偏航到实测，保留斜坡速度、加速度和 commanded 标记。
@@ -331,32 +340,69 @@ class VelocityPlanner:
                      reset_position, self._forward.position, yaw, position)
 
     def reanchor_from_measurement(self, position: float, yaw: float, speed: float,
-                                  yaw_rate: float, reason: str = "jump_landing") -> None:
+                                  yaw_rate: float, reason: str = "jump_landing",
+                                  *, keep_commanded: bool = False) -> None:
         """用**实测速度**重新播种斜坡（参考可能被冻结过时用）。
 
         与 ``soft_reanchor`` 的区别：位置、偏航、速度、角速度全部取自同一时刻的实测，
         不保留斜坡旧值。轮圈腿的 ``_align`` 就是这个语义（内部直接调用，不复制逻辑）。
         """
-        self._align(float(position), float(yaw), float(speed), float(yaw_rate), reason)
+        self._align(float(position), float(yaw), float(speed), float(yaw_rate), reason,
+                    keep_commanded=keep_commanded)
 
     def mark_reference_frozen(self) -> None:
         """记录"参考斜坡被冻结过"（跳跃期 motion_enabled=False，斜坡不再推进）。"""
         self._reference_frozen = True
+
+    def mark_jump_velocity_command(self, had_command: bool) -> None:
+        """第 32 节：记录"起跳那一刻是否存在非零速度指令"（布尔量，无新增阈值）。"""
+        self._jump_had_velocity_command = bool(had_command)
+
+    @property
+    def jump_had_velocity_command(self) -> bool:
+        return bool(self._jump_had_velocity_command)
+
+    def reset_landing_reanchor(self) -> None:
+        """第 31 节：新一跳开始时清掉"本次落地已播种"锁存（由调用方在 COMPRESS 升起时调用）。
+
+        不能放在 ``mark_reference_frozen()`` 里按上升沿清：``_align()`` 会同时把
+        ``_reference_frozen`` 清回 False，那样每帧都会被当成上升沿重新解锁。
+        """
+        self._landing_reanchored = False
+        # 第 32 节（c）：起跳速度指令标记**不在这里清**——COMPRESS 升起的同一拍就是本跳起跳拍，
+        # 在这里清会把刚捕获的值抹掉。它每跳起跳时由 mark_jump_velocity_command() 重写，
+        # 生命周期天然按跳隔离。
+
+    def mark_landing_reanchor_noop(self) -> None:
+        """第 31 节：同一次落地的后续软重锚——位置与速度都不碰（只留日志）。
+
+        一次落地里先后会触发十几次软重锚；只有触地那一拍允许用实测播种。
+        """
+        _LOGGER.debug("落地重锚跳过（本轮落地已播种，s=%.4f v=%.4f）",
+                      self._forward.position, self._forward.velocity)
+
+    @property
+    def landing_reanchored(self) -> bool:
+        return bool(self._landing_reanchored)
 
     @property
     def reference_frozen(self) -> bool:
         return bool(self._reference_frozen)
 
     def _align(self, position: float, yaw: float, speed: float, yaw_rate: float, reason: str,
-               reset_position: bool = True) -> None:
+               reset_position: bool = True, keep_commanded: bool = False) -> None:
         # reset_position=False keeps the travel target where it was: a pure
         # velocity hold must not move the position goal away from the origin.
         self._forward = _RampState(position if reset_position else self._forward.position, speed)
         self._yaw = _RampState(yaw, yaw_rate)
         self._reference_frozen = False
+        self._landing_reanchored = True   # 第 31 节：已用实测播种过（一次性）
         self._initialized = True
         self._hold_time = 0.0
-        self._commanded = False
+        # 第 32 节：原来无条件置 False，导致落地后 commanded_motion 为假 -> BRAKE 分支不跟实测
+        # -> 位置目标冻结在触地点 -> 车体带着前向速度走 -> 位置误差建立 -> 回拉（后向回退）。
+        # 有速度指令起跳的落地重锚保留该标记，落地后与正常行驶走同一套"位置目标跟随实测"。
+        self._commanded = bool(keep_commanded)
         self.mode = ReferenceMode.RESET
         self.last_reset_reason = reason
         self.reset_count += 1

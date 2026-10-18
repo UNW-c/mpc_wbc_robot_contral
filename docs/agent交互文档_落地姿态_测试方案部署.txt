@@ -2783,7 +2783,349 @@ simulation.py:283   preview_lead: float = 0.0   ->   0.02
   越界中止的**根源**（行进中起跳伸展到 0.4309）单独开一轮，不以本改动掩护。
 
 ================================================================
-30. 交付队列
+30. JUMP-RAMP：跳跃期不让速度斜坡冻结（2026-10-17）
+================================================================
+
+30.1 用户实测（关键证据，优先于任何推理）
+
+  1. 按住前进 -> 起跳 -> **跳跃过程中继续按前进** -> **飞行中才松开** -> 落地后出现先行再退。
+  2. **同样的流程，先松手再触发跳跃 -> 不回退**。
+
+  -> 问题与"指令在跳跃期变为 0"直接相关，与锚点数值无关。
+
+30.2 代码事实（已核实）
+
+  `planner.advance()` 在以下条件成立时**提前返回**：
+
+  ```python
+  if not fb.enabled or not fb.command_fresh or not any(fb.contact):
+      self._suspended = True
+      ...
+      self.valid = False
+      self.mode = ReferenceMode.RESET
+      return ReferenceTrajectory(np.full(n, self._forward.position), zero, zero, ...)
+  ```
+
+  后果：
+  - `_forward.velocity` **保持在跳跃前的值（约 1.4 m/s），不随指令归零而衰减**；
+  - 向外发出的轨迹是"位置恒定 + 速度全 0"，而 `_forward` 内部却还是 1.4；
+  - 落地后退出 suspended -> 速度规划器拿 1.4 去规划减速 -> 参考以 1.4 拖着车体跑到减速结束。
+
+  实测对照：run10 J1 落地 v=+1.109，而参考速度约 1.4 -> 前冲 0.8415 m；
+  同工况"先松手再跳"（起跳时斜坡已为 0）无此现象。
+
+30.3 改动：跳跃期只冻结位置积分，不冻结速度衰减
+
+  `planner.advance()` 的 suspended 分支里（位置积分仍然不推进）：
+
+  ```python
+  if not fb.enabled or not fb.command_fresh or not any(fb.contact):
+      self._suspended = True
+      # 新增：指令仍有效时，速度斜坡按正常限值衰减到 target_v（跳跃期 target_v=0），
+      # 否则落地后速度规划器会拿起跳前的旧速度去规划一段减速。
+      if fb.command_fresh:
+          self._forward = _RampState(self._forward.position,
+                                     _decay_speed(self._forward.velocity, target_v, dt, limits))
+      ...（其余不变：valid=False、mode=RESET、发出的轨迹仍为位置恒定+零速度）
+  ```
+
+  要求：
+  1. 位置 `_forward.position` **不推进**（与现状一致）；
+  2. 速度衰减复用现有制动能力（`limits.max_braking` / `max_braking_jerk`），**不新增参数**；
+  3. 发射的 `ReferenceTrajectory` 逐字不变（仍为零速度）。
+
+30.4 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | 跳跃中松手后落地 | 落地后不再出现 0.8 m 量级前冲；`max(ref_v - v) <= 0.05` |
+  | 主判据 | 先松手再起跳 | 与改前逐位一致（该路径速度为 0，衰减为恒等）|
+  | 回归 | T1/CMD1 | 逐位全 0（它们在 suspended 时 `_forward.velocity` 也为 0） |
+  | 回归 | 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+  | 记录 | `planner_forward_vel` | 跳跃期内能看到它从 1.4 衰到 0 |
+
+30.5 本改动解决不了的部分（必须说清）
+
+  1. 落地时车体仍带着 1.0~1.1 m/s 的动量，必须靠制动消耗（≈0.15~0.3 m）；
+  2. 若锚点放在触地点，这段制动距离必然表现为"冲过再回来"（后退）；
+  3. 所以本改动消除的是"1.4 拖行 0.84 m"这个大头，**残余后退幅度依赖落地动量与锚点位置**。
+     要完全消除后退，黍点需放在预测停止点，属另一轮（28.9 方案 a）。
+
+30.6 不改的事
+
+  不改 `_touchdown_time`/`stable_resume`；不改 `sample=None`（跳跃期 WBC 仍不读参考）；
+  不改任何阈值；不改落地重锚语义。
+
+================================================================
+31. LAND-ONESHOT：落地重锚改为一次性（2026-10-17）
+================================================================
+
+31.1 需求口径（用户定案）
+
+  落地后的**前向位移是期望结果**，不要求停在触地点；唯一要去掉的是后向回退。
+
+  这直接排除了"锚点放在触地点"的方案（那必然冲过再回来）。
+  正确的锚点 = **斜坡自身减速结束的位置**，车体沿参考自然停在那里。
+
+31.2 根因（第 27 节引入的缺陷，已实测）
+
+  `reanchor_from_measurement()` 在落地窗口内被调用 **13 次**，每次都把**实测速度**写回斜坡：
+
+  ```
+  1.184 -> 1.357 -> 1.585 -> 1.743 -> 1.864（峰，t=3.100）-> 1.754 -> ... -> 1.531
+  ```
+
+  落地缓冲把车体弹到 1.864（高于起跳前的 1.5）-> 重锚把它写成新参考 -> 控制器按 1.864
+  继续往前带 -> 参考永远不低于实测 -> 前冲 1.2155 m，且减速永远发生不了。
+
+  这是正反馈：**参考速度跟实测速度跑**。
+
+31.3 改动：落地重锚只做一次
+
+  （a）`planner.py` 新增一次性锁存（与 `_reference_frozen` 同处）：
+
+  ```python
+  self._landing_reanchored = False     # reset() 里置 False；_align() 成功后置 True
+  ```
+
+  （b）`controller.py` 的 `reset(soft=True)` 分支：
+
+  ```python
+  if self.planner.reference_frozen and not self.planner.landing_reanchored:
+      self.planner.reanchor_from_measurement(state.position, state.yaw, state.velocity, 0.0,
+                                             "jump_landing_once")
+  elif self.planner.reference_frozen:
+      # 同一次落地的后续软重锚：位置与速度都不碰（只刷新 valid/状态）
+      self.planner.mark_landing_reanchor_noop()
+  else:
+      self.planner.soft_reanchor(...)          # 原逻辑不动
+  ```
+
+  （c）锁存清除时机：与 `jump_landed` 同处（下一跳 COMPRESS 升起时）。
+
+  语义：触地那一拍以（触地位置, 触地速度）播种斜坡 -> 斜坡按 `max_braking` 减速到 0，
+  其位置自然推进到制动停止点 -> 车体沿该参考停下。**既有前向位移，又无回退。**
+
+31.4 预期数值（用于验收前的预估，不是判据）
+
+  触地速度 1.376 m/s、制动 3.80 m/s^2 -> 制动距离 1.376^2/(2*3.8) ≈ **0.249 m**（前向）。
+
+31.5 验收
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | 重锚次数 | 每次落地 **恰好 1 次**（日志计数）|
+  | 主判据 | 前向位移 | 0.15~0.40 m（存在即可，不要求为 0） |
+  | 主判据 | **后向回退** | `max(s) - s_末` <= **0.03 m**（现状 0.26 m） |
+  | 主判据 | `max(ref_v - v)` | <= 0.05 m/s，且跳跃期内 `planner_forward_vel` 单调不增 |
+  | 回归 | T1/CMD1 | 逐位全 0（非跳跃工况不进这个分支） |
+  | 回归 | 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+
+31.6 同时要做的事
+
+  1. **撤回第 30.3**（已证实执行 0 次的死代码）；
+  2. 保留 28.8 的只读字段（已验证逐位无副作用）；
+  3. 删除一次性脚本 `_s28_ab.py`（用户已同意）。
+
+31.7 需求口径 v2（用户 2026-10-17 澄清，取代 31.1/31.3 的叙述）
+
+  **问题**：落地后存在两套位置收敛同时在起作用：
+  1. 速度规划器的减速（物理上必然有一段前向位移）；
+  2. 落地位置锚定（锚在**落点**）。
+  两者冲突：车体按 1 向前走了，2 又把它拉回落点 -> 后退。
+
+  **要求**：**放弃落地位置锚定**，位置收敛只由速度规划器的减速完成（速度降到 0），
+  车体向前走一段就停在那里；**且不得与原地起跳的逻辑冲突**。
+
+31.8 方案（v2）
+
+  （a）落地那一拍**一次性**播种斜坡：`position = 实测位置`、`velocity = 实测速度`；
+      此后位置目标**不固定为触地点**，而是由斜坡自身减速过程中推进（或 DRIVE/BRAKE
+      期间跟随实测）-> 位置目标自然落在**制动停止点**。
+
+  （b）同一次落地的后续软重锚：**位置与速度都不得再写**（这是现状 13 次写回实测速度的根源）。
+
+  （c）**不写任何落地专用的位置收敛逻辑**：不再把“目标 = 触地点”写进任何持有者。
+
+  （d）原地起跳的兼容不需要特判：触地速度 ≈ 0 -> 制动距离 ≈ 0 -> 前向位移 ≈ 0，
+      自然退化为“停在落地点”，与既有行为一致。
+
+31.9 判据（v2，按需求重写）
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | 后向回退 `max(s) - s_末` | <= 0.03 m（现状 0.26 m） |
+  | 主判据 | 行进中起跳（触地 1.3~1.5 m/s） | 前向位移 0.15~0.40 m（存在即可）|
+  | **兼容** | **原地起跳（触地 \|v\| <= 0.10）** | **前向位移 <= 0.03 m，且与改前跳跃工况逐位一致** |
+  | 主判据 | 重锚次数 | 每次落地恰好 1 次 |
+  | 主判据 | `planner_forward_vel` | 跳跃期单调不增，不回写实测尖峰 |
+  | 回归 | T1/CMD1 | 逐位全 0 |
+
+  第三条是防“与原地起跳冲突”的硬护栏：原地跳的验收工况（`JUMPy/JUMP30`）
+  必须与改前**逐位一致**，否则不算通过。
+
+================================================================
+32. LAND-COMMANDED：落地重锚保留 commanded（2026-10-17）
+================================================================
+
+32.1 根因（一行代码，已核实）
+
+  `planner._align()` 无条件把 `_commanded` 置 False：
+
+  ```python
+  self._forward = _RampState(position if reset_position else self._forward.position, speed)
+  self._yaw = _RampState(yaw, yaw_rate)
+  self._hold_time = 0.0
+  self._commanded = False        # ← 根因
+  ```
+
+  而 `advance()` 的 BRAKE 分支里“位置目标跟随实测”是有前提的：
+
+  ```python
+  if limits.reanchor_position_while_braking and self.commanded_motion:
+      self._forward = _RampState(position, self._forward.velocity, self._forward.acceleration)
+  ```
+
+  `_commanded=False` -> `commanded_motion` 为假 -> **位置目标冻结在 `_align` 写入的值（= 触地点）**。
+  -> 车带着前向速度继续走 -> 位置误差建立 -> 往回拉 = 后向回退。
+
+  对照：有速度输入的正常行驶走 DRIVE 分支，位置目标每拍跟随实测，**没有固定锚点**，
+  所以从不出现“冲过再拉回”。落地缺的就是这个语义。
+
+32.2 改动（只改 `_align` 一处）
+
+  ```python
+  def _align(self, position, yaw, speed, yaw_rate, reason,
+             reset_position: bool = True, keep_commanded: bool = False) -> None:
+      ...
+      self._commanded = bool(keep_commanded)      # 原来是无条件 False
+  ```
+
+  （a）`reanchor_from_measurement()` 增加透传参数 `keep_commanded`；
+
+  （b）`controller.reset(soft=True)` 的 `jump_landing_once` 分支：
+
+  ```python
+  self.planner.reanchor_from_measurement(
+      state.position, state.yaw, state.velocity, 0.0, "jump_landing_once",
+      keep_commanded=jump_had_velocity_command)
+  ```
+
+  （c）`jump_had_velocity_command` = **起跳那一刻是否存在非零速度指令**（一个布尔量，无新阈值），
+      与跳跃锁存同一生命周期（下一跳 COMPRESS 清除）；由 `loop.py` 在触发时捕获并传给 `mpc.reset`。
+
+  （d）硬复位路径：若 `_commanded` 已为真，`planner.reset()` 不得把它清掉（同一条语义，只改传递）。
+
+  效果：有速度指令的起跳，落地后位置目标每拍跟随实测（与正常行驶同一套），
+  速度斜坡从落地速度衰减到 0 -> 车向前走一段自然停住；无固定锚点 -> 无回拉。
+
+32.3 判据
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | **后向回退** `max(s) - s_末` | <= 0.03 m（现状 0.26 m） |
+  | 主判据 | 行进中起跳 | 前向位移 0.15~0.40 m（存在即可） |
+  | 主判据 | `planner_forward_pos` | 落地后**每拍跟随实测**（与 s 的差 <= 0.01 m），不再冻结 |
+  | **兼容** | 原地起跳 | 与改前**逐位一致**（`keep_commanded=False` 路径未变） |
+  | 回归 | T1/CMD1 | 逐位全 0 |
+  | 回归 | 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+
+32.4 不做的事
+
+  不改 `soft_reanchor`（它本来就不碰 `_commanded`）；不改 `MotionLimits`；
+  不改 `landing_window`；不改跳跃相位机；不新增任何阈值。
+  第 31 节的一次性锁存仍保留（防止同一落地反复播种），但不再是主修法。
+
+================================================================
+33. LAND-REFRESH：落地那一拍 MPC/WBC 全新起算（2026-10-17）
+================================================================
+
+33.1 需求（用户定案）
+
+  触发落地之后，MPC 与 WBC **直接重新开始规划、重新控制**，
+  不复用落地前的数据与规划（旧解、旧参考、旧保持力矩）。
+
+33.2 现状（`loop.py:198-206`）只刷新了一半
+
+  ```python
+  if (flight_leg_extend and landing_reanchor_pending
+          and feedback.decision.reset_reference):
+      land_state = _replace(feedback.state, position=sim.distance)
+      sim.mpc.reset(land_state)
+      sim.contact_estimator.reset()
+      sim.supervisor.reset()
+      landing_reanchor_pending = False
+  ```
+
+  刷了：规划器、接触估计器、监督器。
+  **没刷**：
+  1. `solution`（落地前最后一次 MPC 解）—— `control.py:269` 继续用它做 `sample_at`，
+     WBC 拿到的是落地前轨迹的外推；
+  2. 节拍——MPC 50 Hz / WBC 250 Hz，落地那一拍不一定正好是它们到期的一拍，
+     等待期间 WBC 走 `zero_order_hold`，把**落地前的正力矩**继续输出。
+
+33.3 改动（`loop.py`）
+
+  （a）落地重锚那一拍置一个本拍标志：
+
+  ```python
+  landing_refresh = False
+  if (flight_leg_extend and landing_reanchor_pending
+          and feedback.decision.reset_reference):
+      ...（现有三句 reset 不变）
+      solution = None            # 丢弃旧解：WBC 不再采落地前轨迹
+      landing_refresh = True     # 本拍强制重算
+  ```
+
+  （b）MPC 与 WBC 的节拍门可以加一个 OR 分支（只在本拍生效）：
+
+  ```python
+  if landing_refresh or sim.timing.mpc_due(step):
+      ...mpc_stage(...)
+
+  if ((landing_refresh or sim.timing.wbc_due(step))
+          and not airborne_active and jump_phase_now != "FLIGHT" and contact_available):
+      ...wbc_stage(...)
+  ```
+
+  （c）落地那一拍的 `solution` 为 None，若 WBC 早于新解完成，`sample=None` 分支
+      （`wbc.py:203-207`）只做速度阻尼——**不会用旧参考索要加速度**，
+      也不会把落地前的正力矩继续输出。
+
+  （d）不新增任何阈值、不改任何限幅/增益/频率。
+
+33.4 与第 32 节的关系
+
+  | 节 | 解决什么 |
+  |---|---|
+  | 32（`keep_commanded`） | 位置目标是否绑在落点 |
+  | 33（LAND-REFRESH） | 落地后第一拍用的是谁的参考、谁算的力矩 |
+
+  两条互不替代，各自单独验收。
+
+33.5 判据
+
+  | 类别 | 项 | 要求 |
+  |---|---|---|
+  | 主判据 | 落地后的 `output_source` | 重锚那一拍即 `wbc_update`；不出现跨越落地时刻的 `zero_order_hold` |
+  | 主判据 | `solution` | 重锚拍为 None，下一拍由新解替换（日志可证） |
+  | 主判据 | 落地后 0.05 s 的 `ctrl[4:6]` | 不出现落地前的残留正力矩 |
+  | 主判据 | 后向回退 | <= 0.03 m |
+  | 主判据 | 前向位移 | 0.15~0.40 m（存在即可） |
+  | **兼容** | 原地跳 | 与改前逐位一致 |
+  | 回归 | T1/CMD1 | 逐位全 0 |
+  | 回归 | 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+
+  记录：重锚拍的 `step`/`t`、`mpc_due`/`wbc_due` 分别为真的情况（四种组合都需出现一次，
+  证明 OR 分支确实生效）、新解的首帧时间戳。
+
+33.6 不改的事
+
+  不改 `mpc.reset()`/`wbc` 内部复位逻辑；不改节拍频率；不改 `landing_window`；
+  不改跳跃相位机。
+
+================================================================
+34. 交付队列
 ================================================================
 
 | 顺序 | 编号 | 状态 | 一句话目标 | 对照 |

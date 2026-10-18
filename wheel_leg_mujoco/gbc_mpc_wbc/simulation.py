@@ -577,6 +577,12 @@ class Gbc486MpcWbcSimulation:
             ref_acc=None if sample is None else sample.acceleration.tolist(),
             mpc_force=None if self.solution is None else self.solution.force.tolist(),
             planner=self.mpc.planner.mode.value,
+            # 第 28.8 节判别实验：只读记录，不参与任何控制量计算。
+            # 直接取规划器斜坡内部状态（与 _record 其余字段同口径，不做任何换算）。
+            planner_forward_pos=float(self.mpc.planner._forward.position),   # noqa: SLF001
+            planner_forward_vel=float(self.mpc.planner._forward.velocity),   # noqa: SLF001
+            planner_mode=self.mpc.planner.mode.value,
+            ref_v=None if sample is None else float(sample.state[1]),
             predicted_normal=predicted_normal.tolist(),
             dynamics_residual=None if result is None else float(result.dynamics_residual_norm),
             fallback=None if result is None else bool(result.fallback_used))
