@@ -62,7 +62,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     m, d = sim.model, sim.data
     from .sampling import FeedbackSampler
     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
-                          flight_leg_profile_torque, landing_buffer_torque)
+                          flight_leg_profile_torque, landing_buffer_torque,
+                          dual_mass_flight_torque)
     from .jump import JumpObservation, LIFTOFF_GAP
     from Algorithm.contact_state import JumpPhaseHint
     from Algorithm.mpc.trajectory import MotionSample
@@ -91,6 +92,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     previous_com_xz = None
     previous_com_time = None
     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+    flight_dual_ref = None       # S1：双质量块飞行计划状态（跨帧保持）
     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
     landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
@@ -126,6 +128,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             last_thrust_applied = thrust_applied_last = False
             previous_com_xz = previous_com_time = None
             flight_leg_ref = None
+            flight_dual_ref = None
             jump_landed = False
             landed_frames = 0
             landing_reanchor_pending = False
@@ -179,6 +182,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 > sim.mpc.planner.limits.velocity_deadband)
             jump_command = sim.jump.start(float(d.time))
             flight_leg_ref = None                # 每跳复位飞行腿剖面状态
+            flight_dual_ref = None               # 每跳复位双质量块飞行计划
 
         # ------------------------------------------------------ 采样级（每物理步）
         if jump_command is None:
@@ -416,13 +420,21 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                                            sim.jump.config.leg_length_max,
                                            sim.jump.config.leg_length_nominal,
                                            pitch=float(feedback.state.pitch))
+        elif flight_profile and bool(sim.config.flight_dual_mass):
+            # S1：飞行段单轨迹（部署文档 v6 第 3 节）。开关关时不走这里，行为不变。
+            torque, flight_dual_ref = dual_mass_flight_torque(
+                sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
+                dt=float(m.opt.timestep), pitch=float(feedback.state.pitch),
+                plan=flight_dual_ref,
+                leg_length_nominal=sim.jump.config.leg_length_nominal)
         elif flight_profile:
             torque, flight_leg_ref = flight_leg_profile_torque(
                 sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
                 sim.jump.config.leg_length_nominal,
                 retract_state=flight_leg_ref, dt=float(m.opt.timestep),
-                pitch=float(feedback.state.pitch))
+                pitch=float(feedback.state.pitch),
+                preswing=float(sim.config.flight_leg_preswing))
         elif flight_retract:
             leg_now = sim.dyn.leg_state()
             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)

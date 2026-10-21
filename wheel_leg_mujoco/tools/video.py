@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--jump-height", type=float, default=None,
                         help="启用跳跃并给定目标质心抬升 [m]")
+    parser.add_argument("--flight-leg-preswing", type=float, default=0.0,
+                        help="[rad] 触地前腿角终端预置（伸腿进度 0->1 生效），0=原行为")
     parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
     parser.add_argument("--jump-time", type=float, default=1.0, help="起跳指令时刻 [s]")
     # CMD（16.3）：有输入速度指令录像。默认 0.0 = 保持原行为（零指令）。
@@ -92,6 +94,7 @@ def main() -> int:
     setup_logging(default_level="INFO")
     sim = Gbc486MpcWbcSimulation(SimulationConfig(
         jump_height=args.jump_height, jump_stroke=args.jump_stroke, jump_time=args.jump_time,
+        flight_leg_preswing=args.flight_leg_preswing,
         backend=args.backend, model_variant=args.variant, preset=args.preset))
     model, data = sim.model, sim.data
     renderer = mujoco.Renderer(model, args.height, args.width)

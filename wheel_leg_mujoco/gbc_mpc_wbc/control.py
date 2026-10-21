@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 import time
 
 import numpy as np
@@ -102,12 +103,12 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
     return np.asarray(forces, dtype=float)
 
 
-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
+def _phi_force(leg_position, leg_velocity, pitch, l_ref=None, world_offset=0.0) -> np.ndarray:
     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
     ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
-    world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+    world_ref = (WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)) + float(world_offset)
     phi_body_ref = phi_body_reference(world_ref, pitch)
     forces = []
     for side in range(2):
@@ -127,7 +128,7 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
 
 def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
                               leg_length_min, leg_length_max, nominal_length,
-                              retract_state=None, dt=0.0, pitch=0.0):
+                              retract_state=None, dt=0.0, pitch=0.0, preswing=0.0):
     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
 
     状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
@@ -186,13 +187,116 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
     # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
     # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
     phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
-    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
+    # P24：触地前腿角终端预置。伸腿进度 frac 0->1 时把世界角目标摆到 preswing，
+    # 让触地点从质心前方移到质心后方（低头力矩变抬头力矩）。上升段 frac=0，不生效。
+    _span = max(target_extend - target_retract, 1.0e-6)
+    _frac = min(1.0, max(0.0, (l_ref - target_retract) / _span))
+    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
+                      world_offset=float(preswing) * _frac)
            + FEEDFORWARD_COUPLING * forces) * phi_ramp
     phi_elapsed += float(dt)
     torque = _leg_wrench_torque(dynamics, forces, phi)
     if mode == "rising":
         torque = np.clip(torque, -FLIGHT_RETRACT_TORQUE_LIMIT, FLIGHT_RETRACT_TORQUE_LIMIT)
     return torque, (mode, l_ref, v_ref, l_entry, ref_accel, phi_elapsed)
+
+
+# ---------------------------------------------------------------------------
+# 双质量块飞行规划（部署文档 v6 第 3.2/3.3 节）
+# ---------------------------------------------------------------------------
+# 为什么用一条轨迹：两块之间只有一条腿力 F，任何"收腿段/伸腿段"的分段都会在
+# 段边界引入力或加速度不连续，再用下一段去补偿（v5 的错误，见文档 3.6）。
+# 这里只规划轮子绝对高度 z1(t) 的一条 C2 曲线，腿长 L = z2 - z1 是差值。
+DUAL_MASS_NORM = 64.0        # f(u) = 64*u^3*(1-u)^3，使 f(0.5)=1（文档 3.2 节给定）
+
+
+@dataclass(frozen=True)
+class DualMassFlightPlan:
+    """飞行段计划的捕获量（每跳算一次，逐拍只推进 ``t``）。"""
+    t: float            # [s] 距捕获帧的时间
+    T: float            # [s] 飞行总时长（由触地腿长解出）
+    h: float            # [m] z1 轨迹幅值（由最小腿长解出）
+    L0: float           # [m] 捕获帧腿长
+    v0: float           # [m/s] 捕获帧机体竖直速度
+    ratio: float        # [-] m1/m2
+    phi_elapsed: float  # [s] phi 启用斜坡计时
+
+
+def dual_mass_masses(dynamics) -> tuple[float, float]:
+    """(m1, m2)：m1 = 两轮 + 关节 jGH/jOP 所在体（GH/OP），m2 = 整机 - m1。
+
+    数值取自 MJCF（0.322*2 + 1.640*2 = 3.924 kg，整机 14.546 kg），与文档 1.1 一致。
+    """
+    from . import robot as R
+    model = dynamics.model
+    lower = 0.0
+    for leg in R.LEGS:
+        lower += float(model.body_mass[model.body(leg.wheel_body).id])
+        lower += float(model.body_mass[int(model.joint(leg.passive_joints[0]).bodyid[0])])
+    total = float(model.body_mass.sum())
+    return lower, total - lower
+
+
+def _dual_mass_shape(u: float) -> tuple[float, float, float]:
+    """返回 (f, f', f'')：f = 64*u^3*(1-u)^3，端点 f=f'=f''=0。"""
+    u = min(1.0, max(0.0, float(u)))
+    cubic = u * u * u * (1.0 - u) ** 3
+    first = 3.0 * u * u * (1.0 - u) ** 2 * (1.0 - 2.0 * u)
+    second = 6.0 * u * (1.0 - u) * ((1.0 - 2.0 * u) ** 2 - u * (1.0 - u))
+    return DUAL_MASS_NORM * cubic, DUAL_MASS_NORM * first, DUAL_MASS_NORM * second
+
+
+def dual_mass_flight_plan(m1: float, m2: float, L0: float, v0: float,
+                          L_td: float, L_tuck: float) -> tuple[float, float]:
+    """解 (T, h)（文档 3.3 节）：T 由触地腿长，h 由最小腿长。无实数解返回 (nan, nan)。"""
+    ratio = m1 / m2
+    accel = (1.0 + ratio) * GRAVITY
+    disc = v0 * v0 - 2.0 * accel * (L_td - L0)
+    if disc < 0.0:
+        return float("nan"), float("nan")
+    T = (v0 + math.sqrt(disc)) / accel
+    half = v0 * T / 2.0 - accel * T * T / 8.0
+    h = (L0 + half - L_tuck) / (1.0 + ratio)
+    return T, h
+
+
+def dual_mass_flight_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                            dt, pitch=0.0, plan=None, leg_length_nominal=0.28):
+    """飞行段单轨迹出力矩：``F = -m1*(z1''+g)``，``tau = J^T @ [F/2, F_phi]``。
+
+    phi 通道不改（沿用 KP_PHI/KD_PHI + FEEDFORWARD_COUPLING 与 40 ms 启用斜坡，
+    文档 7.3：本版不碰 phi）。返回 ``(torque, new_plan)``。
+    """
+    m1, m2 = dual_mass_masses(dynamics)
+    if plan is None:
+        L0 = max(float(leg_position[0]), float(leg_position[2]))
+        v0 = float(vertical_velocity)
+        T, h = dual_mass_flight_plan(m1, m2, L0, v0, float(leg_length_nominal),
+                                     FLIGHT_RETRACT_FLOOR)
+        plan = DualMassFlightPlan(0.0, T, h, L0, v0, m1 / m2, 0.0)
+    ratio = plan.ratio
+    u = 0.0 if plan.T <= 0.0 else min(1.0, plan.t / plan.T)
+    shape, shape_d, shape_dd = _dual_mass_shape(u)
+    z1 = plan.h * shape                                  # [m] 轮子相对捕获帧高度
+    z1_d = (plan.h * shape_d / plan.T) if plan.T > 0.0 else 0.0
+    z1_dd = (plan.h * shape_dd / (plan.T * plan.T)) if plan.T > 0.0 else 0.0
+    force_plan = -m1 * (z1_dd + GRAVITY)                 # [N] 两腿合力计划值，正 = 撑开
+    travel = plan.v0 * plan.t - (1.0 + ratio) * GRAVITY * plan.t * plan.t / 2.0
+    l_ref = plan.L0 + travel - (1.0 + ratio) * z1        # [m] L = z2 - z1
+    v_ref = plan.v0 - (1.0 + ratio) * GRAVITY * plan.t - (1.0 + ratio) * z1_d  # [m/s] = dL_ref/dt
+    # 第 10.6 节：纯前馈会把误差积分成腿长漂移，补上沿用现有增益的反馈项
+    # （3000/150 即 flight 剖面的 FLIGHT_RETRACT_KP/KD，按文档字面：F_cmd 为两腿合力，
+    # 用较大腿的 L 与 Ldot 计算，再 /2 分给两腿）。
+    larger = 0 if float(leg_position[0]) >= float(leg_position[2]) else 2
+    force_total = (force_plan
+                   + FLIGHT_RETRACT_KP * (float(l_ref) - float(leg_position[larger]))
+                   + FLIGHT_RETRACT_KD * (float(v_ref) - float(leg_velocity[larger])))
+    forces = np.full(2, force_total / 2.0)
+    phi_ramp = min(1.0, max(0.0, plan.phi_elapsed / FLIGHT_PHI_RAMP))
+    phi = (_phi_force(leg_position, leg_velocity, pitch, float(l_ref))
+           + FEEDFORWARD_COUPLING * forces) * phi_ramp
+    torque = _leg_wrench_torque(dynamics, forces, phi)
+    return torque, replace(plan, t=plan.t + float(dt), phi_elapsed=plan.phi_elapsed + float(dt))
 
 
 def landing_buffer_torque(dynamics, leg_position, leg_velocity,

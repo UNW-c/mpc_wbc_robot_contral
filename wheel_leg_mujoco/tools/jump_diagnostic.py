@@ -185,6 +185,7 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
+             flight_leg_preswing=0.0, flight_dual_mass=False,
              command_velocity=0.5, command_hold=3.0,
              command_yaw_rate=0.0, command_yaw_hold=None):
     RESULTS.mkdir(exist_ok=True)
@@ -192,7 +193,9 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
     setup_logging(default_level="INFO", log_file=log_path)
     config = SimulationConfig(jump_height=jump_height, jump_stroke=jump_stroke,
-                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
+                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit,
+                              flight_leg_preswing=flight_leg_preswing,
+                              flight_dual_mass=bool(flight_dual_mass))
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
     sim.run(_command(case, command_velocity, command_hold,
@@ -300,6 +303,10 @@ def main():
                         help="FL1：FLIGHT 或真离地时输出显式零力矩，不保持地面力矩")
     parser.add_argument("--flight-leg-retract", action="store_true",
                         help="FL2：几何离地时主动收腿（pd = 3000/150），抬高轮毂")
+    parser.add_argument("--flight-leg-preswing", type=float, default=0.0,
+                        help="[rad] 触地前腿角终端预置（伸腿进度 0->1 生效），0=原行为")
+    parser.add_argument("--flight-dual-mass", action="store_true",
+                        help="S1：飞行段改用双质量块单轨迹规划（默认关）")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--mpc-force-feedforward", action="store_true",
@@ -319,6 +326,8 @@ def main():
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
              args.jump_time, explicit_jump_reference=args.explicit_jump_reference,
+             flight_leg_preswing=args.flight_leg_preswing,
+             flight_dual_mass=args.flight_dual_mass,
              compression_only=args.compression_only,
              freeze_jump_reference=args.freeze_jump_reference,
              vmc_feedforward=args.vmc_feedforward,

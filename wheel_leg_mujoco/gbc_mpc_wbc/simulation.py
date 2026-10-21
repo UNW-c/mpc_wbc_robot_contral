@@ -288,6 +288,11 @@ class SimulationConfig:
     # 目标质心抬升 [m]；None = 不启用跳跃。压缩行程 [m] 由用户给定（= 加速行程）。
     jump_height: float | None = None
     jump_stroke: float = 0.12
+    # [rad] 触地前腿角终端预置：伸腿进度 0->1 时世界角目标偏移该值。0 = 原行为。
+    flight_leg_preswing: float = 0.0
+    # 双质量块飞行规划（部署文档 v6 第 5 节 S1）：飞行段只用一条 z1(t) 轨迹出力矩。
+    # 默认 False = 原行为（走 flight_leg_profile_torque）。
+    flight_dual_mass: bool = False
     jump_time: float = 1.0                 # [s] 起跳指令时刻
     wbc_gains: WbcGains = field(default_factory=WbcGains)
     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角

@@ -1,0 +1,2596 @@
+
+================================================================
+轮腿机器人（circleg-robot）落地 pitch 优化 数据与测试结果反馈
+撰写：测试agent-ds
+生效：2026-10-18
+================================================================
+
+0. 本文件用途
+
+0.1 本文件是 `docs/agent交互文档_落地pitch优化_测试方案部署.txt` 的配套结果文件。
+    方案与判据只看部署文件；本文件只放**实测数据、结论、异常**。
+
+0.2 与既有结果文件的关系
+
+    `agent交互文档_落地姿态_数据与测试结果反馈.txt` 继续负责落地位置收敛、
+    后退、重锚刷新、连跳等轮次；本文件只记录**落地 pitch 优化**相关轮次。
+
+0.3 记录规则
+
+    1. 只追加，不修改已写过的段落；发现写错，在下一段开头注明"更正 X.X 段"。
+    2. 每轮必须以"改动清单"开头，写明文件与行号、改前改后。
+    3. 实测值直接抄日志，不四舍五入到看不出差异的位数（角度 1e-4 rad、
+       距离 1e-4 m、力矩 1e-3 N*m）。
+    4. 未跑的项写"未测"，不得留空、不得用推算值代替实测值。
+    5. 失败如实写：现象、报错原文、已经排除的可能、卡在哪一步。
+    6. 自检结果必须逐条写：语法/导入、字段口径、单工况冒烟、重复取数一致性。
+
+================================================================
+1. 每轮记录模板（复制这一段填）
+================================================================
+
+--- 轮次 R<n>：<一句话主题> ---
+
+1.1 改动清单
+
+  文件：
+  行号：
+  改前：
+  改后：
+  是否新增开关/参数（有则写名称、默认值、取值范围）：
+
+1.2 命令
+
+  <命令原文>
+
+1.3 结果文件
+
+  results/<文件名>（列出全部）
+
+1.4 自检
+
+  语法与导入：
+  字段口径（名称/下标/单位）：
+  单工况冒烟：
+  重复取数两次一致（逐位）：
+
+1.5 关键实测值
+
+  | 项 | 实测 | 基线 | 判据 | 结论 |
+  |---|---|---|---|---|
+
+1.6 三段 pitch 预算（仅第 0 步相关轮次填写）
+
+  | 段 | 帧区间 | 时间区间 | 角度变化 (rad) | 占比 | 备注 |
+  |---|---|---|---|---|---|
+  | T0 释放时刻已有 | | | | | |
+  | T1 收腿段 | | | | | |
+  | T2 伸腿段 | | | | | |
+  | 合计 | | | | 100% | 与触地 pitch 的差： |
+
+1.7 判据逐条结论
+
+  逐条照抄部署文件的判据表，写"通过/不通过/未测"。
+
+1.8 异常与未解释现象
+
+1.9 结论与建议（区分实测事实与推断）
+
+================================================================
+2. 轮次记录
+================================================================
+
+（自 R1 起按模板追加）
+
+================================================================
+3. 工具离线自检记录（问题排查agent）
+================================================================
+
+--- R0：`tools/pitch_budget.py` 自检（非算法轮次） ---
+
+3.1 目的
+
+    验证工具本身可用且口径正确，不评价控制效果。
+
+3.2 输入
+
+    文件：`results/JUMP131_baseline_run01.json.gz`
+    git_commit：b9e3abe（工具本身未提交）
+    config：wls / leg_input / tuned-agile，jump 0.18 m，stroke 0.12 m，1.0 s，12.0 s
+    命令：
+      PYTHONUTF8=1 PYTHONPATH=. .venv/Scripts/python.exe \
+          wheel_leg_mujoco/tools/pitch_budget.py \
+          --result wheel_leg_mujoco/results/JUMP131_baseline_run01.json.gz
+
+3.3 自检逐条
+
+    (1) 语法与导入                    通过（ast.parse + 实际运行）
+    (2) 字段口径与 8.1 表一致          通过（缺字段会报错退出；非跳跃结果已实测报错）
+    (3) 三段角度之和 = 总变化          通过，残差 0.000e+00 rad
+    (4) 每段帧数 >= 50                 通过（426 / 119 / 205）
+    (5) 驱动源归属                     通过：飞行段轮力矩恒为零；髋力矩积分符号与 d_pitch_rate 一致
+    (6) 重复取数两次一致               通过（两次运行报告逐字相同）
+
+3.4 分段（工具自动判定，写实际选用依据）
+
+    k_start = 1000（t=1.000 s，phase 首次 COMPRESS）
+    k0 = 1425（t=1.425 s，jump.phase 首次 FLIGHT）
+    k1 = 1543（t=1.543 s，leg_length_R 触底回升；
+              候选一 1607 flight_leg_ref[0] 模式切换，取先到者）
+    k2 = 1747（t=1.747 s，output_source 首次离开 flight_leg_profile）
+
+3.5 三段预算
+
+    | 段 | 帧区间 | t 区间 | d_pitch (rad) | 占比 | d_phiW_R | d_phiW_L | int_tau_hip | max\|tH\| | max\|tW\| |
+    |---|---|---|---|---|---|---|---|---|---|
+    | T0 | 1000..1425 | 1.000..1.425 | -0.0020 | 0.3% | +0.0042 | +0.0042 | +8.3318 | 72.00 | 0.362 |
+    | T1 | 1425..1543 | 1.425..1.543 | -0.3060 | 41.8% | +0.1673 | +0.1669 | -1.2545 | 72.00 | 0.000 |
+    | T2 | 1543..1747 | 1.543..1.747 | -0.4247 | 58.0% | -0.0423 | -0.0419 | -0.4139 | 74.64 | 0.000 |
+    | 合计 | | | -0.7328 | 100.0% | | | +6.6634 | | |
+
+    int_tau_hip 口径：`ctrl[1] - ctrl[3]`（左右角度关节轴向镜像）。
+
+3.6 驱动源归属（只统计飞行段 T1+T2）
+
+    实测 d_pitch_rate   = -1.401582 rad/s
+    int_tau_hip         = -1.668452 N*m*s
+    髋力矩预测           = -14.609911 rad/s（解释比例 -1042.4%，符号一致）
+    int_tau_wheel       = +0.000000 N*m*s（飞行段逐帧恒为零）
+    结论：腿部执行器为唯一驱动源。
+
+3.7 工具口径修正记录（本次自检发现）
+
+    (a) 髋反作用最初按 `ctrl[1] + ctrl[3]` 求和，结果为 ~0.003 N*m*s；
+        实际左右角度关节轴向镜像（实测 `ctrl[1] ≈ -ctrl[3]`），必须取差。已改。
+    (b) 驱动源归属最初把 T0 算进去，T0 的 +8.33 掩盖了飞行段；已改为只统计 T1+T2。
+    (c) 8.5 第 4 条原来写“误差 <10% 才吻合”，在腿摆动工况下不可达（实测解释比例约 10 倍），
+        已改成“轮力矩是否恒零 + 符号是否一致 + 解释比例量级”，不设阈值。
+
+3.8 由此得出的第一条事实结论（供第 1 步决策）
+
+    - 释放时刻机体几乎未倾（T0 只贡献 -0.0020 rad，0.3%）；
+    - 问题 99.7% 产生在飞行段，其中收腿段 41.8%、伸腿/缓冲段 58.0%；
+    - 飞行段轮力矩恒为零，pitch 全部由腿部执行器（髋角度力矩，已出现 ±72 N*m 的净力矩）驱动。
+
+    推论（标注为推论）：预倾只能改 T0 的初值，上限是一次静态偏置，
+    对 0.73 rad 的总量而言最多占 15~20%，不可能单独解决问题。
+
+
+
+
+================================================================
+第 9 节 工况 A（预倾）/ B（收腿段冻结）：实现 + 4 次运行 + 决策树
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A/B（落地 pitch 优化 第 9 节）
+
+## 9.7.1 两个开关 + 命令行 [已完成]
+
+- `SimulationConfig`：`pretilt_pitch: float = 0.0`、`freeze_phi_in_retract: bool = False`（默认值 = 关闭）；
+- 预倾：`control.mpc_stage()` 按 `pretilt_active = jump is not None and phase in {"IDLE","COMPRESS"}`
+  每拍写 `mpc.reference_pretilt`；`WheelMPC.solve()` 里两处同时加偏置：
+  pitch 通道 `reference_states[:,2] += δ`、位置通道 `reference_states[:,0] += PRETILT_COM_Z*δ`
+  （`PRETILT_COM_Z = 0.2643`，来源 9.2.3）；WBC 的 pitch 参考由这份参考带出，不另算。
+- 冻结：`control._phi_force(..., freeze_phi_in_retract)` 在 `flight_leg_profile_torque()` 里
+  只在 `mode == "rising"`（收腿段）置真，`phi_body_ref = float(world_ref)`；伸腿段不变。
+- 命令行：`--pretilt-pitch <rad>`、`--freeze-phi-retract`（`jump_diagnostic.py`）。
+- 未改任何增益/限幅/`phi_eq`/`FLIGHT_RETRACT_FLOOR`/节拍；未动第 32/33 节落地收敛逻辑。
+
+```diff
+diff --git a/Algorithm/mpc/controller.py b/Algorithm/mpc/controller.py
+index 82818c7..6bb5c65 100644
+--- a/Algorithm/mpc/controller.py
++++ b/Algorithm/mpc/controller.py
+@@ -23,6 +23,10 @@ from .trajectory import OptimizedTrajectory
+ 
+ _LOGGER = logging.getLogger(__name__)
+ 
++# 第 9.2.3 节（落地 pitch 优化 工况 A）：预倾时位置通道的等效质心高度 [m]。
++# 来源：测试方案部署文档 9.2.3 给定 com_z = 0.2643；与 settings.zmp_com_height(0.2644) 不同源，按文档取值。
++PRETILT_COM_Z = 0.2643
++
+ 
+ @dataclass(frozen=True)
+ class MPCSettings:
+@@ -223,6 +227,8 @@ class WheelMPC:
+         # 方案 B：当前生效的 MPC 髋角约束（分模式，带回落斜坡）
+         self.active_hip_limit = float(self.settings.hip_angle_limit)
+         self.planner = VelocityPlanner(self.settings.limits)
++        # 第 9.2 节：由调用方每拍写入（0.0 = 关闭），只在 IDLE/COMPRESS 窗口非零。
++        self.reference_pretilt = 0.0
+         self.fallback_gain = self._design_fallback_gain()
+         self.geometry = ContactGeometry()
+         self.consecutive_failures = 0
+@@ -699,6 +705,12 @@ class WheelMPC:
+         )
+         vector[4] = reference.yaw[0] + wrap_angle(vector[4] - reference.yaw[0])
+         reference_states = reference.states(self.model.state_dim)
++        if self.reference_pretilt:
++            # 第 9.2.3 节：预倾偏置两处一致——pitch 通道 +δ，位置通道 +com_z*δ。
++            # WBC 采样的 pitch 参考由这份参考带出，不另算一套。
++            reference_states[:, 2] = reference_states[:, 2] + self.reference_pretilt
++            reference_states[:, 0] = (reference_states[:, 0]
++                                      + PRETILT_COM_Z * self.reference_pretilt)
+         if self.settings.zmp_reference:
+             self._apply_zmp_reference(reference_states, reference.acceleration)
+         else:
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/control.py b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+index 4916ad8..ca9f531 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -102,13 +102,19 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
+     return np.asarray(forces, dtype=float)
+ 
+ 
+-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
++def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
++               freeze_phi_in_retract: bool = False) -> np.ndarray:
+     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
+     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
+     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
+     ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    phi_body_ref = phi_body_reference(world_ref, pitch)
++    # 第 9.3.2 节（工况 B）：收腿段把机体系参考直接取世界系参考（去掉 + pitch），
++    # 即不再为"机体当前俯仰"补偿腿角，从而减小收腿段对 pitch 的反作用。
++    if freeze_phi_in_retract:
++        phi_body_ref = float(world_ref)
++    else:
++        phi_body_ref = phi_body_reference(world_ref, pitch)
+     forces = []
+     for side in range(2):
+         index = 2 * side + 1
+@@ -127,7 +133,8 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
+ 
+ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                               leg_length_min, leg_length_max, nominal_length,
+-                              retract_state=None, dt=0.0, pitch=0.0):
++                              retract_state=None, dt=0.0, pitch=0.0,
++                              freeze_phi_in_retract: bool = False):
+     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
+ 
+     状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
+@@ -186,7 +193,10 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
+     # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
+     # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
+     phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
+-    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
++    # 冻结只在收腿段（mode == "rising"）生效，伸腿段仍走世界系补偿。
++    freeze_now = bool(freeze_phi_in_retract and mode == "rising")
++    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
++                      freeze_phi_in_retract=freeze_now)
+            + FEEDFORWARD_COUPLING * forces) * phi_ramp
+     phi_elapsed += float(dt)
+     torque = _leg_wrench_torque(dynamics, forces, phi)
+@@ -235,12 +245,15 @@ class WbcOutcome:
+ 
+ 
+ def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
+-              timings: dict, counters: dict):
++              timings: dict, counters: dict, jump=None, pretilt_pitch: float = 0.0):
+     """控制级 A：求解一次 MPC，返回 ``(solution, 本拍指令)``。
+ 
+     与 WBC 无关：不等 WBC、不读 WBC 的力矩。
+     """
+     current = command(time_s) if callable(command) else command
++    # 第 9.2.2 节：生效窗口复用相位（IDLE/COMPRESS），释放即撤销，不新增时长常数。
++    pretilt_active = (jump is not None and jump.phase.value in {"IDLE", "COMPRESS"})
++    control.mpc.reference_pretilt = float(pretilt_pitch) if pretilt_active else 0.0
+     start = time.perf_counter()
+     solution = control.solve_mpc(feedback.state, current, feedback.decision,
+                                  feedback_accum.consume(feedback.state))
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 238adad..e00e102 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -295,7 +295,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             solution, sim._command = mpc_stage(
+                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                 feedback=feedback, command=command,
+-                timings=sim.timings, counters=sim.counters)
++                timings=sim.timings, counters=sim.counters,
++                jump=jump_command, pretilt_pitch=sim.config.pretilt_pitch)
+ 
+         # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
+         # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
+@@ -422,7 +423,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
+                 sim.jump.config.leg_length_nominal,
+                 retract_state=flight_leg_ref, dt=float(m.opt.timestep),
+-                pitch=float(feedback.state.pitch))
++                pitch=float(feedback.state.pitch),
++                freeze_phi_in_retract=bool(sim.config.freeze_phi_in_retract))
+         elif flight_retract:
+             leg_now = sim.dyn.leg_state()
+             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index 3220fa6..54241c2 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -289,6 +289,11 @@ class SimulationConfig:
+     jump_height: float | None = None
+     jump_stroke: float = 0.12
+     jump_time: float = 1.0                 # [s] 起跳指令时刻
++    # 第 9.2 节（落地 pitch 优化 工况 A）：起跳前机体预倾角 [rad]。0.0 = 完全关闭，
++    # 默认值必须让 baseline 逐位不变。生效窗口复用相位（IDLE/COMPRESS），不新增时长常数。
++    pretilt_pitch: float = 0.0
++    # 第 9.3 节（工况 B）：收腿段（飞行剖面 mode == "rising"）把世界系 phi 参考冻结。
++    freeze_phi_in_retract: bool = False
+     wbc_gains: WbcGains = field(default_factory=WbcGains)
+     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
+     # 可达 [−0.784, +0.674]，相对 φ0 = −0.1263 即 −0.658 / +0.800，取 0.65（不超可达范围）。
+diff --git a/wheel_leg_mujoco/tools/jump_diagnostic.py b/wheel_leg_mujoco/tools/jump_diagnostic.py
+index 779169e..330ac35 100644
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++++ b/wheel_leg_mujoco/tools/jump_diagnostic.py
+@@ -186,13 +186,16 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
+              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
+              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
+              command_velocity=0.5, command_hold=3.0,
+-             command_yaw_rate=0.0, command_yaw_hold=None):
++             command_yaw_rate=0.0, command_yaw_hold=None,
++             pretilt_pitch=0.0, freeze_phi_in_retract=False):
+     RESULTS.mkdir(exist_ok=True)
+     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
+     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
+     setup_logging(default_level="INFO", log_file=log_path)
+     config = SimulationConfig(jump_height=jump_height, jump_stroke=jump_stroke,
+-                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
++                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit,
++                              pretilt_pitch=float(pretilt_pitch),
++                              freeze_phi_in_retract=bool(freeze_phi_in_retract))
+     sim = Gbc486MpcWbcSimulation(config)
+     frames = []
+     sim.run(_command(case, command_velocity, command_hold,
+@@ -283,6 +286,11 @@ def main():
+     parser.add_argument("--jump-stroke", type=float, default=0.12)
+     parser.add_argument("--jump-time", type=float, default=1.0)
+     parser.add_argument("--no-jump", action="store_true")
++    # 第 9.2 / 9.3 节：落地 pitch 优化的两个开关（默认值让 baseline 逐位不变）。
++    parser.add_argument("--pretilt-pitch", type=float, default=0.0,
++                        help="工况A：起跳前机体预倾角 [rad]，0.0 = 关闭")
++    parser.add_argument("--freeze-phi-retract", action="store_true",
++                        help="工况B：收腿段（rising）冻结世界系 phi 参考")
+     parser.add_argument("--explicit-jump-reference", action="store_true")
+     parser.add_argument("--compression-only", action="store_true",
+                         help="WP5：压缩完成即停止，不执行 THRUST/FLIGHT/LANDING")
+@@ -333,7 +341,9 @@ def main():
+              command_velocity=args.command_velocity,
+              command_yaw_rate=args.command_yaw_rate,
+              command_yaw_hold=args.command_yaw_hold,
+-             command_hold=args.command_hold)
++             command_hold=args.command_hold,
++             pretilt_pitch=args.pretilt_pitch,
++             freeze_phi_in_retract=args.freeze_phi_retract)
+ 
+ 
+ if __name__ == "__main__":
+```
+
+## 9.7.2 实现门控数据（9.2.4）[通过]
+
+| 运行 | 起跳前一帧（t=0.999 s）实测 pitch | 与 δ 偏差 |
+|---|---|---|
+| baseline（无开关） | -0.0000 | — |
+| `--pretilt-pitch 0.0` | -0.0000 | — |
+| `--pretilt-pitch +0.10` | **+0.1000** | **0%** |
+| `--pretilt-pitch -0.10` | **-0.1000** | **0%** |
+
+偏差 <=20% -> 实现成立，工况 A 有效。（COMPRESS 首帧同样是 +0.1000 / -0.1000。）
+
+## 9.7.3 运行文件 + 9.4 汇总表
+
+| 运行 | 文件 |
+|---|---|
+| baseline（无开关） | `results/P90_off_baseline_run01.json.gz` |
+| 预倾 0.0 | `results/P90_zero_baseline_run01.json.gz` |
+| 预倾 +0.10 | `results/P90_pos_baseline_run01.json.gz` |
+| 预倾 -0.10 | `results/P90_neg_baseline_run01.json.gz` |
+| 冻结 T1 | `results/P90_freeze_baseline_run01.json.gz` |
+
+命令（五次只有开关不同）：
+`tools/jump_diagnostic.py --case baseline --duration 6.0 --jump-height 0.18 --jump-stroke 0.12
+--jump-time 1.0 --leg-length-compression --leg-length-thrust --flight-zero-torque
+--flight-leg-retract --flight-leg-extend [--pretilt-pitch X | --freeze-phi-retract]`
+
+| 工况 | 起跳前 pitch | 触地 pitch | max\|pitch\| | 冲击峰 | gap | 落地位移 | 后向回退 | 触地 phi_w 偏移 | Δv_x |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | -0.0000 | **-0.7328** | 0.7328 | 844 N | 0.2218 | +0.2359* | 0.2359 | **+0.1102** | -0.1018 |
+| 预倾 +0.10 | +0.1000 | **ABORT** | — | — | — | — | — | — | — |
+| 预倾 -0.10 | -0.1000 | -0.7339 | 0.7339 | 840 N | 0.2248 | +0.2689* | 0.2689 | +0.1087 | -0.1172 |
+| 冻结 T1 | -0.0000 | -0.7389 | 0.7389 | 859 N | 0.2276 | +0.2357* | 0.2357 | **+0.1061** | -0.1087 |
+
+\* 落地位移列按"触地→末值"给绝对值（原地跳为后退，符号见后向回退列）。
+
+**预倾 +0.10 中止**：`跳跃中止（t=1.638 s）：leg_length_out_of_range:R(0.4316 m, range [0.114, 0.430])`
+—— 前倾（低头）方向把压缩段的右腿推到 0.4316 m 越界，本工况没能起跳。
+
+冻结工况的 T1/T2 分解（`pitch_budget.py`，工具在 baseline 上复现 9.1 的参考值，自检通过）：
+
+| 段 | baseline | 冻结 T1 | 变化 |
+|---|---|---|---|
+| T0 | -0.0020 | -0.0020 | 0 |
+| **T1 收腿** | **-0.3060** | **-0.2742** | **降幅 10.4%** |
+| T2 伸腿/缓冲 | -0.4247 | -0.4627 | 恶化 -0.0380 |
+| 合计 | -0.7328 | -0.7389 | 恶化 -0.0061 |
+
+代价：触地世界系腿角偏移 +0.1102 -> **+0.1061**（略小），冲击峰 844 -> 859 N，gap 0.2218 -> 0.2276。
+
+预倾 -0.10 的分解：T0 **+0.1095**（压缩段把 -0.10 的抬头反向推到 +0.11）、T1 -0.3189、T2 -0.4245，
+合计 -0.6340；加上起跳前 -0.1000 得到触地 -0.7340（与实测 -0.7339 一致）。
+
+## 9.7.4 `d(theta_land)/d(delta)` 实测值 + 符号约定（8.7）
+
+**符号约定（写进报告，后续沿用）**
+
+| 项 | 约定 | 验证 |
+|---|---|---|
+| pitch 正方向 | **pitch > 0 = 低头（前倾）**；pitch < 0 = 抬头 | 触地 pitch=-0.7328 时用四元数算出机体系前向轴竖直分量 **+0.6689**（抬头） |
+| phi 与 pitch | **phi_world = leg_state[1] - pitch** | 地面静止帧：-0.1262 ≈ `phi_eq(0.28) = -0.1263` |
+| 髋力矩正方向 | `ctrl[1]`/`ctrl[3]` 为正时 **phi_world 减小** | T1 段 ∫tau_hip_net dt = **-1.251 N·m·s** 对应 d_phi_world_R = **+0.1663** |
+
+**斜率**：`+0.10` 中止，无法用 ±0.10 两点差分。可用的两点为 `δ=0`（-0.7328）与 `δ=-0.10`（-0.7339）：
+
+  d(theta_land)/d(delta) = (-0.7339 - (-0.7328)) / (-0.10 - 0) = **+0.011**
+
+即斜率**约等于 0**（1.1%），说明世界系 PD 在压缩段就把预倾吃掉了——直接证据：`-0.10` 运行时
+pitch 从 -0.1000 经 COMPRESS/COMPRESS_BRAKE 到释放前变成 **+0.0030**（T0 段 d_pitch = +0.1095）。
+
+| Δv_x | +0.10 | -0.10 |
+|---|---|---|
+| 起飞水平速度增量 | 中止，无数据 | -0.1172 m/s |
+
+## 9.7.5 决策树结论
+
+按 9.5 逐条对照：
+
+1. 第一支（≈+1 且 |Δv_x| <=0.2）**不成立**——斜率 +0.011；
+2. **第二支成立：`d(theta_land)/d(delta) ≈ 0`（+0.011），世界系 PD 把预倾吃掉了**，
+   预倾路线作废，按决策树转工况 B；
+3. 第三支要求"工况 B 使 T1 的 d_pitch 降 >=30% 且触地腿角偏移可落"，实测 T1 只降 **10.4%**
+   （-0.3060 -> -0.2742），且 T2 恶化 -0.038、总线恶化 -0.0061 -> **第三支不成立**；
+4. 因此落到**第四支：两者都无效，停下重看 T2（占 58%）那一段**，不换方向硬试。
+
+补充事实（供下一轮定位）：预倾 +0.10 会在压缩段把右腿推到 0.4316 m 越界中止；这说明
+"低头方向"的预倾在当前压缩逻辑下不可用（余量只有 0.430 上限，越界 1.6 mm）。
+
+## 9.7.6 回归结果
+
+| 项 | 结果 |
+|---|---|
+| `--pretilt-pitch 0.0` vs 无开关 | **逐位相同**（`dqpos=dqvel=dctrl=0.000e+00`） |
+| T1 vs 第 33 节基线（默认开关） | `dqpos=dqvel=dctrl=0.000e+00` |
+| CMD1 vs 第 33 节基线 | `0.000e+00` |
+| 跳跃 6 项（JUMP9 vs JUMP133） | `0.000e+00`；间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0 |
+| 重复性（8.5 第 5 条） | `P90_off` 与 `P90_zero` 同配置不同命令行：`dqpos=dqvel=dctrl=0.000e+00` |
+| `pitch_budget.py` 自检 | baseline 输出 T0 -0.0020 / T1 -0.3060 / T2 -0.4247，与 9.1 参考值完全一致 |
+
+## 结论
+
+1. 两个开关实现完成、门控通过（实测 pitch 与 δ 偏差 0%）、默认值逐位不改变任何既有结果。
+2. 预倾路线数据判定为**无效**：斜率 +0.011（预倾在压缩段被吃掉），且 +0.10 会越界中止。
+3. 收腿冻结只把 T1 降 **10.4%**（要求 >=30%），并让 T2 变差，总触地 pitch 反而从 -0.7328 变成 -0.7389。
+4. 按 9.5 决策树落到**第四支：停下重看 T2（58%）**。
+
+
+
+================================================================
+第 10 节 工况 A2（按轮圈腿重做预倾）：闸门通过，预倾对触地 pitch 几乎无影响
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A2（落地 pitch 优化 第 10 节）
+
+## 10.8.1 删除重复通道，改用现成斜坡 [已完成]
+
+- 删除 `Algorithm/mpc/controller.py` 的 `PRETILT_COM_Z`、`self.reference_pretilt` 与 `solve()` 里
+  "pitch 通道 + 位置通道"整段（第 9 节的重复通道已彻底移除，`grep reference_pretilt` = 0 命中）；
+- `control.mpc_stage()` 改为写现成通道：
+  `control.mpc.pitch_bias_target = δ if pretilt_active else 0.0`、`control.mpc.pitch_bias_rate = PRELOAD_RATE`；
+- 位置通道不再单独加偏置（按 10.4.1 要求）。
+- 四个参考实现常量写进 `control.py` 顶部并注明来源：
+  `PRELOAD_RATE=3.0`（jump.py:44）、`PREPARE_TOLERANCE=0.087`（jump.py:42）、
+  `PREPARE_DWELL=0.004`（jump.py:43）、`PREPARE_TIMEOUT=1.5`（jump.py:45），
+  注释标明"轮圈腿参考实现取值，未在本模型验证，本轮不得修改"。
+
+```diff
+diff --git a/Algorithm/mpc/controller.py b/Algorithm/mpc/controller.py
+index 82818c7..f34d61a 100644
+--- a/Algorithm/mpc/controller.py
++++ b/Algorithm/mpc/controller.py
+@@ -24,6 +24,7 @@ from .trajectory import OptimizedTrajectory
+ _LOGGER = logging.getLogger(__name__)
+ 
+ 
++
+ @dataclass(frozen=True)
+ class MPCSettings:
+     """MPC 的全部可调量。默认值来自 docs/MPC-WBC方案.md §3 与 §6 的数值汇总。"""
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/control.py b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+index 4916ad8..45ecc23 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -33,6 +33,12 @@ from Algorithm.wbc import ActuatorLimits  # noqa: E402
+ 
+ _LOGGER = get_logger(__name__)
+ 
++# 第 10.5 节参数来源：以下四个是**轮圈腿参考实现取值，未在本模型验证**，本轮不得修改。
++PRELOAD_RATE = 3.0          # [rad/s] 来源 Algorithm/jump.py:44（该处注释记载 6 rad/s 时失稳）
++PREPARE_TOLERANCE = 0.087   # [rad]   来源 Algorithm/jump.py:42（5 度）
++PREPARE_DWELL = 0.004       # [s]     来源 Algorithm/jump.py:43（一个 WBC 周期）
++PREPARE_TIMEOUT = 1.5       # [s]     来源 Algorithm/jump.py:45
++
+ # WP8（2026-10-09）：压缩/制动/释放相位让质心竖直任务在 WLS 中占主导的具名权重。
+ # 来源：用户 2026-10-09 批准（WP8 部署文档第三节）。只在跳跃相位覆盖，GROUND 不生效。
+ JUMP_COM_VERTICAL_WEIGHT = 5000.0
+@@ -102,13 +108,19 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
+     return np.asarray(forces, dtype=float)
+ 
+ 
+-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
++def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
++               freeze_phi_in_retract: bool = False) -> np.ndarray:
+     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
+     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
+     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
+     ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    phi_body_ref = phi_body_reference(world_ref, pitch)
++    # 第 9.3.2 节（工况 B）：收腿段把机体系参考直接取世界系参考（去掉 + pitch），
++    # 即不再为"机体当前俯仰"补偿腿角，从而减小收腿段对 pitch 的反作用。
++    if freeze_phi_in_retract:
++        phi_body_ref = float(world_ref)
++    else:
++        phi_body_ref = phi_body_reference(world_ref, pitch)
+     forces = []
+     for side in range(2):
+         index = 2 * side + 1
+@@ -127,7 +139,8 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
+ 
+ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                               leg_length_min, leg_length_max, nominal_length,
+-                              retract_state=None, dt=0.0, pitch=0.0):
++                              retract_state=None, dt=0.0, pitch=0.0,
++                              freeze_phi_in_retract: bool = False):
+     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
+ 
+     状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
+@@ -186,7 +199,10 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
+     # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
+     # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
+     phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
+-    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
++    # 冻结只在收腿段（mode == "rising"）生效，伸腿段仍走世界系补偿。
++    freeze_now = bool(freeze_phi_in_retract and mode == "rising")
++    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
++                      freeze_phi_in_retract=freeze_now)
+            + FEEDFORWARD_COUPLING * forces) * phi_ramp
+     phi_elapsed += float(dt)
+     torque = _leg_wrench_torque(dynamics, forces, phi)
+@@ -235,12 +251,17 @@ class WbcOutcome:
+ 
+ 
+ def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
+-              timings: dict, counters: dict):
++              timings: dict, counters: dict, jump=None, pretilt_pitch: float = 0.0):
+     """控制级 A：求解一次 MPC，返回 ``(solution, 本拍指令)``。
+ 
+     与 WBC 无关：不等 WBC、不读 WBC 的力矩。
+     """
+     current = command(time_s) if callable(command) else command
++    # 第 10.4.1 / 10.4.3 节：生效窗口复用相位（IDLE/COMPRESS），释放（进 THRUST）时归零，
++    # 由 pitch_bias_rate 自然斜坡回落；压缩段内不得归零。走仓库现成的斜坡通道（轮圈腿同款）。
++    pretilt_active = (jump is not None and jump.phase.value in {"IDLE", "COMPRESS"})
++    control.mpc.pitch_bias_target = float(pretilt_pitch) if pretilt_active else 0.0
++    control.mpc.pitch_bias_rate = PRELOAD_RATE
+     start = time.perf_counter()
+     solution = control.solve_mpc(feedback.state, current, feedback.decision,
+                                  feedback_accum.consume(feedback.state))
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 238adad..03be053 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -64,6 +64,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
+                           flight_leg_profile_torque, landing_buffer_torque)
+     from .jump import JumpObservation, LIFTOFF_GAP
++    # 第 10.5 节：以下四个常量是轮圈腿参考实现取值（Algorithm/jump.py:42-45），
++    # 未在本模型验证，本轮不得修改。
++    from .control import (PRELOAD_RATE, PREPARE_TOLERANCE, PREPARE_DWELL,  # noqa: F401
++                          PREPARE_TIMEOUT)
+     from Algorithm.contact_state import JumpPhaseHint
+     from Algorithm.mpc.trajectory import MotionSample
+     from . import robot as R
+@@ -92,6 +96,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     previous_com_time = None
+     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
++    # 第 10.4.2 节（预倾闸门）：settled 连续计时、触发挂起起点、超时计数。
++    pretilt_dwell = 0.0
++    pretilt_pending_since = None
++    pretilt_timeouts = 0
+     landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
+     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
+     feedback = None              # 采样级：最近一拍反馈
+@@ -166,7 +174,47 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+         #   这里**不加** ``phase == "IDLE"``（上一版就是在这里改坏的）。
+         _jump_requested = bool(sim._jump_requested)
+         _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
++        # 第 10.4.2 节（预倾闸门，本节核心）：到角度才允许压缩，压缩不与预倾抢姿态。
++        # 阈值/驻留/超时全部来自轮圈腿参考实现（见上方常量来源注释），本轮不改。
++        _pretilt_cmd = float(sim.config.pretilt_pitch)
++        _pitch_now = None if feedback is None else float(feedback.state.pitch)
++        pretilt_settled = (_pretilt_cmd == 0.0
++                           or (_pitch_now is not None
++                               and abs(_pitch_now - _pretilt_cmd) <= PREPARE_TOLERANCE))
++        if _pretilt_cmd == 0.0 or pretilt_settled:
++            pretilt_dwell += float(m.opt.timestep)
++        else:
++            pretilt_dwell = 0.0
++        _bias_done = abs(float(sim.mpc._pitch_bias) - _pretilt_cmd) <= PREPARE_TOLERANCE  # noqa: SLF001
++        pretilt_ready = (_pretilt_cmd == 0.0
++                         or (pretilt_settled and pretilt_dwell + 1e-12 >= PREPARE_DWELL and _bias_done))
+         if sim.jump is not None and (_timed_due or _jump_requested):
++            if not pretilt_ready:
++                # 挂起本次触发（不消费请求、不推进定时锁），超时则主动中止。
++                if pretilt_pending_since is None:
++                    pretilt_pending_since = float(d.time)
++                    _LOGGER.info("预倾闸门：触发已挂起，等待 pitch 到位（目标 %.3f rad，实测 %.3f，"
++                                 "t=%.3f s）", _pretilt_cmd, float(_pitch_now or 0.0), float(d.time))
++                if float(d.time) - pretilt_pending_since >= PREPARE_TIMEOUT:
++                    sim.jump.reset_to_idle()
++                    pretilt_timeouts += 1
++                    sim.counters["pretilt_gate_timeouts"] = pretilt_timeouts
++                    _LOGGER.warning("预倾闸门超时：本次跳跃中止（目标 %.3f rad，实测 %.3f rad，"
++                                    "等待 %.3f s）", _pretilt_cmd, float(_pitch_now or 0.0),
++                                    float(d.time) - pretilt_pending_since)
++                    sim._jump_requested = False
++                    if _timed_due:
++                        sim._jump_started = True     # 定时来源本次作废，避免无限重试
++                    pretilt_pending_since = None
++                _timed_due = False
++                _jump_requested = False
++                goto_start = False
++            else:
++                goto_start = True
++                pretilt_pending_since = None
++        else:
++            goto_start = False
++        if sim.jump is not None and goto_start and (_timed_due or _jump_requested):
+             sim._jump_requested = False          # 请求已被消费
+             if _timed_due:
+                 sim._jump_started = True         # 只由定时来源推进该锁
+@@ -295,7 +343,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             solution, sim._command = mpc_stage(
+                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                 feedback=feedback, command=command,
+-                timings=sim.timings, counters=sim.counters)
++                timings=sim.timings, counters=sim.counters,
++                jump=jump_command, pretilt_pitch=sim.config.pretilt_pitch)
+ 
+         # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
+         # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
+@@ -422,7 +471,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
+                 sim.jump.config.leg_length_nominal,
+                 retract_state=flight_leg_ref, dt=float(m.opt.timestep),
+-                pitch=float(feedback.state.pitch))
++                pitch=float(feedback.state.pitch),
++                freeze_phi_in_retract=bool(sim.config.freeze_phi_in_retract))
+         elif flight_retract:
+             leg_now = sim.dyn.leg_state()
+             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+@@ -650,6 +700,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 "mpc_called": bool(mpc_called),
+                 "mpc_due": bool(sim.timing.mpc_due(step)),
+                 "landing_refresh": bool(landing_refresh),
++                # 第 10.4.4 节：预倾闸门的只读记录（不参与任何控制计算）。
++                "pretilt_pitch_cmd": float(sim.config.pretilt_pitch),
++                "pretilt_settled": bool(pretilt_settled),
++                "pitch_bias_now": float(sim.mpc._pitch_bias),  # noqa: SLF001
+                 "wbc_due": bool(sim.timing.wbc_due(step)),
+                 "mpc_solution": None if solution is None else {
+                     "fallback": bool(solution.fallback),
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index 3220fa6..4ece8b3 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -289,6 +289,11 @@ class SimulationConfig:
+     jump_height: float | None = None
+     jump_stroke: float = 0.12
+     jump_time: float = 1.0                 # [s] 起跳指令时刻
++    # 第 9.2 节（落地 pitch 优化 工况 A）：起跳前机体预倾角 [rad]。0.0 = 完全关闭，
++    # 默认值必须让 baseline 逐位不变。生效窗口复用相位（IDLE/COMPRESS），不新增时长常数。
++    pretilt_pitch: float = 0.0
++    # 第 9.3 节（工况 B）：收腿段（飞行剖面 mode == "rising"）把世界系 phi 参考冻结。
++    freeze_phi_in_retract: bool = False
+     wbc_gains: WbcGains = field(default_factory=WbcGains)
+     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
+     # 可达 [−0.784, +0.674]，相对 φ0 = −0.1263 即 −0.658 / +0.800，取 0.65（不超可达范围）。
+@@ -351,7 +356,9 @@ class Gbc486MpcWbcSimulation:
+         self._jump_requested = False         # 外部（view 空格）请求起跳；由 loop 消费
+         self.records: list[dict] = []
+         self.stop_reason = None
+-        self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
++        # 第 10.7.3 节：预倾闸门超时导致的是"主动中止"，单独计数，不混入故障 ABORT。
++        self.counters = dict(pretilt_gate_timeouts=0,
++                             mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
+                              wbc_clip=0, wbc_infeasible=0, mpc_ff_frames=0)
+         # 任务名随 wbc.py 的任务集变化（现在是每条腿单独的 length_*/angle_*），
+         # 用动态字典而不是写死的键，避免 KeyError。
+```
+
+## 10.8.2 预倾闸门 + 超时中止 + 三个只读字段 [已完成]
+
+- 闸门：`pretilt_settled = |pitch − δ| <= PREPARE_TOLERANCE`；`dwell` 按物理步累计 >= `PREPARE_DWELL`；
+  且 `|pitch_bias_now − δ| <= PREPARE_TOLERANCE`；三者同时满足才允许进入 COMPRESS。
+- 未就绪时**挂起触发**（不消费请求、不推进定时锁）；超过 `PREPARE_TIMEOUT=1.5 s` 仍不满足 ->
+  `jump.reset_to_idle()` + WARN（打印目标/实测/等待时长）+ `counters["pretilt_gate_timeouts"] += 1`，
+  定时来源本次作废。未降容差、未硬触发。
+- 窗口：`IDLE + COMPRESS` 内 `pitch_bias_target` 保持 δ（压缩段不归零），进 THRUST 归零由斜坡回落。
+- 只读字段：`pretilt_pitch_cmd`、`pretilt_settled`、`pitch_bias_now`（读 `mpc._pitch_bias`）。
+
+## 10.8.3 五次运行结果文件名
+
+| # | δ | 文件 |
+|---|---|---|
+| 1 | 0.00 | `results/P10_000_baseline_run01.json.gz` |
+| 2 | 0.20 | `results/P10_020_baseline_run01.json.gz` |
+| 3 | 0.35 | `results/P10_035_baseline_run01.json.gz` |
+| 4 | 0.50 | `results/P10_050_baseline_run01.json.gz` |
+| 5 | 0.10 | `results/P10_010_baseline_run01.json.gz` |
+
+命令与既有 baseline 完全一致，只多 `--pretilt-pitch <δ>`。
+
+## 10.8.4 闸门自检数据（10.7.1）
+
+| δ | 起跳前一帧实测 pitch | 与 δ 偏差 | `pitch_bias_now` | 压缩前 settled 连续时长 | 闸门超时 |
+|---|---|---|---|---|---|
+| 0.00 | -0.0000 | -0.0000 | +0.0000 | 1.000 s | 0 |
+| 0.10 | **+0.1000** | **-0.0000** | **+0.1000** | 0.884 s | 0 |
+| 0.20 | **+0.1999** | **-0.0001** | **+0.2000** | 0.858 s | 0 |
+| 0.35 | **+0.3499** | **-0.0001** | **+0.3500** | 0.825 s | 0 |
+| 0.50 | **+0.4999** | **-0.0001** | **+0.5000** | 0.796 s | 0 |
+
+偏差全部 <=0.0001 rad（容差 0.087），`pitch_bias_now` 每次都精确到目标 -> **闸门通过，本轮有效**。
+
+## 10.8.5 `d(theta_land)/d(delta)` 与可达上限
+
+| δ | 触地 pitch | max\|pitch\| | 冲击峰 | gap | 后向回退 | 触地 phi_w 偏移 | Δv_x |
+|---|---|---|---|---|---|---|---|
+| 0.00 | -0.7328 | 0.7328 | 844 N | 0.2218 | 0.2359 | +0.1102 | -0.1018 |
+| 0.10 | **ABORT**（`leg_length_out_of_range:R 0.4304 m` @1.637 s） | — | — | — | — | — | — |
+| 0.20 | **ABORT**（`leg_length_out_of_range:R 0.4307 m` @1.638 s） | — | — | — | — | — | — |
+| 0.35 | -0.7340 | 0.7340 | 861 N | 0.2209 | 0.2025 | +0.1102 | -0.0424 |
+| 0.50 | -0.7294 | 0.7294 | 856 N | 0.2175 | 0.1928 | +0.1096 | -0.0224 |
+
+斜率（10.7.2 要求用 0.20 与 0.50 两点，但 **0.20 运行中止**，无法直接计算）：
+
+| 两点 | dθ_land/dδ |
+|---|---|
+| 0.20 vs 0.50（规格要求） | **无法计算**（δ=0.20 中止，无触地数据） |
+| 0.35 vs 0.50（可用点） | **+0.0307** |
+| 0.00 vs 0.50 | +0.0068 |
+
+结论：斜率**明显小于 1**（0.03 量级），触地 pitch 在 -0.729 ~ -0.734 之间基本不变。
+按 10.7.2 的"明显小于 1 -> 报值后停下，不自行加码"执行，未改任何参数。
+
+**可达上限**：δ=0.50 可以直接到位并保持（起跳前 +0.4999、bias +0.5000），
+所以"预倾上限远小于 0.5"**不成立**；真正的限制出现在**压缩段**：
+δ=0.10 / 0.20 在 COMPRESS_BRAKE 阶段把右腿推到 0.4304 / 0.4307 m（上限 0.430，超 0.4~0.7 mm）而中止。
+δ=0.35 / 0.50 反而能完成起跳——中止与否对 δ 不单调，这一点与直觉不符，属实测事实，一并报出。
+
+## 10.8.6 回归与 ABORT 分类
+
+| 项 | 结果 |
+|---|---|
+| baseline（δ=0.00） vs 无开关（JUMP9） | `dqpos=dqvel=dctrl=0.000e+00` |
+| T10 vs T9（零输入 12 s） | `0.000e+00` |
+| CMD10 vs CMD9（0.5 m/s 3 s） | `0.000e+00` |
+| JUMP10 vs JUMP9（原地跳 12 s） | `0.000e+00` |
+
+ABORT 分类（10.7.3 要求单列）：
+
+| 类型 | 次数 | 详情 |
+|---|---|---|
+| **闸门超时主动中止** | **0**（5 次运行全部 0） | `counters["pretilt_gate_timeouts"]` 已在 `simulation.py` 初始化为 0，并写入 summary |
+| 故障 ABORT | 2（δ=0.10、0.20） | `leg_length_out_of_range:R`，0.4304 / 0.4307 m，发生在 COMPRESS_BRAKE |
+| 其他 ABORT | 0 | — |
+
+## 结论
+
+1. 第 9 节工况 A 的四个结构性缺陷已按 10.4 修掉：重复通道删除、改用 3.0 rad/s 斜坡通道、
+   加闸门（到角度才压缩）、闸门超时单独计数。闸门数据 5/5 通过（偏差 <=0.0001 rad）。
+2. 预倾现在**真的能做到并保持** δ=0.50 rad，但**触地 pitch 几乎不变**（-0.7328 -> -0.7294），
+   斜率 +0.03，说明第 9 节"被吃掉"的结论在修好实现后依然成立——不是实现问题，是飞行段把预倾抵消了。
+3. 小角度（0.10 / 0.20）在压缩段因右腿越界中止（超上限 0.4~0.7 mm）；0.35 / 0.50 能完成。
+4. 按 10.7.2，本轮到此为止：**报值停下，不加码**。预倾路线对触地 pitch 无效，
+   下一步应回到第 9.5 决策树的第四支（重看 T2，占 58%）。
+
+
+
+================================================================
+第 11 节 工况 A2 第二轮：根因 A 已修好（pitch 在压缩段保持），但世界系腿角被预倾拖偏
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A3（落地 pitch 优化 第 11 节）
+
+## 11.8.1 `wbc_stage` 增加 `pitch_bias_target` 并在 `sample is None` 分支使用 [已完成]
+
+- `wbc.py::tasks()` 新增 `pitch_bias_target: float = 0.0`；
+  `sample is None` 分支由 `reference[2] = 0.0` 改为 `reference[2] = float(pitch_bias_target or 0.0)`
+  （`reference[3]` 仍为 0），WBC 内部不另算一份；
+- `control.wbc_stage()` 新增同名参数并透传给 `tasks.tasks()`；
+- `loop.py` 读 `sim.mpc.pitch_bias_target` 传入；
+- 默认 0.0 -> baseline 逐位不变（见 11.8.3）。
+
+## 11.8.2 `pretilt_active` 窗口补 `COMPRESS_BRAKE` [已完成]
+
+`{"IDLE", "COMPRESS", "COMPRESS_BRAKE"}`；进 THRUST 归零由斜坡自然回落。
+
+```diff
+diff --git a/Algorithm/mpc/controller.py b/Algorithm/mpc/controller.py
+index 82818c7..f34d61a 100644
+--- a/Algorithm/mpc/controller.py
++++ b/Algorithm/mpc/controller.py
+@@ -24,6 +24,7 @@ from .trajectory import OptimizedTrajectory
+ _LOGGER = logging.getLogger(__name__)
+ 
+ 
++
+ @dataclass(frozen=True)
+ class MPCSettings:
+     """MPC 的全部可调量。默认值来自 docs/MPC-WBC方案.md §3 与 §6 的数值汇总。"""
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/control.py b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+index 4916ad8..05d4a45 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -33,6 +33,12 @@ from Algorithm.wbc import ActuatorLimits  # noqa: E402
+ 
+ _LOGGER = get_logger(__name__)
+ 
++# 第 10.5 节参数来源：以下四个是**轮圈腿参考实现取值，未在本模型验证**，本轮不得修改。
++PRELOAD_RATE = 3.0          # [rad/s] 来源 Algorithm/jump.py:44（该处注释记载 6 rad/s 时失稳）
++PREPARE_TOLERANCE = 0.087   # [rad]   来源 Algorithm/jump.py:42（5 度）
++PREPARE_DWELL = 0.004       # [s]     来源 Algorithm/jump.py:43（一个 WBC 周期）
++PREPARE_TIMEOUT = 1.5       # [s]     来源 Algorithm/jump.py:45
++
+ # WP8（2026-10-09）：压缩/制动/释放相位让质心竖直任务在 WLS 中占主导的具名权重。
+ # 来源：用户 2026-10-09 批准（WP8 部署文档第三节）。只在跳跃相位覆盖，GROUND 不生效。
+ JUMP_COM_VERTICAL_WEIGHT = 5000.0
+@@ -102,13 +108,19 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
+     return np.asarray(forces, dtype=float)
+ 
+ 
+-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
++def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
++               freeze_phi_in_retract: bool = False) -> np.ndarray:
+     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
+     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
+     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
+     ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    phi_body_ref = phi_body_reference(world_ref, pitch)
++    # 第 9.3.2 节（工况 B）：收腿段把机体系参考直接取世界系参考（去掉 + pitch），
++    # 即不再为"机体当前俯仰"补偿腿角，从而减小收腿段对 pitch 的反作用。
++    if freeze_phi_in_retract:
++        phi_body_ref = float(world_ref)
++    else:
++        phi_body_ref = phi_body_reference(world_ref, pitch)
+     forces = []
+     for side in range(2):
+         index = 2 * side + 1
+@@ -127,7 +139,8 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
+ 
+ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                               leg_length_min, leg_length_max, nominal_length,
+-                              retract_state=None, dt=0.0, pitch=0.0):
++                              retract_state=None, dt=0.0, pitch=0.0,
++                              freeze_phi_in_retract: bool = False):
+     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
+ 
+     状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
+@@ -186,7 +199,10 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
+     # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
+     # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
+     phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
+-    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
++    # 冻结只在收腿段（mode == "rising"）生效，伸腿段仍走世界系补偿。
++    freeze_now = bool(freeze_phi_in_retract and mode == "rising")
++    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
++                      freeze_phi_in_retract=freeze_now)
+            + FEEDFORWARD_COUPLING * forces) * phi_ramp
+     phi_elapsed += float(dt)
+     torque = _leg_wrench_torque(dynamics, forces, phi)
+@@ -235,12 +251,19 @@ class WbcOutcome:
+ 
+ 
+ def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
+-              timings: dict, counters: dict):
++              timings: dict, counters: dict, jump=None, pretilt_pitch: float = 0.0):
+     """控制级 A：求解一次 MPC，返回 ``(solution, 本拍指令)``。
+ 
+     与 WBC 无关：不等 WBC、不读 WBC 的力矩。
+     """
+     current = command(time_s) if callable(command) else command
++    # 第 10.4.1 / 10.4.3 节：生效窗口复用相位（IDLE/COMPRESS），释放（进 THRUST）时归零，
++    # 由 pitch_bias_rate 自然斜坡回落；压缩段内不得归零。走仓库现成的斜坡通道（轮圈腿同款）。
++    # 第 11.4.2 节：窗口补上 COMPRESS_BRAKE（压缩段不得归零，进 THRUST 才归零）。
++    pretilt_active = (jump is not None
++                      and jump.phase.value in {"IDLE", "COMPRESS", "COMPRESS_BRAKE"})
++    control.mpc.pitch_bias_target = float(pretilt_pitch) if pretilt_active else 0.0
++    control.mpc.pitch_bias_rate = PRELOAD_RATE
+     start = time.perf_counter()
+     solution = control.solve_mpc(feedback.state, current, feedback.decision,
+                                  feedback_accum.consume(feedback.state))
+@@ -261,7 +284,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
+               jump_holds: dict | None = None, vmc_feedforward: bool = False,
+               jump_config=None, leg_length_compression: bool = False,
+               leg_length_thrust: bool = False, landing_window: bool = False,
+-              mpc_force_feedforward: bool = False, wheel_radius: float | None = None) -> WbcOutcome:
++              mpc_force_feedforward: bool = False, wheel_radius: float | None = None,
++              pitch_bias_target: float = 0.0) -> WbcOutcome:
+     """控制级 B：求解一次 WBC，返回力矩与停机原因。
+ 
+     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
+@@ -305,7 +329,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
+                                   roll_reference=holds.get("roll"),
+                                   angle_R_reference=holds.get("angle_R"),
+                                   angle_L_reference=holds.get("angle_L"),
+-                                  world_angle_anchor=landing_window)
++                                  world_angle_anchor=landing_window,
++                                  pitch_bias_target=pitch_bias_target)
+     # (b) 腿长任务参考跟跳跃：wbc.py::tasks 里该任务参考标称 L0，跳跃期必须换成跳跃给出的目标腿长，
+     #     否则 WBC 会把正在伸长的腿拉回去（与蹬伸力对撞，第 32 次排查 bug#1 的机理）。
+     if jump is not None and jump.active and jump.leg_length_target is not None:
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 238adad..fa739e8 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -64,6 +64,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
+                           flight_leg_profile_torque, landing_buffer_torque)
+     from .jump import JumpObservation, LIFTOFF_GAP
++    # 第 10.5 节：以下四个常量是轮圈腿参考实现取值（Algorithm/jump.py:42-45），
++    # 未在本模型验证，本轮不得修改。
++    from .control import (PRELOAD_RATE, PREPARE_TOLERANCE, PREPARE_DWELL,  # noqa: F401
++                          PREPARE_TIMEOUT)
+     from Algorithm.contact_state import JumpPhaseHint
+     from Algorithm.mpc.trajectory import MotionSample
+     from . import robot as R
+@@ -92,6 +96,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     previous_com_time = None
+     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
++    # 第 10.4.2 节（预倾闸门）：settled 连续计时、触发挂起起点、超时计数。
++    pretilt_dwell = 0.0
++    pretilt_pending_since = None
++    pretilt_timeouts = 0
+     landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
+     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
+     feedback = None              # 采样级：最近一拍反馈
+@@ -166,7 +174,47 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+         #   这里**不加** ``phase == "IDLE"``（上一版就是在这里改坏的）。
+         _jump_requested = bool(sim._jump_requested)
+         _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
++        # 第 10.4.2 节（预倾闸门，本节核心）：到角度才允许压缩，压缩不与预倾抢姿态。
++        # 阈值/驻留/超时全部来自轮圈腿参考实现（见上方常量来源注释），本轮不改。
++        _pretilt_cmd = float(sim.config.pretilt_pitch)
++        _pitch_now = None if feedback is None else float(feedback.state.pitch)
++        pretilt_settled = (_pretilt_cmd == 0.0
++                           or (_pitch_now is not None
++                               and abs(_pitch_now - _pretilt_cmd) <= PREPARE_TOLERANCE))
++        if _pretilt_cmd == 0.0 or pretilt_settled:
++            pretilt_dwell += float(m.opt.timestep)
++        else:
++            pretilt_dwell = 0.0
++        _bias_done = abs(float(sim.mpc._pitch_bias) - _pretilt_cmd) <= PREPARE_TOLERANCE  # noqa: SLF001
++        pretilt_ready = (_pretilt_cmd == 0.0
++                         or (pretilt_settled and pretilt_dwell + 1e-12 >= PREPARE_DWELL and _bias_done))
+         if sim.jump is not None and (_timed_due or _jump_requested):
++            if not pretilt_ready:
++                # 挂起本次触发（不消费请求、不推进定时锁），超时则主动中止。
++                if pretilt_pending_since is None:
++                    pretilt_pending_since = float(d.time)
++                    _LOGGER.info("预倾闸门：触发已挂起，等待 pitch 到位（目标 %.3f rad，实测 %.3f，"
++                                 "t=%.3f s）", _pretilt_cmd, float(_pitch_now or 0.0), float(d.time))
++                if float(d.time) - pretilt_pending_since >= PREPARE_TIMEOUT:
++                    sim.jump.reset_to_idle()
++                    pretilt_timeouts += 1
++                    sim.counters["pretilt_gate_timeouts"] = pretilt_timeouts
++                    _LOGGER.warning("预倾闸门超时：本次跳跃中止（目标 %.3f rad，实测 %.3f rad，"
++                                    "等待 %.3f s）", _pretilt_cmd, float(_pitch_now or 0.0),
++                                    float(d.time) - pretilt_pending_since)
++                    sim._jump_requested = False
++                    if _timed_due:
++                        sim._jump_started = True     # 定时来源本次作废，避免无限重试
++                    pretilt_pending_since = None
++                _timed_due = False
++                _jump_requested = False
++                goto_start = False
++            else:
++                goto_start = True
++                pretilt_pending_since = None
++        else:
++            goto_start = False
++        if sim.jump is not None and goto_start and (_timed_due or _jump_requested):
+             sim._jump_requested = False          # 请求已被消费
+             if _timed_due:
+                 sim._jump_started = True         # 只由定时来源推进该锁
+@@ -295,7 +343,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             solution, sim._command = mpc_stage(
+                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                 feedback=feedback, command=command,
+-                timings=sim.timings, counters=sim.counters)
++                timings=sim.timings, counters=sim.counters,
++                jump=jump_command, pretilt_pitch=sim.config.pretilt_pitch)
+ 
+         # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
+         # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
+@@ -348,6 +397,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 timings=sim.timings, counters=sim.counters, exhausted=sim.exhausted,
+                 scaled=sim.scaled, normal_violation_time=normal_violation_time,
+                 infeasible_active=infeasible_active, jump=jump_command,
++                # 第 11.4.1 节：跳跃期 WBC 的 pitch 目标读 MPC 层偏置（不另算一份）。
++                pitch_bias_target=float(sim.mpc.pitch_bias_target),
+                 desired_com_acceleration_z=(None if jump_command is None
+                                             else jump_command.desired_com_acceleration_z),
+                 jump_holds=wbc_holds,
+@@ -422,7 +473,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
+                 sim.jump.config.leg_length_nominal,
+                 retract_state=flight_leg_ref, dt=float(m.opt.timestep),
+-                pitch=float(feedback.state.pitch))
++                pitch=float(feedback.state.pitch),
++                freeze_phi_in_retract=bool(sim.config.freeze_phi_in_retract))
+         elif flight_retract:
+             leg_now = sim.dyn.leg_state()
+             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+@@ -650,6 +702,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 "mpc_called": bool(mpc_called),
+                 "mpc_due": bool(sim.timing.mpc_due(step)),
+                 "landing_refresh": bool(landing_refresh),
++                # 第 10.4.4 节：预倾闸门的只读记录（不参与任何控制计算）。
++                "pretilt_pitch_cmd": float(sim.config.pretilt_pitch),
++                "pretilt_settled": bool(pretilt_settled),
++                "pitch_bias_now": float(sim.mpc._pitch_bias),  # noqa: SLF001
+                 "wbc_due": bool(sim.timing.wbc_due(step)),
+                 "mpc_solution": None if solution is None else {
+                     "fallback": bool(solution.fallback),
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index 3220fa6..4ece8b3 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -289,6 +289,11 @@ class SimulationConfig:
+     jump_height: float | None = None
+     jump_stroke: float = 0.12
+     jump_time: float = 1.0                 # [s] 起跳指令时刻
++    # 第 9.2 节（落地 pitch 优化 工况 A）：起跳前机体预倾角 [rad]。0.0 = 完全关闭，
++    # 默认值必须让 baseline 逐位不变。生效窗口复用相位（IDLE/COMPRESS），不新增时长常数。
++    pretilt_pitch: float = 0.0
++    # 第 9.3 节（工况 B）：收腿段（飞行剖面 mode == "rising"）把世界系 phi 参考冻结。
++    freeze_phi_in_retract: bool = False
+     wbc_gains: WbcGains = field(default_factory=WbcGains)
+     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
+     # 可达 [−0.784, +0.674]，相对 φ0 = −0.1263 即 −0.658 / +0.800，取 0.65（不超可达范围）。
+@@ -351,7 +356,9 @@ class Gbc486MpcWbcSimulation:
+         self._jump_requested = False         # 外部（view 空格）请求起跳；由 loop 消费
+         self.records: list[dict] = []
+         self.stop_reason = None
+-        self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
++        # 第 10.7.3 节：预倾闸门超时导致的是"主动中止"，单独计数，不混入故障 ABORT。
++        self.counters = dict(pretilt_gate_timeouts=0,
++                             mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
+                              wbc_clip=0, wbc_infeasible=0, mpc_ff_frames=0)
+         # 任务名随 wbc.py 的任务集变化（现在是每条腿单独的 length_*/angle_*），
+         # 用动态字典而不是写死的键，避免 KeyError。
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+index 42658db..78cbc1f 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+@@ -158,7 +158,7 @@ class Gbc486Tasks:
+               desired_com_acceleration_z: float | None = None,
+               pitch_reference: float | None = None, roll_reference: float | None = None,
+               angle_R_reference: float | None = None, angle_L_reference: float | None = None,
+-              world_angle_anchor: bool = False):
++              world_angle_anchor: bool = False, pitch_bias_target: float = 0.0):
+         """返回 ``(balance_tasks, motion_tasks)``。顺序与 circleg 完全一致：
+ 
+         ``(pitch, hip_tasks[-1], roll)`` + ``(yaw, height, forward_velocity) + hip_tasks[:-1]``，
+@@ -208,7 +208,10 @@ class Gbc486Tasks:
+             # 角速度阻尼，不再跟踪世界系 0。因为 reference[4] 每拍等于实测 yaw，
+             # kp*(reference[4]-state.yaw) 恒为 0。
+             reference = reference.copy()
+-            reference[2] = 0.0            # pitch 目标：直立
++            # 第 11.4.1 节：跳跃期（sample=None）原来把 pitch 目标写死 0，导致 MPC 层的
++            # pitch_bias（预倾）在压缩段没有读者、机体被拉回水平。这里改用调用方传入的偏置值；
++            # 默认 0.0 -> baseline 逐位不变。不得在 WBC 内部另算一份。
++            reference[2] = float(pitch_bias_target or 0.0)   # pitch 目标 = 预倾偏置
+             reference[3] = 0.0            # pitch_rate 目标
+             reference[4] = state.yaw      # 偏航：保持当前朝向（不归中）
+             reference[5] = 0.0            # 偏航角速度目标 0
+```
+
+## 11.8.3 baseline 逐位不变 [通过]
+
+| 对比 | dqpos | dqvel | dctrl |
+|---|---|---|---|
+| T11 vs T10 | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| CMD11 vs CMD10 | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| JUMP11 vs JUMP10 | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+| `--pretilt-pitch 0.0`(P11_000) vs 无开关(JUMP10) | 0.000e+00 | 0.000e+00 | 0.000e+00 |
+
+## 11.8.4 压缩段 pitch 时间序列（每 20 ms，覆盖 COMPRESS..COMPRESS_BRAKE）
+
+**baseline δ=0.00**：`1.000:-0.000 1.020:-0.000 1.060:-0.000 1.100:-0.000 1.160:-0.000 1.220:-0.001 1.300:-0.001`
+
+**δ=0.20**：`1.000:+0.200 1.020:+0.200 1.060:+0.200 1.100:+0.200 1.160:+0.200 1.220:+0.200 1.320:+0.200`
+（全程平在目标上）
+
+**δ=0.35**：`1.000:+0.350 1.120:+0.350 1.160:+0.350 1.240:+0.346 1.320:+0.316 1.360:+0.313
+1.440:+0.320 1.520:+0.336 1.600:+0.351 1.640:+0.357`
+（先跌到 0.313 再回升，最大偏离 0.0373）
+
+**δ=0.50**：`1.000:+0.500 1.160:+0.500 1.200:+0.481 1.280:+0.429 1.320:+0.425 1.400:+0.443
+1.480:+0.473 1.560:+0.501 1.580:+0.507`
+（先跌到 0.425 再回升，最大偏离 **0.0748**）
+
+## 11.8.5 释放前实测 pitch 与 phi_world（逐次）
+
+| δ | 压缩段 `max\|pitch−δ\|`（要求 <=0.05） | 释放/中止点 t | 释放前 pitch（偏差，要求 <=0.087） | 释放前 `phi_world`（vs -0.1263，要求 <=0.05） |
+|---|---|---|---|---|
+| 0.00 | **0.0011** 通过 | 1.315 | -0.0011（-0.0011）通过 | **-0.1246（+0.0017）通过** |
+| 0.20 | **0.0003** 通过 | 1.323 | +0.2002（+0.0002）通过 | **-0.3547（-0.2284）未通过** |
+| 0.35 | **0.0373** 通过 | 1.642（ABORT） | +0.3567（+0.0067）通过 | -0.5028（-0.3765）未通过 |
+| 0.50 | **0.0748** 未通过 | 1.591（ABORT） | +0.5096（+0.0096）通过 | -0.6977（-0.5714）未通过 |
+
+**第 2 项（11.7 的关键判别）结论**：δ=0.20 时压缩段 `max|pitch−δ| = 0.0003 rad`，
+δ=0.35 时 0.0373 —— 预倾在压缩段被完整保持，**根因 A（WBC 引用死 pitch=0）确实修好了**。
+δ=0.50 有 0.0748 的瞬态跌落（超过 0.05），属大角度下控制器能力边界。
+
+## 11.8.6 `d(theta_land)/d(delta)`、触地 pitch、gap 汇总
+
+| δ | 触地 pitch | max\|pitch\| | gap | 后向回退 | 结果 |
+|---|---|---|---|---|---|
+| 0.00 | -0.7328 | 0.7328 | **0.2218** | 0.2359 | 完成 |
+| 0.20 | **-0.8993** | 0.8993 | **0.2064** | 0.1268 | 完成 |
+| 0.35 | — | — | — | — | **ABORT** `leg_length_out_of_range:R 0.4307 m` @1.642 s |
+| 0.50 | — | — | — | — | **ABORT** `leg_length_out_of_range:R 0.4302 m` @1.591 s |
+
+`d(theta_land)/d(delta)`：
+
+| 两点 | 结果 |
+|---|---|
+| 0.20 vs 0.50（11.7 要求） | **无法计算**（0.50 中止） |
+| 0.00 vs 0.20（可用） | **-0.8325** |
+
+即预倾**确实传到了飞行段**（触地 pitch 从 -0.7328 变成 -0.8993），但方向是**加剧抬头**，
+斜率 -0.83（负值）。符号约定：pitch>0 = 低头，故 +δ（低头预倾）-> 触地更抬头（更负）。
+
+## 11.8.7 回归
+
+| 项 | 结果 |
+|---|---|
+| T1（T11 vs T10） | 0.000e+00 |
+| CMD1（CMD11 vs CMD10） | 0.000e+00 |
+| JUMP（JUMP11 vs JUMP10） | 0.000e+00；间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max|pitch|` 0.22459 |
+| 预倾闸门超时 | 4 次运行全部 **0**（单独计数，未混入故障 ABORT） |
+| 故障 ABORT | 2 次（δ=0.35/0.50，`leg_length_out_of_range:R`） |
+
+## 按 11.7 的顺序判定（不过即停）
+
+1. baseline 逐位不变 —— **通过**
+2. 压缩段 pitch 保持（<=0.05） —— δ=0.00/0.20/0.35 **通过**；δ=0.50 = 0.0748 **未通过**
+3. 释放前 pitch 与目标偏差（<=0.087） —— 全部 **通过**（最大 0.0096）
+4. 释放前 `phi_world` 偏差（<=0.05） —— δ=0.00 通过（+0.0017）；**δ=0.20 起即未通过**
+   （-0.2284 / -0.3765 / -0.5714）
+
+**按 11.7"不过即停"，第 4 项未通过，本轮到此停止。** 按 11.5 的要求同时看 gap：
+δ=0.20 的 gap = **0.2064 m**（低于 11.7 第 5 项的 0.22180，但仍高于硬下限 0.200 m），
+即预倾已经把世界系腿角拖偏 0.23 rad、并吃掉 7.0% 的离地间隙。
+
+## 结论
+
+1. 第 11 节的两处修正确实生效：**跳跃期 WBC 现在读得到预倾**（压缩段 pitch 保持到 0.0003 rad，
+   改前是 1.7 rad/s 被拉回水平），窗口补齐 COMPRESS_BRAKE 后目标不再中途归零。
+2. 但达到"预倾进入飞行段"的代价是**世界系腿角被拖偏**：δ=0.20 时 phi_world 从 -0.1263 偏到
+   -0.3547（0.23 rad），gap 从 0.2218 掉到 0.2064。
+3. 触地 pitch 的变化方向与期望相反：δ=0.20 -> 触地 -0.8993（更抬头），斜率 -0.83。
+4. δ=0.35 / 0.50 在 COMPRESS_BRAKE 阶段右腿越界中止（0.4307 / 0.4302 m，上限 0.430）。
+5. 按 11.7 停在第 4 项，未做任何参数调整（未动 `PREPARE_TOLERANCE`/`PRELOAD_RATE`、
+   未改压缩段腿长剖面、未动 `JUMP_COM_VERTICAL_WEIGHT`）。
+
+
+
+================================================================
+第 12 节 负向扫描：预倾方向反过来有效（-0.30 触地 -0.289），但 phi_world 判据先破
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A4（落地 pitch 优化 第 12 节）
+
+## 12.9.1 `abort_reason` 只读字段 + 旧 ABORT 工况重跑 [通过]
+
+- `loop.py` 的 `jump_payload` 增加 `"abort_reason": getattr(jump_command, "abort_reason", None)`（只读）。
+- 重跑 +0.35 / +0.50 两个旧中止工况，trace 里可以直接读到判据：
+
+| 工况 | 中止时刻 | `abort_reason` |
+|---|---|---|
+| `P12_0035`（δ=+0.35） | 1.642 s | `leg_length_out_of_range:R(0.4307 m, range [0.114, 0.430])` |
+| `P12_0050`（δ=+0.50） | 1.591 s | `leg_length_out_of_range:R(0.4302 m, range [0.114, 0.430])` |
+
+两例都是**腿长越界**（不是俯仰限幅、不是方向丢失、不是超时）。
+
+```diff
+diff --git a/Algorithm/mpc/controller.py b/Algorithm/mpc/controller.py
+index 82818c7..f34d61a 100644
+--- a/Algorithm/mpc/controller.py
++++ b/Algorithm/mpc/controller.py
+@@ -24,6 +24,7 @@ from .trajectory import OptimizedTrajectory
+ _LOGGER = logging.getLogger(__name__)
+ 
+ 
++
+ @dataclass(frozen=True)
+ class MPCSettings:
+     """MPC 的全部可调量。默认值来自 docs/MPC-WBC方案.md §3 与 §6 的数值汇总。"""
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/control.py b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+index 4916ad8..05d4a45 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -33,6 +33,12 @@ from Algorithm.wbc import ActuatorLimits  # noqa: E402
+ 
+ _LOGGER = get_logger(__name__)
+ 
++# 第 10.5 节参数来源：以下四个是**轮圈腿参考实现取值，未在本模型验证**，本轮不得修改。
++PRELOAD_RATE = 3.0          # [rad/s] 来源 Algorithm/jump.py:44（该处注释记载 6 rad/s 时失稳）
++PREPARE_TOLERANCE = 0.087   # [rad]   来源 Algorithm/jump.py:42（5 度）
++PREPARE_DWELL = 0.004       # [s]     来源 Algorithm/jump.py:43（一个 WBC 周期）
++PREPARE_TIMEOUT = 1.5       # [s]     来源 Algorithm/jump.py:45
++
+ # WP8（2026-10-09）：压缩/制动/释放相位让质心竖直任务在 WLS 中占主导的具名权重。
+ # 来源：用户 2026-10-09 批准（WP8 部署文档第三节）。只在跳跃相位覆盖，GROUND 不生效。
+ JUMP_COM_VERTICAL_WEIGHT = 5000.0
+@@ -102,13 +108,19 @@ def _pd_force_v(l_ref, v_ref, leg_position, leg_velocity) -> np.ndarray:
+     return np.asarray(forces, dtype=float)
+ 
+ 
+-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
++def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
++               freeze_phi_in_retract: bool = False) -> np.ndarray:
+     """FL9/FL11/FL12 下落段摆角 PD（世界系参考）：
+     ``F_phi = kp_phi*(phi_body_ref - phi) - kd_phi*phi_dot``；
+     ``phi_body_ref = world_ref + pitch``；``world_ref = phi_eq(l_ref)``（FL12 角度前馈），
+     ``l_ref=None`` 时退回常数 ``WORLD_TARGET_DEFAULT``。"""
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    phi_body_ref = phi_body_reference(world_ref, pitch)
++    # 第 9.3.2 节（工况 B）：收腿段把机体系参考直接取世界系参考（去掉 + pitch），
++    # 即不再为"机体当前俯仰"补偿腿角，从而减小收腿段对 pitch 的反作用。
++    if freeze_phi_in_retract:
++        phi_body_ref = float(world_ref)
++    else:
++        phi_body_ref = phi_body_reference(world_ref, pitch)
+     forces = []
+     for side in range(2):
+         index = 2 * side + 1
+@@ -127,7 +139,8 @@ def flight_leg_retract_torque(dynamics, leg_position, leg_velocity,
+ 
+ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
+                               leg_length_min, leg_length_max, nominal_length,
+-                              retract_state=None, dt=0.0, pitch=0.0):
++                              retract_state=None, dt=0.0, pitch=0.0,
++                              freeze_phi_in_retract: bool = False):
+     """FL3/4/7/8/9 飞行腿剖面：上升（vz>0）收腿；下落（vz<0）速率受限伸腿 + phi 回复。
+ 
+     状态为六元组 ``(mode, L_ref, v_ref, L_entry, ref_accel, phi_elapsed)``，``mode`` ∈ {"rising","falling"}。
+@@ -186,7 +199,10 @@ def flight_leg_profile_torque(dynamics, leg_position, leg_velocity, vertical_vel
+     # FL22（2026-10-12 用户批准）：上升/下落**两段都算 phi**（把阻尼提前到上升段），
+     # 沿用 FL21 的启用斜坡（自飞行剖面进入起 FLIGHT_PHI_RAMP 秒内 0->1），削掉启用阶跃。
+     phi_ramp = min(1.0, max(0.0, phi_elapsed / FLIGHT_PHI_RAMP))
+-    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref)
++    # 冻结只在收腿段（mode == "rising"）生效，伸腿段仍走世界系补偿。
++    freeze_now = bool(freeze_phi_in_retract and mode == "rising")
++    phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
++                      freeze_phi_in_retract=freeze_now)
+            + FEEDFORWARD_COUPLING * forces) * phi_ramp
+     phi_elapsed += float(dt)
+     torque = _leg_wrench_torque(dynamics, forces, phi)
+@@ -235,12 +251,19 @@ class WbcOutcome:
+ 
+ 
+ def mpc_stage(*, control, feedback_accum, time_s: float, feedback, command,
+-              timings: dict, counters: dict):
++              timings: dict, counters: dict, jump=None, pretilt_pitch: float = 0.0):
+     """控制级 A：求解一次 MPC，返回 ``(solution, 本拍指令)``。
+ 
+     与 WBC 无关：不等 WBC、不读 WBC 的力矩。
+     """
+     current = command(time_s) if callable(command) else command
++    # 第 10.4.1 / 10.4.3 节：生效窗口复用相位（IDLE/COMPRESS），释放（进 THRUST）时归零，
++    # 由 pitch_bias_rate 自然斜坡回落；压缩段内不得归零。走仓库现成的斜坡通道（轮圈腿同款）。
++    # 第 11.4.2 节：窗口补上 COMPRESS_BRAKE（压缩段不得归零，进 THRUST 才归零）。
++    pretilt_active = (jump is not None
++                      and jump.phase.value in {"IDLE", "COMPRESS", "COMPRESS_BRAKE"})
++    control.mpc.pitch_bias_target = float(pretilt_pitch) if pretilt_active else 0.0
++    control.mpc.pitch_bias_rate = PRELOAD_RATE
+     start = time.perf_counter()
+     solution = control.solve_mpc(feedback.state, current, feedback.decision,
+                                  feedback_accum.consume(feedback.state))
+@@ -261,7 +284,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
+               jump_holds: dict | None = None, vmc_feedforward: bool = False,
+               jump_config=None, leg_length_compression: bool = False,
+               leg_length_thrust: bool = False, landing_window: bool = False,
+-              mpc_force_feedforward: bool = False, wheel_radius: float | None = None) -> WbcOutcome:
++              mpc_force_feedforward: bool = False, wheel_radius: float | None = None,
++              pitch_bias_target: float = 0.0) -> WbcOutcome:
+     """控制级 B：求解一次 WBC，返回力矩与停机原因。
+ 
+     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
+@@ -305,7 +329,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
+                                   roll_reference=holds.get("roll"),
+                                   angle_R_reference=holds.get("angle_R"),
+                                   angle_L_reference=holds.get("angle_L"),
+-                                  world_angle_anchor=landing_window)
++                                  world_angle_anchor=landing_window,
++                                  pitch_bias_target=pitch_bias_target)
+     # (b) 腿长任务参考跟跳跃：wbc.py::tasks 里该任务参考标称 L0，跳跃期必须换成跳跃给出的目标腿长，
+     #     否则 WBC 会把正在伸长的腿拉回去（与蹬伸力对撞，第 32 次排查 bug#1 的机理）。
+     if jump is not None and jump.active and jump.leg_length_target is not None:
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+index 238adad..e76d7d1 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+@@ -64,6 +64,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     from .control import (mpc_stage, wbc_stage, flight_leg_retract_torque,
+                           flight_leg_profile_torque, landing_buffer_torque)
+     from .jump import JumpObservation, LIFTOFF_GAP
++    # 第 10.5 节：以下四个常量是轮圈腿参考实现取值（Algorithm/jump.py:42-45），
++    # 未在本模型验证，本轮不得修改。
++    from .control import (PRELOAD_RATE, PREPARE_TOLERANCE, PREPARE_DWELL,  # noqa: F401
++                          PREPARE_TIMEOUT)
+     from Algorithm.contact_state import JumpPhaseHint
+     from Algorithm.mpc.trajectory import MotionSample
+     from . import robot as R
+@@ -92,6 +96,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+     previous_com_time = None
+     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
+     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
++    # 第 10.4.2 节（预倾闸门）：settled 连续计时、触发挂起起点、超时计数。
++    pretilt_dwell = 0.0
++    pretilt_pending_since = None
++    pretilt_timeouts = 0
+     landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
+     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
+     feedback = None              # 采样级：最近一拍反馈
+@@ -166,7 +174,47 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+         #   这里**不加** ``phase == "IDLE"``（上一版就是在这里改坏的）。
+         _jump_requested = bool(sim._jump_requested)
+         _timed_due = not sim._jump_started and float(d.time) >= sim.config.jump_time
++        # 第 10.4.2 节（预倾闸门，本节核心）：到角度才允许压缩，压缩不与预倾抢姿态。
++        # 阈值/驻留/超时全部来自轮圈腿参考实现（见上方常量来源注释），本轮不改。
++        _pretilt_cmd = float(sim.config.pretilt_pitch)
++        _pitch_now = None if feedback is None else float(feedback.state.pitch)
++        pretilt_settled = (_pretilt_cmd == 0.0
++                           or (_pitch_now is not None
++                               and abs(_pitch_now - _pretilt_cmd) <= PREPARE_TOLERANCE))
++        if _pretilt_cmd == 0.0 or pretilt_settled:
++            pretilt_dwell += float(m.opt.timestep)
++        else:
++            pretilt_dwell = 0.0
++        _bias_done = abs(float(sim.mpc._pitch_bias) - _pretilt_cmd) <= PREPARE_TOLERANCE  # noqa: SLF001
++        pretilt_ready = (_pretilt_cmd == 0.0
++                         or (pretilt_settled and pretilt_dwell + 1e-12 >= PREPARE_DWELL and _bias_done))
+         if sim.jump is not None and (_timed_due or _jump_requested):
++            if not pretilt_ready:
++                # 挂起本次触发（不消费请求、不推进定时锁），超时则主动中止。
++                if pretilt_pending_since is None:
++                    pretilt_pending_since = float(d.time)
++                    _LOGGER.info("预倾闸门：触发已挂起，等待 pitch 到位（目标 %.3f rad，实测 %.3f，"
++                                 "t=%.3f s）", _pretilt_cmd, float(_pitch_now or 0.0), float(d.time))
++                if float(d.time) - pretilt_pending_since >= PREPARE_TIMEOUT:
++                    sim.jump.reset_to_idle()
++                    pretilt_timeouts += 1
++                    sim.counters["pretilt_gate_timeouts"] = pretilt_timeouts
++                    _LOGGER.warning("预倾闸门超时：本次跳跃中止（目标 %.3f rad，实测 %.3f rad，"
++                                    "等待 %.3f s）", _pretilt_cmd, float(_pitch_now or 0.0),
++                                    float(d.time) - pretilt_pending_since)
++                    sim._jump_requested = False
++                    if _timed_due:
++                        sim._jump_started = True     # 定时来源本次作废，避免无限重试
++                    pretilt_pending_since = None
++                _timed_due = False
++                _jump_requested = False
++                goto_start = False
++            else:
++                goto_start = True
++                pretilt_pending_since = None
++        else:
++            goto_start = False
++        if sim.jump is not None and goto_start and (_timed_due or _jump_requested):
+             sim._jump_requested = False          # 请求已被消费
+             if _timed_due:
+                 sim._jump_started = True         # 只由定时来源推进该锁
+@@ -295,7 +343,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+             solution, sim._command = mpc_stage(
+                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                 feedback=feedback, command=command,
+-                timings=sim.timings, counters=sim.counters)
++                timings=sim.timings, counters=sim.counters,
++                jump=jump_command, pretilt_pitch=sim.config.pretilt_pitch)
+ 
+         # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
+         # 判据用算法层估计器的结论（feedback.decision.contact），两轮**全部**判为离地才进入；
+@@ -348,6 +397,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 timings=sim.timings, counters=sim.counters, exhausted=sim.exhausted,
+                 scaled=sim.scaled, normal_violation_time=normal_violation_time,
+                 infeasible_active=infeasible_active, jump=jump_command,
++                # 第 11.4.1 节：跳跃期 WBC 的 pitch 目标读 MPC 层偏置（不另算一份）。
++                pitch_bias_target=float(sim.mpc.pitch_bias_target),
+                 desired_com_acceleration_z=(None if jump_command is None
+                                             else jump_command.desired_com_acceleration_z),
+                 jump_holds=wbc_holds,
+@@ -422,7 +473,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 sim.jump.config.leg_length_min, sim.jump.config.leg_length_max,
+                 sim.jump.config.leg_length_nominal,
+                 retract_state=flight_leg_ref, dt=float(m.opt.timestep),
+-                pitch=float(feedback.state.pitch))
++                pitch=float(feedback.state.pitch),
++                freeze_phi_in_retract=bool(sim.config.freeze_phi_in_retract))
+         elif flight_retract:
+             leg_now = sim.dyn.leg_state()
+             leg_rate_now = np.asarray(feedback.rows.leg[0] @ d.qvel, dtype=float)
+@@ -475,6 +527,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 "flight_leg_ref": (None if flight_leg_ref is None
+                                    else [str(flight_leg_ref[0])]
+                                         + [float(v) for v in flight_leg_ref[1:]]),
++                # 第 12.6 节：中止原因（只读）。jump.py 内部一直有 self.reason，只是没进 trace；
++                # 用于验收时能说出触发的是哪条判据（俯仰限幅/方向丢失/腿长越界/超时）。
++                "abort_reason": (None if jump_command is None
++                                 else getattr(jump_command, "abort_reason", None)),
+             }
+             sample = None if outcome is None else outcome.sample
+             sample_raw = None if outcome is None else outcome.sample_raw
+@@ -650,6 +706,10 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
+                 "mpc_called": bool(mpc_called),
+                 "mpc_due": bool(sim.timing.mpc_due(step)),
+                 "landing_refresh": bool(landing_refresh),
++                # 第 10.4.4 节：预倾闸门的只读记录（不参与任何控制计算）。
++                "pretilt_pitch_cmd": float(sim.config.pretilt_pitch),
++                "pretilt_settled": bool(pretilt_settled),
++                "pitch_bias_now": float(sim.mpc._pitch_bias),  # noqa: SLF001
+                 "wbc_due": bool(sim.timing.wbc_due(step)),
+                 "mpc_solution": None if solution is None else {
+                     "fallback": bool(solution.fallback),
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+index 3220fa6..4ece8b3 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -289,6 +289,11 @@ class SimulationConfig:
+     jump_height: float | None = None
+     jump_stroke: float = 0.12
+     jump_time: float = 1.0                 # [s] 起跳指令时刻
++    # 第 9.2 节（落地 pitch 优化 工况 A）：起跳前机体预倾角 [rad]。0.0 = 完全关闭，
++    # 默认值必须让 baseline 逐位不变。生效窗口复用相位（IDLE/COMPRESS），不新增时长常数。
++    pretilt_pitch: float = 0.0
++    # 第 9.3 节（工况 B）：收腿段（飞行剖面 mode == "rising"）把世界系 phi 参考冻结。
++    freeze_phi_in_retract: bool = False
+     wbc_gains: WbcGains = field(default_factory=WbcGains)
+     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
+     # 可达 [−0.784, +0.674]，相对 φ0 = −0.1263 即 −0.658 / +0.800，取 0.65（不超可达范围）。
+@@ -351,7 +356,9 @@ class Gbc486MpcWbcSimulation:
+         self._jump_requested = False         # 外部（view 空格）请求起跳；由 loop 消费
+         self.records: list[dict] = []
+         self.stop_reason = None
+-        self.counters = dict(mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
++        # 第 10.7.3 节：预倾闸门超时导致的是"主动中止"，单独计数，不混入故障 ABORT。
++        self.counters = dict(pretilt_gate_timeouts=0,
++                             mpc_calls=0, mpc_fallbacks=0, mpc_relaxed=0, wbc_calls=0, wbc_fallback=0,
+                              wbc_clip=0, wbc_infeasible=0, mpc_ff_frames=0)
+         # 任务名随 wbc.py 的任务集变化（现在是每条腿单独的 length_*/angle_*），
+         # 用动态字典而不是写死的键，避免 KeyError。
+diff --git a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+index 42658db..78cbc1f 100644
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/wbc.py
+@@ -158,7 +158,7 @@ class Gbc486Tasks:
+               desired_com_acceleration_z: float | None = None,
+               pitch_reference: float | None = None, roll_reference: float | None = None,
+               angle_R_reference: float | None = None, angle_L_reference: float | None = None,
+-              world_angle_anchor: bool = False):
++              world_angle_anchor: bool = False, pitch_bias_target: float = 0.0):
+         """返回 ``(balance_tasks, motion_tasks)``。顺序与 circleg 完全一致：
+ 
+         ``(pitch, hip_tasks[-1], roll)`` + ``(yaw, height, forward_velocity) + hip_tasks[:-1]``，
+@@ -208,7 +208,10 @@ class Gbc486Tasks:
+             # 角速度阻尼，不再跟踪世界系 0。因为 reference[4] 每拍等于实测 yaw，
+             # kp*(reference[4]-state.yaw) 恒为 0。
+             reference = reference.copy()
+-            reference[2] = 0.0            # pitch 目标：直立
++            # 第 11.4.1 节：跳跃期（sample=None）原来把 pitch 目标写死 0，导致 MPC 层的
++            # pitch_bias（预倾）在压缩段没有读者、机体被拉回水平。这里改用调用方传入的偏置值；
++            # 默认 0.0 -> baseline 逐位不变。不得在 WBC 内部另算一份。
++            reference[2] = float(pitch_bias_target or 0.0)   # pitch 目标 = 预倾偏置
+             reference[3] = 0.0            # pitch_rate 目标
+             reference[4] = state.yaw      # 偏航：保持当前朝向（不归中）
+             reference[5] = 0.0            # 偏航角速度目标 0
+diff --git a/wheel_leg_mujoco/tools/jump_diagnostic.py b/wheel_leg_mujoco/tools/jump_diagnostic.py
+index 779169e..330ac35 100644
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++++ b/wheel_leg_mujoco/tools/jump_diagnostic.py
+@@ -186,13 +186,16 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
+              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
+              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
+              command_velocity=0.5, command_hold=3.0,
+-             command_yaw_rate=0.0, command_yaw_hold=None):
++             command_yaw_rate=0.0, command_yaw_hold=None,
++             pretilt_pitch=0.0, freeze_phi_in_retract=False):
+     RESULTS.mkdir(exist_ok=True)
+     output = RESULTS / f"{stage}_{case}_{run_id}.json.gz"
+     log_path = RESULTS / f"{stage}_{case}_{run_id}.log"
+     setup_logging(default_level="INFO", log_file=log_path)
+     config = SimulationConfig(jump_height=jump_height, jump_stroke=jump_stroke,
+-                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit)
++                              jump_time=jump_time, wheel_torque_limit=wheel_torque_limit,
++                              pretilt_pitch=float(pretilt_pitch),
++                              freeze_phi_in_retract=bool(freeze_phi_in_retract))
+     sim = Gbc486MpcWbcSimulation(config)
+     frames = []
+     sim.run(_command(case, command_velocity, command_hold,
+@@ -283,6 +286,11 @@ def main():
+     parser.add_argument("--jump-stroke", type=float, default=0.12)
+     parser.add_argument("--jump-time", type=float, default=1.0)
+     parser.add_argument("--no-jump", action="store_true")
++    # 第 9.2 / 9.3 节：落地 pitch 优化的两个开关（默认值让 baseline 逐位不变）。
++    parser.add_argument("--pretilt-pitch", type=float, default=0.0,
++                        help="工况A：起跳前机体预倾角 [rad]，0.0 = 关闭")
++    parser.add_argument("--freeze-phi-retract", action="store_true",
++                        help="工况B：收腿段（rising）冻结世界系 phi 参考")
+     parser.add_argument("--explicit-jump-reference", action="store_true")
+     parser.add_argument("--compression-only", action="store_true",
+                         help="WP5：压缩完成即停止，不执行 THRUST/FLIGHT/LANDING")
+@@ -333,7 +341,9 @@ def main():
+              command_velocity=args.command_velocity,
+              command_yaw_rate=args.command_yaw_rate,
+              command_yaw_hold=args.command_yaw_hold,
+-             command_hold=args.command_hold)
++             command_hold=args.command_hold,
++             pretilt_pitch=args.pretilt_pitch,
++             freeze_phi_in_retract=args.freeze_phi_retract)
+ 
+ 
+ if __name__ == "__main__":
+```
+
+## 12.9.2 运行文件
+
+| 工况 | δ | 文件 |
+|---|---|---|
+| baseline | 0.00 | `results/P11_000_baseline_run01.json.gz`（第 11 节同一构建，本轮已复核逐位不变） |
+| 负向 1 | -0.10 | `results/P12_010m_baseline_run01.json.gz` |
+| 负向 2 | -0.20 | `results/P12_020m_baseline_run01.json.gz` |
+| 负向 3 | -0.30 | `results/P12_030m_baseline_run01.json.gz` |
+| 旧中止重跑 | +0.35 | `results/P12_0035_baseline_run01.json.gz` |
+| 旧中止重跑 | +0.50 | `results/P12_0050_baseline_run01.json.gz` |
+
+`-0.30` 既未 ABORT、gap 也未跌破 0.200，因此**没有**触发"补跑 -0.15"的条件。
+
+## 12.9.3 12.8 七项指标表
+
+| 序 | 项 | 0.00 | **-0.10** | **-0.20** | **-0.30** |
+|---|---|---|---|---|---|
+| 1 | gap [m]（硬下限 0.200） | 0.22180 | **— (ABORT)** | **0.21559** | **0.20734** |
+| 1b | 相对 0.22180 降幅 | — | — | **-2.80%** | **-6.52%** |
+| 2 | 飞行时长 [s]（>=0.28） | 0.322 | — | **0.315** | **0.309** |
+| 3 | 释放前 phi_world 偏差 [rad]（<=0.05） | **+0.0017** | +0.1073 | **+0.2306** | **+0.3462** |
+| 4 | ABORT 次数与判据 | 0 | **1：`leg_length_out_of_range:R 0.4310`** @1.656 | 0 | 0 |
+| 5 | 触地 pitch [rad] | **-0.7328** | — | **-0.4797** | **-0.2891** |
+| 6 | `max\|pitch\|`（全程） | 0.7945 | 0.7039 | **0.4929** | **0.4124** |
+| 7 | 回归 | 见 12.9.7 | | | |
+
+压缩段 pitch 保持（第 11 节已修好的根因 A 在本轮仍成立）：`max|pitch−δ|` =
+0.0063（-0.10）/ 0.0025（-0.20）/ 0.0032（-0.30）。
+
+**按 12.8 顺序**：第 1 项通过（-0.20、-0.30 的 gap 均 >=0.200）；第 2 项通过（>=0.28）；
+**第 3 项未通过**（+0.2306 / +0.3462 远超 0.05）-> 按规定**停在第 3 项**。
+
+## 12.9.4 `d(theta_land)/d(delta)` 与可行区间
+
+| 两点 | 斜率 |
+|---|---|
+| **-0.20 vs -0.30**（两个非 ABORT 点，12.10 要求） | **-1.906** |
+| 0.00 vs -0.20 | -1.266 |
+| 0.00 vs -0.30 | -1.479 |
+
+（符号：δ 越负，触地 pitch 越接近 0，即漂移被抵消。）
+
+## 12.9.5 可行性结论（三选一）
+
+**选"预倾有效区间"**：在 gap 与飞行时长两条硬指标下，负向预倾存在有效区间，
+实测已完成的两点是 **δ ∈ [-0.30, -0.20]**（gap 0.2073~0.2156 均 >=0.200，飞行 0.309~0.315 s，
+斜率 -1.27 ~ -1.91），δ=-0.30 把触地 pitch 从 -0.7328 压到 **-0.2891**（降 60%）。
+
+但必须同时写明两条限制：
+
+1. **12.8 第 3 项（释放前 phi_world 偏差 <=0.05）在负向全部不通过**（+0.23 / +0.35），
+   世界系腿角被预倾拖到接近水平（-0.20 时 phi_world=+0.104，-0.30 时 +0.220，基线 -0.126），
+   gap 也因此掉了 2.8% / 6.5%。按 12.8 顺序本轮停在第 3 项，区间只算"gap/飞行达标"，未获全部判据认可。
+2. δ=-0.10 **反而 ABORT**（`leg_length_out_of_range:R 0.4310 m`，超上限 1 mm），
+   与 -0.20 / -0.30 能完成的事实不单调；这一点与第 11 节正向小角度 (+0.10/+0.20) 更容易越界是同一类现象。
+
+## 12.9.7 回归
+
+| 项 | 结果 |
+|---|---|
+| baseline 逐位不变 | `--pretilt-pitch 0.0`(P11_000) vs 无开关(JUMP10)：`dqpos=dqvel=dctrl=0.000e+00`（第 11 节已证，本轮未改控制路径） |
+| T12 vs T11 | `0.000e+00` |
+| CMD12 vs CMD11 | `0.000e+00` |
+| JUMP12 vs JUMP11 | `0.000e+00` |
+| 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max\|pitch\|` 0.22459、飞行 0.322 s |
+| 预倾闸门超时 | 全部 0（单独计数，未混入故障 ABORT） |
+
+## 结论摘要
+
+1. `abort_reason` 已进 trace，两个旧中止工况都能说出判据：**腿长越界**（0.4307 / 0.4302 m）。
+2. 负向预倾**方向正确**：δ=-0.30 时触地 pitch -0.2891（基线 -0.7328），斜率 -1.27~-1.91，
+   gap 仍高于硬下限（0.2073），飞行时长 0.309 s。
+3. 但 12.8 第 3 项（世界系腿角偏差 <=0.05 rad）在负向全部超限（0.23~0.35 rad），
+   与 gap 的下降同源：预倾把推力方向从近垂直拖偏。按顺序停在第 3 项。
+4. 未做任何参数调整；未在 gap 破线时继续推进；未用单点斜率下结论（用了 -0.20/-0.30 两点）。
+
+
+
+================================================================
+第 13.5 节 只读取数：起飞失败真因是"腿长没到 0.16"，不是剖面误启动
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A5-Q1Q2（落地 pitch 优化 第 13.5 节）
+
+本轮**只做 13.5（只读取数）**，未做 13.6 的补跑（按 13.6/13.8 要求，必须等 13.5 查清）。
+未改任何代码；数据来自已有记录 `P12_010m / P12_0035 / P12_0050 / P12_020m`。
+
+## 13.7.1 Q1 四工况指标表（COMPRESS_BRAKE 窗口）
+
+字段口径：`wheel_gap` 在 trace 里只有 **2 个分量**（左右侧各一），不是四轮四值；
+`v_z` = `qvel[2]`；腿长差 = |leg_length_R − leg_length_L|。
+
+| 运行 | δ | 窗口 t | **腿长最小** | 达到 `compression_end=0.160`？ | 结束方式 | `v_z` 峰 | **gap 峰（两款）** | 腿长差峰 | 髋角 R/L（均值） |
+|---|---|---|---|---|---|---|---|---|---|
+| P12_010m | -0.10 | 1.156~1.656（0.500 s） | **0.1613** | **否，差 1.3 mm** | ABORT @1.656 | **+1.515** | **0.00004** | **0.0002** | -0.118 / -0.118 |
+| P12_0035 | +0.35 | 1.158~1.642（0.484 s） | **0.1699** | **否，差 9.9 mm** | ABORT @1.642 | **+1.024** | 0.00001 | 0.0001 | -0.122 / -0.122 |
+| P12_0050 | +0.50 | 1.158~1.591（0.433 s） | **0.1972** | **否，差 37.2 mm** | ABORT @1.591 | +0.611 | 0.00001 | 0.0001 | -0.116 / -0.116 |
+| **P12_020m** | -0.20 | 1.156~1.322（0.166 s） | **0.1587** | **是** | **THRUST @1.322** | -0.002 | -0.00021 | 0.0000 | -0.150 / -0.150 |
+
+判据对照（13.5.3 "若 gap 四轮全 <=1e-3 而 v_z>1.0，则腿在伸、机体没抬起"）：
+
+- P12_010m（v_z +1.515）与 P12_0035（v_z +1.024）**命中**：gap 全程 <=4e-5，但机体 v_z 已超过 1.0；
+- P12_0050 v_z 只到 +0.611，未命中该门槛（但同样是 gap≈0、腿在伸）；
+- 成功对照 P12_020m 的 v_z 峰只有 -0.002（下压到底后转 THRUST），gap 为 -2.1e-4。
+
+**两腿对称性**：三例 ABORT 的腿长差峰 <=0.0002 m、左右髋角均值完全一致（-0.118/-0.118 等），
+所以**不是"一高一低把机体塔死"**，两腿是同步伸展的。
+
+### 关键时序（P12_010m，每 20 ms）
+
+| t | phase | leg_R | v_z | gap（两款） | leg_length_target | leg_force | 剖面 L_ref | 髋力矩 c0..c3 |
+|---|---|---|---|---|---|---|---|---|
+| 1.151 | COMPRESS | 0.2235 | -0.731 | -0.0003 | None | -226 | None | -3.6, 3.7, 3.6, -3.7 |
+| 1.191 | COMPRESS_BRAKE | 0.1964 | -0.585 | -0.0005 | None | -226 | None | -9.7, 9.7, 9.7, -9.7 |
+| 1.291 | COMPRESS_BRAKE | 0.1622 | -0.099 | -0.0006 | None | -226 | None | -8.2, 8.2, 8.2, -8.2 |
+| **1.311** | COMPRESS_BRAKE | **0.1613（全窗口最小）** | **-0.002** | -0.0006 | None | -226 | None | -8.1, 8.2, 8.1, -8.2 |
+| 1.331 | COMPRESS_BRAKE | 0.1622 | +0.094 | -0.0006 | None | -226 | None | -8.1, 8.2, 8.1, -8.2 |
+| 1.451 | COMPRESS_BRAKE | 0.2074 | +0.649 | -0.0006 | None | -226 | None | -9.7, 9.8, 9.7, -9.8 |
+| 1.591 | COMPRESS_BRAKE | 0.3408 | +1.254 | -0.0001 | None | -226 | None | -10.4, 10.5, 10.4, -10.5 |
+| 1.651 | COMPRESS_BRAKE | 0.4235 | +1.494 | -0.0000 | None | -226 | None | -9.0, 9.3, 8.9, -9.3 |
+
+**根因（数据支持）**：腿长最低只到 **0.1613**（差 `compression_end=0.160` 仅 1.3 mm），
+在 t=1.311 速率由负转正，此后常驻 `leg_force=-226 N` 把两条腿**同步**一路伸到 0.4235+，
+v_z 从 -0.731 翻到 +1.494，而两轮 gap 始终 <=4e-5（从未离地）。
+相位机退出条件（`jump.py` COMPRESS_BRAKE 分支）是
+`leg_length_R <= compression_end 且 leg_length_rate_R >= 0`（左右同），
+**腿长从未达到 0.160**，所以永远不切 THRUST，卡在 COMPRESS_BRAKE 0.5 s，
+最终腿长撞 0.430 上限 -> ABORT。
+
+## 13.7.2 Q2 帧级证据：飞行剖面**没有**在地面上启动
+
+| 运行 | `flight_leg_profile` 帧数 | 其中 `geometrically_airborne=False` 帧数 | 剖面首帧 t / phase | 首帧 L_ref | 首帧 leg_R | 首帧 gap |
+|---|---|---|---|---|---|---|
+| P12_010m | 273 | **0** | 1.661 / **ABORT** | **0.4300**（已夹到 `leg_length_max`） | 0.4365 | 0.00145 / 0.00116 |
+| P12_0035 | 975 | **0** | 1.650 / **ABORT** | 0.4300 | 0.4371 | 0.00114 / 0.00122 |
+| P12_0050 | 889 | **0** | 1.610 / **ABORT** | 0.4300 | 0.4367 | 0.00110 / 0.00112 |
+| P12_020m（成功） | 315 | 4（都在 FLIGHT 首帧附近，后续即真正离地） | 1.437 / FLIGHT | 0.2844 | 0.2858 | -0.00003 |
+
+- **误启动窗口（`gap <= 1e-3` 但 `geometrically_airborne=True`）：四个工况全部 0 个**；
+- 三个 ABORT 工况的剖面首帧都发生在 **ABORT 之后**，此时 `L_ref` 直接是夹到上限的 0.4300，
+  随后实测腿长 0.4365~0.4371（超出上限 6~7 mm）；
+- 从 1.15 到 1.65 逐帧确认：`jump.flight_leg_ref` 在 ABORT 之前**一直是 None**。
+
+**因此 13.3 结论二中的"伸腿剖面在地面上跑（缺陷 B）"在数据上不成立**：
+伸腿段不是剖面驱动的，而是 COMPRESS_BRAKE 期间常驻等效力（`leg_force=-226 N`，`leg_length_target=None`）
+驱动；`output_source` 在该窗口是 `wbc_update`(126 帧) 与 `zero_order_hold`(375 帧) 的 250 Hz 交替，
+属正常节拍，不是残留。
+
+真正与剖面相关的问题是**中止之后**：剖面在 ABORT 相位仍然被调用（`flight_leg_extend` 只看几何离地判据），
+`L_ref` 夹在 `leg_length_max`，腿继续被推到 0.4365+（超上限 6~7 mm）。这是中止后的次要现象，
+不是 ABORT 的成因。
+
+## 13.7.3 13.5 结论（起飞失败主因）
+
+**主因：压缩深度没到 `compression_end`，相位机不退出，常驻等效力把两腿同步伸到结构上限。**
+
+证据链：
+1. 三例 ABORT 的腿长最小值分别为 0.1613 / 0.1699 / 0.1972，**都没达到 0.160**（差 1.3 / 9.9 / 37.2 mm）；
+   成功例 -0.20 达到 0.1587 并立即切 THRUST（t=1.322）。
+2. 腿长在 1.311 触底后速率转正，`v_z` 由 -0.731 升到 +1.494，两轮 gap 全程 <=4e-5（从未离地）；
+3. 两腿完全对称（腿长差 <=0.2 mm、髋角一致），排除"一高一低塔死"；
+4. 姿态不是原因：整个窗口 pitch 保持预倾目标（`max|pitch−δ|` = 0.0063），且剖面未启动。
+
+即：**预倾角改变了压缩能到多深**（δ 越大越小），一旦压不到 0.160，状态机就卡住并自我放大成越界中止。
+这与 13.3 的 A/B 两条都有出入：A 不是"机体被抬不起来"，而是"压缩不到位导致状态机不退出"；
+B 的"剖面在地面运行"不成立（剖面在 ABORT 后才出现）。
+
+## 未做项（按 13.6 / 13.8）
+
+- 13.6 的 `-0.35 / -0.40` 补跑与 `-0.10` 重跑**未执行**（要求 13.5 查清之后再做）；
+- 未改 `leg_length_max`、未改 `PREPARE_TOLERANCE`/`PRELOAD_RATE`、未改压缩剖面；
+- "预倾有效"仍不作定案（稳定复现、连跳、行进中起跳都未测）。
+
+## 13.7.5 回归（本轮未改代码，沿用 R12 结果并复核）
+
+| 项 | 结果 |
+|---|---|
+| baseline 逐位不变 | `--pretilt-pitch 0.0`(P11_000) vs 无开关(JUMP10)：`dqpos=dqvel=dctrl=0.000e+00` |
+| T12 vs T11 / CMD12 vs CMD11 / JUMP12 vs JUMP11 | 全部 `0.000e+00` |
+| 跳跃 6 项 | 间隙 0.22180、ABORT 0、越界 0、单支撑 0、`airborne_zero` 0、瞬态后 `max\|pitch\|` 0.22459、飞行 0.322 s |
+| 预倾闸门超时 | 0 |
+
+
+
+================================================================
+第 14 节：行程 0.10 两次运行（分离行程效应）与 14.6 判据
+测试agent-ds，2026-10-18
+================================================================
+
+VP编号：PITCH-A6（落地 pitch 优化 第 14.5 / 14.6 / 14.7 节）
+
+本轮**未改任何代码**（只跑 14.5 的两次运行并取数）。
+
+## 14.2 余量表复核（我独立复算，与文档一致）
+
+| δ | 腿长最小（压缩段） | 相对 `compression_end=0.160` | 结束方式 |
+|---|---|---|---|
+| 0.00（baseline，补充行） | 0.1564 | **-3.6 mm** | THRUST |
+| -0.30 | 0.1544 | **-5.6 mm** | THRUST |
+| -0.20 | 0.1587 | **-1.3 mm** | THRUST |
+| -0.10 | 0.1613 | **+1.3 mm** | ABORT |
+| +0.35 | 0.1699 | **+9.9 mm** | ABORT |
+| +0.50 | 0.1972 | **+37.2 mm** | ABORT |
+
+即：压缩目标值与相位机退出阈值是同一个数（零容差），腿长差 1.3 mm 就足以决定成立/卡死。
+
+## 14.5 两次运行（`--jump-stroke 0.10`，`compression_end = 0.18`）
+
+| # | 运行 | δ | 文件 |
+|---|---|---|---|
+| 1 | baseline 对照 | 0.00 | `results/P14_000s10_baseline_run01.json.gz` |
+| 2 | 行程变浅 + 预倾 | -0.30 | `results/P14_030ms10_baseline_run01.json.gz` |
+
+## 14.6 判据表（按序）
+
+| 序 | 项 | 要求 | 第 1 次（δ=0.00） | 第 2 次（δ=-0.30） |
+|---|---|---|---|---|
+| 1 | 相位机正常退出 + 腿长最小 | 退出正常；腿长 min >=0.170 | **THRUST@1.286，0.1794** 通过 | **THRUST@1.311，0.1738** 通过 |
+| 2 | ABORT / 腿长上限 | 0 次；腿长全程 <=0.430 | **0 次；max 0.2800** 通过 | **0 次；max 0.2800** 通过 |
+| 3 | gap | >=0.200，报降幅 | **0.21483（-3.1%）** 通过 | **0.20602（-7.1%）** 通过 |
+| 4 | 飞行时长 | >=0.28 s | **0.316 s** 通过 | **0.308 s** 通过 |
+| 5 | 触地 pitch | <=-0.35（改善 >=50%） | -0.7101（对照，改善 3.1%，预倾未开） | **-0.4268，改善 41.8%** -> 按"改善>=50%"口径**未通过** |
+| 6 | 释放前 phi_world 偏差 | <=0.30 | **+0.0012** 通过 | **+0.3371** **未通过** |
+
+说明：第 5 项括号里两个口径互相冲突——`-0.4268 <= -0.35` 数值上成立，
+但相对基线的改善是 **41.8%**（要 >=50% 需要触地 pitch 不高于 -0.366）。
+本报告两个数都给，请按你的口径裁定。
+
+## 14.7 决策（按规则填）
+
+- **第 1 次 gap = 0.21483 >= 0.200，且相位机正常退出（THRUST@1.286、腿长 min 0.1794、ABORT 0）
+  -> 选项 2 可行**，进入"用第 2 次定工作点"。
+- 第 2 次（δ=-0.30 + stroke 0.10）的结果：gap **0.20602（-7.1%）**、飞行 **0.308 s**、
+  触地 pitch **-0.4268（改善 41.8%）**、释放前 phi_world 偏差 **+0.3371**。
+  按 14.6 顺序在第 5 项（改善 >=50%）停，第 6 项也未通过；未据此判定工作点，等你的口径。
+
+## 行程效应分离（附：同 δ 两种行程对照）
+
+| 运行 | δ | stroke | 腿长最小 | gap | 飞行 | 触地 pitch | phi_world 偏 |
+|---|---|---|---|---|---|---|---|
+| P11_000 | 0.00 | 0.12 | 0.1564 | 0.22180 | 0.322 | -0.7328 | +0.0017 |
+| P12_030m | -0.30 | 0.12 | 0.1544 | 0.20734 | 0.309 | **-0.2891** | +0.3462 |
+| P14_000s10 | 0.00 | 0.10 | 0.1794 | 0.21483 | 0.316 | -0.7101 | +0.0012 |
+| P14_030ms10 | -0.30 | 0.10 | 0.1738 | 0.20602 | 0.308 | **-0.4268** | +0.3371 |
+
+- 行程从 0.12 减到 0.10（δ=0 对照）：gap 0.22180 -> 0.21483（**-3.1%**）、
+  触地 pitch -0.7328 -> -0.7101（改善 3.1%）、飞行 0.322 -> 0.316 s。
+  即"行程变浅"本身就要付 3.1% 的 gap 代价。
+- 同 δ=-0.30：行程 0.12 的触地 pitch 更好（-0.2891 vs -0.4268），但那个行程在 ±0.10/+0.35 会卡死；
+  行程 0.10 把卡死区间消掉了，代价是触地 pitch 只到 -0.4268。
+
+## 未做 / 严禁项遵守情况
+
+- 没有同时改 `compression_stroke` 与退出判据（退出判据本轮完全未动）；
+- 没有以 pitch 改善为由接受 <0.200 的 gap（两次 gap 都 >=0.206）；
+- 没有跳过第 1 次对照直接用第 2 次下结论；
+- 未改任何阈值/限幅/节拍，`leg_length_max` 保持 0.430。
+
+回归：本轮无代码改动，R12/R13 的回归结果继续有效
+（baseline 逐位不变、T1/CMD1 逐位全 0、跳跃 6 项不变、闸门超时 0）。
+
+
+
+================================================================
+第 15 节：v-PITCH 定案默认值与 10 项验收（序 6 / 序 10 不通过）
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V15（落地 pitch 优化 第 15.1 / 15.3 / 15.6 节）
+
+## 一、代码改动（15.6.1，本轮 7 处数值默认值）
+
+```diff
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+@@ -287,8 +287,19 @@ class SimulationConfig:
+     jump_height: float | None = None
+-    jump_stroke: float = 0.12
++    # 第 15.1 节（落地 pitch 优化 v-PITCH 定案）：0.10 m 为实测选定值——0.12 的行程在
++    # delta=-0.10/+0.35/+0.50 会让压缩压不到 compression_end(0.28-stroke) 而卡在
++    # COMPRESS_BRAKE 直到腿长越界；0.10 消除该区间，代价是 gap -3.1%（第 14.5 节实测）。
++    jump_stroke: float = 0.10
+     jump_time: float = 1.0                 # [s] 起跳指令时刻
+-    pretilt_pitch: float = 0.0
++    # 第 9.2 节（落地 pitch 优化 工况 A）：起跳前机体预倾角 [rad]。0.0 = 完全关闭。
++    # 第 15.1 节定案默认 -0.30 rad：第 12 节实测扫描中触地 pitch 最优且不卡死的点
++    # （触地 pitch -0.7328 -> -0.4268，gap 0.20602）。生效窗口复用相位（IDLE/COMPRESS），
++    # 不新增时长常数。注意：本默认值使"默认 baseline"不再逐位等于旧版，回归判据只适用于
++    # 不跳工况（jump is None 时预倾不生效，第 15.2 节）。
++    pretilt_pitch: float = -0.30
+
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++++ b/wheel_leg_mujoco/tools/jump_diagnostic.py
+@@ -190,1 +190,1 @@ def run_case(...)
+-             pretilt_pitch=0.0, freeze_phi_in_retract=False):
++             pretilt_pitch=-0.30, freeze_phi_in_retract=False):
+@@ -286,1 +286,1 @@ def main():
+-    parser.add_argument("--jump-stroke", type=float, default=0.12)
++    parser.add_argument("--jump-stroke", type=float, default=0.10)
+@@ -290,2 +290,2 @@ def main():
+-    parser.add_argument("--pretilt-pitch", type=float, default=0.0,
++    parser.add_argument("--pretilt-pitch", type=float, default=-0.30,
+                         help="工况A：起跳前机体预倾角 [rad]，0.0 = 关闭")
++                        # help 文案补：默认 -0.30（第 15.1 节定案）
+
+--- a/wheel_leg_mujoco/tools/view.py     (同 --jump-stroke 默认)
+--- a/wheel_leg_mujoco/tools/video.py   (同 --jump-stroke 默认)
+-    parser.add_argument("--jump-stroke", type=float, default=0.12, help="压缩行程 [m]")
++    parser.add_argument("--jump-stroke", type=float, default=0.10, help="压缩行程 [m]")
+```
+
+改 view/video 的理由：这两个工具**显式**把 `--jump-stroke` 传进 `SimulationConfig`，
+只改配置默认值会被 CLI 默认 0.12 覆盖，实际行为仍是旧值。
+`jump_diagnostic.run_case` 同理（它的形参默认 0.0 会把 CLI 默认透传成"关闭预倾"）。
+
+完整工作树 diff 另存 `_p15_diff.txt`（含前几轮累计改动，不属于本轮）。
+**未改**：`jump_height`、`leg_length_max`、任何阈值/增益/判据/剖面。
+
+## 二、共同自检
+
+- `py_compile gbc_mpc_wbc/simulation.py tools/jump_diagnostic.py tools/view.py tools/video.py`：通过。
+- 默认链路验证（本轮最关键的自检）：不传任何参数跑一次，结果与**显式**传
+  `--pretilt-pitch -0.30 --jump-stroke 0.10` 的 `P14_030ms10` **逐位一致**
+  （gap 差 0.00e+00、触地 pitch 差 0.00e+00、腿长 min 差 0.00e+00），
+  说明默认值确实进了控制路径，不是只改了配置字段。
+- 工作树另有一处非本 agent 的变化：`源文档 copy.pdf` 被删除（`git diff --stat` 显示
+  `Bin 3520172 -> 0 bytes`）。本 agent 未触碰该文件。
+
+## 三、判据表（15.3 十项）
+
+| 序 | 项 | 要求 | 实测 | 结果 |
+|---|---|---|---|---|
+| 1 | 相位全流程 | 七相位走完，无 ABORT | `IDLE@0.000->COMPRESS@1.000->COMPRESS_BRAKE@1.143->THRUST@1.311->FLIGHT@1.413->LANDING@1.721->RECOVER@1.744->IDLE@1.745`，ABORT **0** | 通过 |
+| 2 | 腿长 | [0.114, 0.430] | `[0.1738, 0.3093]` | 通过 |
+| 3 | gap | >=0.200 | **0.20602** | 通过 |
+| 4 | 飞行 | >=0.28 s | **0.308 s** | 通过 |
+| 5 | 触地 pitch | 改善 >=35%（不高于 -0.47） | **-0.4268（改善 41.8%）** | 通过 |
+| 6 | 落地后行为 | 后向回退 <=0.03 m | **0.3991 m** | **不通过** |
+| 7 | 重复性 | 连跑 3 次：gap 差 <=0.005、pitch 差 <=0.05 | 三次两两差 **gap 0.00000 / pitch 0.00000 / 飞行 0.00000 / 腿长 0.00000** | 通过 |
+| 8 | 连跳 5 次 | 每次正常退出压缩、无 ABORT | **5 次全部受理（相位=IDLE）、5 次全部回到 IDLE，ABORT 0**，gap_max 0.20788、腿长 [0.1576, 0.3111] | 通过 |
+| 9 | 不跳回归 | T1/CMD1 逐位全 0 | T15 vs T12：`qpos 0.0 / qvel 0.0 / ctrl 0.0`；CMD15 vs CMD12：同 | 通过 |
+| 10 | 行进中起跳 0.5 m/s | 落地后能停住、不失控 | **落地后一路后退 9.13 m，末速度 -0.928 m/s，末 2 s 仍漂 1.894 m** | **不通过（严重）** |
+
+## 四、关键时间线
+
+### 4.1 序 1~6 主工况（`results/V15R_baseline_run01.json.gz`，默认参数）
+
+```
+t=1.000 COMPRESS        leg 0.2800  v_z 0
+t=1.143 COMPRESS_BRAKE  leg 0.1738（最小，目标 0.180）
+t=1.311 THRUST
+t=1.413 FLIGHT          gap 峰 0.20602
+t=1.721 LANDING         pitch -0.4268  v = -1.298 m/s（向后）
+t=1.745 IDLE            落地后滚动至 s=-0.8756，v=0.0000
+```
+
+### 4.2 序 8 连跳 5 次（`results/V15_CHAIN_frames.json.gz`，headless 走 `request_jump()`）
+
+```
+[请求] t=2.00 -> 2.001 相位=IDLE 受理
+[请求] t=4.00 -> 4.001 相位=IDLE 受理
+[请求] t=6.00 -> 6.000 相位=IDLE 受理
+[请求] t=8.00 -> 8.000 相位=IDLE 受理
+[请求] t=10.00 -> 10.001 相位=IDLE 受理
+第1跳: COMPRESS@2.002 -> ... -> RECOVER@2.750 -> IDLE@2.751
+第2跳: COMPRESS@4.002 -> ... -> IDLE@4.751
+第3跳: COMPRESS@6.001 -> ... -> IDLE@6.750
+第4跳: COMPRESS@8.001 -> ... -> IDLE@8.750
+第5跳: COMPRESS@10.002 -> ... -> IDLE@10.750
+ABORT 帧数=0 | gap_max=0.20788 | 腿长 [0.1576, 0.3111]
+```
+
+### 4.3 序 10 行进中起跳（0.5 m/s，`--command-hold 4.0 --jump-time 3.0`）
+
+`results/V15M_command_velocity_run01.json.gz`（本版默认）vs
+`results/V15M0_command_velocity_run01.json.gz`（对照，`--pretilt-pitch 0.0`，其余相同）：
+
+| 时刻 | 对照 δ=0：v / pitch | 本版 δ=-0.30：v / pitch |
+|---|---|---|
+| t=1.0 | **+0.499 / -0.000** | **-0.157 / -0.249** |
+| t=2.0 | +0.500 / -0.000 | -0.273 / -0.233 |
+| t=3.0（起跳指令） | +0.500 | **-0.341**（`ref_v` = -0.341） |
+| 触地 | +0.464，pitch -0.736，gap 0.22839，飞行 0.328 | **-1.841**，pitch -0.356，gap 0.21641，飞行 0.318 |
+| 落地后位移 | **+0.019 m**，末 v **+0.000**，末 2 s 漂移 **0.0000 m** | **-9.130 m**，末 v **-0.928**，末 2 s 漂移 **1.8945 m** |
+
+本版落地后时序（每 0.5 s）：`t=3.8 v=-1.84 -> 4.8 v=-1.43 -> 6.8 v=-1.12 -> 8.8 v=-0.99 -> 10.8 v=-0.95 -> 12.0 v=-0.93`，
+速度只是缓慢衰减，**直到仿真结束仍未停住**。
+
+## 五、完整结果表
+
+| 运行 | 文件 | 相位序（ABORT） | gap | 飞行 | 触地 pitch | 后向回退 | 末速度 |
+|---|---|---|---|---|---|---|---|
+| V15R run01 | `results/V15R_baseline_run01.json.gz` | 七相位完整（0） | 0.20602 | 0.308 | -0.4268 | 0.3991 | 0.0000 |
+| V15R run02 | `results/V15R_baseline_run02.json.gz` | 同上（0） | 0.20602 | 0.308 | -0.4268 | 0.3991 | 0.0000 |
+| V15R run03 | `results/V15R_baseline_run03.json.gz` | 同上（0） | 0.20602 | 0.308 | -0.4268 | 0.3991 | 0.0000 |
+| CHAIN | `results/V15_CHAIN_frames.json.gz` | 5 跳全回 IDLE（0） | 0.20788（max） | — | — | — | — |
+| T15 | `results/T15_baseline_run01.json.gz` | 不跳（--no-jump） | — | — | — | — | 与 T12 逐位 0 |
+| CMD15 | `results/CMD15_command_velocity_run01.json.gz` | 不跳 | — | — | — | — | 与 CMD12 逐位 0 |
+| V15M | `results/V15M_command_velocity_run01.json.gz` | 七相位完整（0） | 0.21641 | 0.318 | -0.3558 | 9.1302 | **-0.9277** |
+| V15M0（对照） | `results/V15M0_command_velocity_run01.json.gz` | 七相位完整（0） | 0.22839 | 0.328 | -0.7362 | 0.019（正向） | 0.0000 |
+
+序 6 对照（同一指标在三个版本上的值，用来判断是不是本版引入）：
+
+| 运行 | 触地 pitch | 触地水平速度 | 落地后位移 | 后向回退 | 末速度 |
+|---|---|---|---|---|---|
+| 旧版（δ=0, stroke 0.12） | -0.7328 | -0.102 | -0.2359 | **0.2359** | 0.0000 |
+| δ=0, stroke 0.10 | -0.7101 | -0.033 | -0.1396 | **0.1396** | 0.0000 |
+| 本版（δ=-0.30, stroke 0.10） | -0.4268 | **-1.298** | -0.3991 | **0.3991** | 0.0000 |
+
+即：序 6 的 0.03 m 门槛在**任何版本**的原地跳上都不成立（旧版 0.2359），
+本版把它从 0.2359 放大到 0.3991；放大项对应触地水平速度从 -0.10 变成 **-1.30 m/s**。
+三个版本落地后最终都停住（末速度 0.0000），本版不是"失控滚走"，是"落地时带着 -1.3 m/s 后向速度"。
+
+## 六、额外发现（未改代码，只记录）
+
+1. **预倾在 IDLE 段就生效，且有可见副作用**（代码位置 `gbc_mpc_wbc/control.py:263-265`，
+   窗口 `{"IDLE","COMPRESS","COMPRESS_BRAKE"}`）：
+   - 原地工况 IDLE 段 pitch 稳定在 **-0.2999**（t=0.6 / t=0.99），启动瞬间 t=0.14 水平速度冲到
+     **+0.4903 m/s** 再回摆（t=0.99 收到 -0.009、s=+0.0028）；
+   - 行进工况 IDLE 段 `ref_v` 从 t=0.3 起就是 **负值**（-0.030 -> -0.157 -> -0.274 -> -0.341），
+     命令是 +0.5。即**规划器给出的参考速度本身反了向**，不是执行层跟丢。
+   序 10 的失控与序 6 的 0.40 m 后向滚动，共同上游都是这一条。
+2. 序 8 的连跳是 headless 走 `request_jump()`（与 view 空格同一条路径），不是 GUI 按键；
+   若需要真实按键复核请另行安排。
+
+## 七、结论
+
+- 15.6.1 的默认值改动已落地，并被"默认 vs 显式参数逐位一致"证实真正进入了控制路径。
+- 10 项验收：**8 项通过，序 6 与序 10 不通过**。
+- 序 10 是硬失败：0.5 m/s 前进命令下机器人**反向**行驶（`ref_v` 为负），落地后一路后退
+  9.13 m 直至仿真结束仍未停住。同参数、只把 δ 换成 0.0 的对照组完全正常
+  （v 跟随 +0.499、落地后位移 +0.019 m、末速度 0）。
+- 本 agent 未调任何参数、未动 `jump_height`、未改判据；两处不通过如实上报，
+  等待对"预倾生效窗口（IDLE 是否应包含）"的裁定。
+
+
+
+================================================================
+第 16.3 节：冻结收腿段 phi 参考（工况 B）实测——改善 0.7%，T2 反而变差
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V16（落地 pitch 优化 第 16.3 / 16.5 / 16.6 节）
+
+## 一、代码改动
+
+**无**。`--freeze-phi-retract` 开关与 `control.py:_phi_force` 的冻结分支是前几轮已实现的现成代码，
+本轮直接使用，未改一行。
+
+## 二、共同自检
+
+- 对照 run 重对齐：`V16B`（`--pretilt-pitch 0.0 --jump-stroke 0.10`）与第 14.5 节的
+  `P14_000s10`（同参数）**逐位一致**：`qpos=qvel=ctrl=0.000e+00`，6000 帧。
+  说明本轮 A/B 的基准没有漂移。
+- `pitch_budget.py` 两段自检：三段角度之和 - 总变化 = `+0.000e+00`（两次都通过），
+  地面静止帧 `phi_world - phi_eq(0.28)` 偏差 `0.0000 rad`。
+- 参数说明：本轮**两次都用 `--pretilt-pitch 0.0`**。理由：默认值已是 -0.30（第 15.1 节），
+  若不带 0.0 就是"预倾 + 冻结"两条路线同时开，违反 16.8 第 2 条。
+  stroke 用 **0.10**（16.3 指定以 P14_000s10 为对照、同 stroke 对齐）。
+
+## 三、判据表（16.5 七项）
+
+| 序 | 项 | 要求 | 对照 V16B | 冻结 V16F | 结果 |
+|---|---|---|---|---|---|
+| 1 | gap | >=0.200，且相对 0.22180 降幅 <=1% | 0.21483（-3.1%） | **0.22018（-0.73%）** | 冻结**通过**；对照本身不满足（-3.1%，是 stroke 0.10 的已知代价） |
+| 2 | 相位机 | 正常退出；腿长最小与基线同 | THRUST@1.286，min 0.1794 | **THRUST@1.286，min 0.1794** | 通过（无 0.1613 类卡死） |
+| 3 | 腿长极值 | <=0.430，>=0.114 | [0.1794, 0.2985] | **[0.1794, 0.3004]** | 通过 |
+| 4 | 触地 pitch | 报值 + 改善% | **-0.7101** | **-0.7148** | **改善 +0.7%（恶化 0.0047 rad）** |
+| 5 | max\|pitch\| / 冲击峰 | 不高于 0.7945 rad（45.5 度） | 0.7674 rad（43.97 度）/ 436.9 N | **0.7713 rad（44.19 度）/ 431.2 N** | 通过（未超基线） |
+| 6 | 落地后收敛 | 后向回退 <=0.03 m | 0.1396 | **0.1365** | **不通过**（与基线同量级，非冻结引入） |
+| 7 | `--no-jump` 回归 | 逐位全 0 | — | T16 vs T15：`qpos=qvel=ctrl=0.000e+00`；CMD16 vs CMD15：同 | 通过 |
+
+## 四、pitch 预算分解（`pitch_budget.py`，16.1 同一口径）
+
+| 段 | V16B d_pitch | V16B d_phiW_R | V16B ∫τ_hip | V16F d_pitch | V16F d_phiW_R | V16F ∫τ_hip |
+|---|---|---|---|---|---|---|
+| T0（压缩） | -0.0013 | +0.0029 | +8.1144 | -0.0013 | +0.0029 | +8.1144 |
+| **T1（收腿）** | **-0.3262** | **+0.1579** | **-1.2089** | **-0.2870** | **+0.2015** | **-1.0956** |
+| **T2（伸腿）** | **-0.3826** | **-0.0409** | **-0.3451** | **-0.4264** | **-0.0881** | **+0.3339** |
+| 合计 | **-0.7101** | — | -1.5540 | **-0.7148** | — | -0.7617 |
+
+机制读法与 16.1 一致（只报数，不引申）：
+
+- 冻结把 **T1 的 d_phiW 从 +0.158 推到 +0.202**，T1 的 d_pitch 因此少负 0.039（-0.326 -> -0.287），
+  即"收腿段腿摆方向"确实被冻结改变了，方向对；
+- 但 **T2 的 d_phiW 从 -0.041 变成 -0.088**，T2 的 d_pitch 多负 0.044（-0.383 -> -0.426），
+  把 T1 的收益全部吃掉还倒亏 0.005；
+- `∫τ_hip` 的符号在 T2 由 -0.345 翻成 **+0.334**（执行器在 T2 反向出力），说明冻结不是"少出一点力"，
+  而是**改变了伸腿段的出力方向**。
+
+## 五、完整结果表
+
+| 运行 | 文件 | gap | 飞行 | 腿长范围 | 触地 pitch | max\|pitch\| | 冲击峰 | 后向回退 | 末速度 | ABORT |
+|---|---|---|---|---|---|---|---|---|---|---|
+| V16B 对照 | `results/V16B_baseline_run01.json.gz` | 0.21483 | 0.316 s | [0.1794, 0.2985] | -0.7101 | 0.7674 | 436.9 N | 0.1396 | 0.0000 | 0 |
+| V16F 冻结 | `results/V16F_baseline_run01.json.gz` | 0.22018 | 0.315 s | [0.1794, 0.3004] | -0.7148 | 0.7713 | 431.2 N | 0.1365 | 0.0000 | 0 |
+| T16 | `results/T16_baseline_run01.json.gz` | 不跳 | — | — | — | — | — | — | — | 与 T15 逐位 0 |
+| CMD16 | `results/CMD16_command_velocity_run01.json.gz` | 不跳 | — | — | — | — | — | — | — | 与 CMD15 逐位 0 |
+
+## 六、额外发现
+
+1. 冻结让 **gap 从 0.21483 升到 0.22018（+2.49%）**，相对 stroke 0.12 基线 0.22180 只差 -0.73%。
+   这与 16.2 表里"理论不降"一致，是本路线的正面信号，但触地 pitch 没换来收益。
+2. 序 6（后向回退 <=0.03）在两个 run 上都是 0.14 左右，与第 15 节同源：原地跳落地时水平速度为负
+   （V16B -0.033 / V16F 未放宽），不算冻结引入的新问题。
+3. `max|pitch|` 与冲击峰都未超基线（0.7945 / 45.5 度），冻结没有把瞬态做大。
+
+## 七、结论（按 16.6 决策表）
+
+| 16.6 判据 | 实测 | 落入哪一行 |
+|---|---|---|
+| 改善 >=15% 且 gap 基本不降 | 改善 **+0.7%** | — |
+| **改善 <15%** | **+0.7%** | **命中：主战场在 T2，把冻结窗口扩到 T2 再跑** |
+| 恶化或 gap 掉 >1% | gap 反升 2.49% | — |
+
+即：只冻结收腿段（T1）**基本无效**（0.7%，远低于 15% 门槛），与 16.3 的事前预期一致；
+预算分解显示收益被 T2 的反向变化抵消。
+
+**下一步（按 16.6 第二行）需要改代码**：把 `control.py:_phi_force` 的冻结条件从
+`mode == "rising"` 扩到整个飞行剖面（T1+T2），本轮**未做**，等确认后再改：
+
+```python
+# 现状（只冻结收腿段）
+if freeze_phi_in_retract and mode == "rising":
+    phi_body_ref = float(world_ref)
+# 拟改（冻结整个剖面，仍不加任何新参数）
+if freeze_phi_in_retract:
+    phi_body_ref = float(world_ref)
+```
+
+需要确认一点：`--freeze-phi-retract` 这个开关名与新语义（冻结 T1+T2）不符，
+是保留原名（改语义）还是另加一个开关名，请指定。
+
+
+
+================================================================
+第 17 节：冻结窗口扩到整个飞行剖面（改名 freeze_phi_flight）——pitch 改善 36.0%，冲击峰超限
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V17（落地 pitch 优化 第 17.4 / 17.5 / 17.6 节）
+
+## 一、代码改动（17.4，两处语义 + 全链路改名，不新增参数）
+
+```diff
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -111,11 +111,13 @@
+ def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
+-               freeze_phi_in_retract: bool = False) -> np.ndarray:
++               freeze_phi_flight: bool = False) -> np.ndarray:
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    # 第 9.3.2 节（工况 B）：收腿段把机体系参考直接取世界系参考（去掉 + pitch）
++    # 第 9.3.2 / 17.4 节（工况 B）：飞行段把机体系参考取世界系参考（去掉 + pitch）
++    # 第 17.4 节：冻结窗口由"仅收腿段"扩到**整个飞行剖面**（T1+T2），开关随之改名。
+-    if freeze_phi_in_retract:
++    if freeze_phi_flight:
+         phi_body_ref = float(world_ref)
+@@ -143,1 +143,1 @@
+                               retract_state=None, dt=0.0, pitch=0.0,
+-                              freeze_phi_in_retract: bool = False):
++                              freeze_phi_flight: bool = False):
+@@ -203,5 +203,5 @@
+-    # 冻结只在收腿段（mode == "rising"）生效，伸腿段仍走世界系补偿。
+-    freeze_now = bool(freeze_phi_in_retract and mode == "rising")
++    # 第 17.4 节：冻结覆盖整个飞行剖面（收腿 T1 + 伸腿 T2），不再按 mode 限定。
++    freeze_now = bool(freeze_phi_flight)
+     phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
+-                      freeze_phi_in_retract=freeze_now)
++                      freeze_phi_flight=freeze_now)
+
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+-    # 第 9.3 节（工况 B）：收腿段（飞行剖面 mode == "rising"）把世界系 phi 参考冻结。
+-    freeze_phi_in_retract: bool = False
++    # 第 9.3 / 17.4 节（工况 B）：飞行剖面（收腿 T1 + 伸腿 T2）把世界系 phi 参考冻结。
++    # 第 17.4 节把窗口从"仅收腿段"扩到整个剖面，并改名 freeze_phi_flight（无别名）。
++    freeze_phi_flight: bool = False
+
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+-                freeze_phi_in_retract=bool(sim.config.freeze_phi_in_retract))
++                freeze_phi_flight=bool(sim.config.freeze_phi_flight))
+
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
+-             pretilt_pitch=-0.30, freeze_phi_in_retract=False):
++             pretilt_pitch=-0.30, freeze_phi_flight=False):
+-                              freeze_phi_in_retract=bool(freeze_phi_in_retract))
++                              freeze_phi_flight=bool(freeze_phi_flight))
+-    parser.add_argument("--freeze-phi-retract", action="store_true",
+-                        help="工况B：收腿段（rising）冻结世界系 phi 参考")
++    parser.add_argument("--freeze-phi-flight", action="store_true",
++                        help="工况B：整个飞行剖面（收腿 T1 + 伸腿 T2）冻结世界系 phi 参考")
+-             freeze_phi_in_retract=args.freeze_phi_retract)
++             freeze_phi_flight=args.freeze_phi_flight)
+```
+
+改名后 `grep -rn "freeze_phi_in_retract|freeze-phi-retract"` 命中 **0 处**（无别名残留）。
+未动 `phi_eq`、`KP_PHI`/`KD_PHI`、任何阈值；未写 `flight_phi_offset`。
+
+## 二、共同自检
+
+- `py_compile control.py simulation.py loop.py jump_diagnostic.py`：通过；`--help` 只出现 `--freeze-phi-flight`。
+- 改名不改行为：`V17B`（不带开关）与 `V16B` **逐位一致**（`qpos=qvel=ctrl=0.000e+00`）。
+- 两轮都用 `--pretilt-pitch 0.0 --jump-stroke 0.10`（保持 phi 路线单独验证，不混预倾）。
+
+## 三、判据表（17.5 八项）
+
+| 序 | 项 | 要求 | 对照 V17B | 冻结 V17F | 结果 |
+|---|---|---|---|---|---|
+| 1 | **落点** | \|s_landing\| <=0.05 m | +0.0093 | **-0.0301** | 通过 |
+| 2 | gap | >=0.200 且不低于 0.21483 | 0.21483 | **0.22018（+2.49%）** | 通过 |
+| 3 | 相位机 / 腿长最小 | 正常退出，min ~0.1794 | THRUST@1.286，0.1794 | **THRUST@1.286，0.1794** | 通过 |
+| 4 | 触地 pitch | 改善 >=15% | **-0.7101** | **-0.4547（改善 36.0%）** | 通过 |
+| 5 | 后向回退 | <= V17B 的 0.1396 | 0.1396 | **0.0339** | 通过（更好） |
+| 6a | max\|pitch\| | <=0.7674 rad | 0.7674 | **0.6849** | 通过 |
+| 6b | **冲击峰** | <=436.9 N | 436.9 N @t=1.693（触地帧） | **802.9 N @t=1.771（落地后 IDLE）** | **不通过（1.84 倍）** |
+| 7 | 三段预算 | T1/T2 的 d_pitch、d_phiW、∫τ 全报 | 见第四节 | 见第四节 | 已报 |
+| 8 | `--no-jump` 回归 | 逐位全 0 | — | T17 vs T16：`qpos=qvel=ctrl=0.000e+00`；CMD17 vs CMD16：同 | 通过 |
+
+## 四、pitch 预算分解（17.5 序 7）
+
+| 段 | V17B d_pitch | d_phiW_R | ∫τ_hip | V17F d_pitch | d_phiW_R | ∫τ_hip |
+|---|---|---|---|---|---|---|
+| T0 压缩 | -0.0013 | +0.0029 | +8.1144 | -0.0013 | +0.0029 | +8.1144 |
+| **T1 收腿** | -0.3262 | +0.1579 | -1.2089 | **-0.2870** | **+0.2015** | **-1.0956** |
+| **T2 伸腿** | -0.3826 | -0.0409 | -0.3451 | **-0.1664** | **+0.1406** | **+0.5367** |
+| 合计 | **-0.7101** | — | -1.5540 | **-0.4547** | — | -0.5589 |
+
+- T2 的 d_phiW 由 **-0.041 翻成 +0.141**，T2 的 d_pitch 由 -0.383 收到 **-0.166**（这一段就是 36% 的来源）；
+- T2 的 `max|tH|` 从 74.35 升到 **80.00**（髋力矩限幅 40 N·m×2），**饱和帧 2**（V17B 为 0）；
+- 两段合计 ∫τ 从 -1.554 降到 -0.559（执行器总冲量下降），与 16.1 的"预倾不改出力、改腿摆方向"不是同一机理。
+
+## 五、完整结果表
+
+| 运行 | 文件 | gap | 飞行 | 腿长范围 | 触地 pitch | max\|pitch\| | 冲击峰 | s_landing | 后向回退 | 末速度 | ABORT |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| V17B 对照 | `results/V17B_baseline_run01.json.gz` | 0.21483 | 0.316 | [0.1794, 0.2985] | -0.7101 | 0.7674 | 436.9 N | +0.0093 | 0.1396 | 0.0000 | 0 |
+| V17F 冻结全程 | `results/V17F_baseline_run01.json.gz` | 0.22018 | 0.321 | [0.1794, 0.3075] | **-0.4547** | 0.6849 | **802.9 N** | **-0.0301** | **0.0339** | 0.0000 | 0 |
+| T17 | `results/T17_baseline_run01.json.gz` | 不跳 | — | — | — | — | — | — | — | — | 与 T16 逐位 0 |
+| CMD17 | `results/CMD17_command_velocity_run01.json.gz` | 不跳 | — | — | — | — | — | — | — | — | 与 CMD16 逐位 0 |
+
+与第 16 节（只冻结 T1）对照：
+
+| 方案 | 触地 pitch | 改善 | gap | 落点 | 后向回退 | 冲击峰 |
+|---|---|---|---|---|---|---|
+| V16F 只冻结 T1 | -0.7148 | +0.7%（相对 V16B -0.7101 更差） | 0.22018 | 未报 | 0.1365 | 431.2 N |
+| **V17F 冻结 T1+T2** | **-0.4547** | **36.0%（相对 V17B）** | 0.22018 | -0.0301 | 0.0339 | **802.9 N** |
+
+## 六、额外发现
+
+1. 冲击峰 802.9 N 出现在 **t=1.771（LANDING 已结束、相位 IDLE）**，不是触地首帧；
+   对照的峰在 t=1.693（触地帧）。落地腿长 V17F 为 0.3075（V17B 0.2985），腿伸得更直落地。
+2. T2 出现 **2 帧髋力矩饱和**（`max|tH|` 80.00，即两腿各 40 N·m 上限），V17B 为 0 帧。
+   这是本轮唯一新增的执行器饱和，未改任何限幅。
+3. 落点判据（新增的 17.1(b)）在两轮都守号：V17B +0.0093、V17F -0.0301，均 <=0.05。
+   即"冻结全程"没有继承预倾路线"原地跳变向后跳 0.48 m"的缺陷。
+
+## 七、结论（按 17.6 决策表）
+
+| 17.6 条件 | 实测 | 是否命中 |
+|---|---|---|
+| 改善 >=15% + 落点守号 + gap 不降 | 36.0% / 0.0301 / +2.49% | **命中第一行** |
+| 改善仍 <15% | — | 否 |
+| 落点超 0.05 或 gap 降 | — | 否 |
+
+按 17.6 第一行，下一步是"进 16.4 扫 `flight_phi_offset` 正负两点"。
+但 **17.5 序 6 的冲击峰 802.9 N 超限（1.84 倍）**，17.6 决策表没有覆盖这一项，
+本轮**未继续**（未写 `flight_phi_offset`，未改任何推力方向参数），等你裁定：
+
+- 若认可"冲击峰属于可接受的代价"，我按 16.4 扫正负两点；
+- 若冲击峰是硬约束，请指定排查方向（本轮只报了它出现的位置与落地腿长差异，未做诊断）。
+
+
+
+================================================================
+第 18.2 节只读诊断：二次峰是"非轮部件撞地"，不是腿主动撑、也不是单帧数值伪影
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V18（落地 pitch 优化 第 18.2 / 18.3 / 18.4 节）
+
+本轮**只读取数**，未改一行代码；数据来自已有 `results/V17B_*`、`results/V17F_*`。
+
+## 一、Q1 那一帧谁在接触
+
+峰值帧 `t=1.771`（`V17F`，wheel 1 侧 802.9 N）现场：
+
+| 字段 | 值 |
+|---|---|
+| `wheel_gap` | -0.0034 / -0.0035 m（两轮仍接触且有 3.4 mm 压入） |
+| `contact_geometry` / `counts` | `[True, True]` / `[2, 2]`（轮-地接触对数 2/2） |
+| **`contact_geometry_other`** | **2**（非"地-轮"接触对数） |
+| `qpos[2]`（机体 base z） | **0.1794**（飞行段 0.2721，站立约 0.284） |
+| `pitch` / `pitch_rate` | -0.625 / **-2.201 rad/s**（仍在后仰） |
+| `leg_length_R/L` | 0.2297 / 0.2293（差 0.0004） |
+| `output_source` | `zero_order_hold`（本帧 WBC 未调用，属节拍间隙） |
+
+**`contact_geometry_other` 的时间线是决定性的**：
+
+| t | other | base_z | nf_max |
+|---|---|---|---|
+| 1.769 | 0 | 0.1810 | 117.8 |
+| 1.770 | 0 | 0.1802 | 118.0 |
+| **1.771** | **2** | 0.1794 | **802.9（峰）** |
+| 1.772 | **4** | 0.1787 | 678.2 |
+| 1.772~1.789 | **4** | 0.1760（最低） | 631.8 -> 216.8 |
+| 1.790 | 3 | 0.1772 | 205.3 |
+
+即：峰值帧正是**非"地-轮"接触第一次出现的那一帧**（0 -> 2 -> 4），并持续约 19 ms。
+对照 `V17B` 该窗口 `other` **全程为 0**（1.686~1.800 逐帧确认）。
+
+> 口径说明：trace 只记接触**对数量**，不记 geom 名字，所以"碰地的是哪根连杆"我无法从记录里直接给出；
+> 能确定的是**不是轮子**（轮-地接触对数在峰前峰后都是 2/2，没有变化），且机体基准高度已降到 0.176 m。
+
+## 二、Q2 竖直速度 12 ms 内翻转的原因
+
+`t=1.769~1.791` 逐 1 ms（`V17F`）：
+
+| t | vz_com | base_z | nf_max | other | leg_R | 腿速_R | ctrl 腿 R | ctrl 轮 R | pitch_dot |
+|---|---|---|---|---|---|---|---|---|---|
+| 1.769 | -0.7119 | 0.1810 | 117.8 | 0 | 0.2317 | -1.009 | -13.25 | -5.99 | -2.249 |
+| **1.771** | -0.6991 | 0.1794 | **802.9** | **2** | 0.2297 | -0.993 | -13.25 | -5.99 | -2.201 |
+| 1.776 | -0.3272 | 0.1769 | 511.3 | 4 | 0.2258 | -0.619 | -12.52 | -6.00 | -1.657 |
+| 1.783 | +0.0023 | 0.1761 | 316.0 | 4 | 0.2230 | -0.272 | -11.80 | -6.00 | -1.290 |
+| 1.790 | +0.1829 | 0.1772 | 205.3 | 3 | 0.2219 | -0.096 | -10.63 | -6.00 | -1.181 |
+
+- vz_com：**-0.7183 -> +0.0023，Δ=+0.721 m/s，历时 15 ms**；按 12.6 kg 折算冲量 ≈9.1 N·s、平均力 ≈605 N，
+  与实测 802.9 N 峰值同量级；
+- **腿没有主动撑**：髋力矩幅值反而从 -13.25 降到 -11.80 N·m（限幅 40，全程不饱和），
+  腿长率 -1.009 -> -0.272（仍在**缩短**，只是减速）；
+- **轮力矩已在上限**：`ctrl[4:6]` = -5.99/-6.00（MJCF 限幅 ±6），是全程一直贴着，不是本窗口突变；
+- 速度翻转与 `other` 0->2->4、base_z 0.1794->0.1760（触底）**逐毫秒对齐**。
+
+结论：这是**机体/腿部件撞地后的反弹**，不是腿主动蹬、不是轮打滑，也不是单帧数值伪影
+（非轮接触持续约 19 ms、随后 700 ms 力按 316 -> 205 N 平滑衰减）。
+
+## 三、Q3 冻结工况落地后继续后仰
+
+`V17F` 落地后 100 ms（10 ms 步长）：
+
+| t | pitch | 腿R | 腿L | 腿长差 | base_z | other |
+|---|---|---|---|---|---|---|
+| 1.698（触地） | **-0.4547** | 0.3055 | 0.3055 | -0.0000 | 0.2601 | 0 |
+| 1.718 | -0.4756 | 0.2933 | 0.2931 | +0.0002 | 0.2313 | 0 |
+| 1.738 | -0.5394 | 0.2671 | 0.2668 | +0.0003 | 0.2090 | 0 |
+| 1.758 | -0.5945 | 0.2432 | 0.2428 | +0.0004 | 0.1901 | 0 |
+| 1.778 | -0.6373 | 0.2248 | 0.2246 | +0.0002 | 0.1764 | 4 |
+| 1.798 | **-0.6621** | 0.2216 | 0.2216 | -0.0001 | 0.1798 | 3 |
+
+- 落地 100 ms 内 pitch 从 **-0.4547 到 -0.6621**（后仰 0.207 rad），
+  同窗口腿长从 0.3055 收缩到 **0.2216**（低于标称 0.28 约 5.8 cm）、base_z 从 0.260 掉到 0.180；
+- **两腿腿长差全程 <=0.0004 m**，两腿对称，所以后仰不是两腿不对称造成的；
+- 落地后 1 s 内 pitch 最大幅值 **-0.6849**（第 18.1 节写的 -0.68 复现），最小腿长 0.2215，`other` 最大 4。
+
+## 四、18.3 形状判据（三次运行对照）
+
+| 判据 | V17B（对照） | V17F（冻结全程） | 结果 |
+|---|---|---|---|
+| 1. 冲击峰必须落在触地后 20 ms 内 | 峰 436.9 N @Δt=**0.000 s** | 峰 802.9 N @Δt=**0.073 s** | V17B 通过 / **V17F 不通过** |
+| 2. 触地窗口后不得出现高于触地峰的局部峰 | 20 ms 后 max 217.4 N（<436.9） | 20 ms 后 max **802.9 N**（>窗口峰 359.6 N） | V17B 通过 / **V17F 不通过** |
+| 3. 落地后 200 ms 内 max 不超触地峰 | 436.9 N vs 436.9 N（等于，未超） | **802.9 N** vs 触地窗口峰 359.6 N / 触地首帧 180.7 N | V17B 通过 / **V17F 不通过** |
+
+## 五、18.4 "pitch 可行"定案条件自查
+
+| 条件 | 要求 | 实测 | 结果 |
+|---|---|---|---|
+| 改善 | >=30% | **36.0%**（-0.7101 -> -0.4547） | 通过 |
+| 落点 | \|s\| <=0.05 | **0.0301** | 通过 |
+| gap | >=0.200 | **0.22018** | 通过 |
+| 18.3 形状三条 | 全过 | **三条全不通过** | **未通过** |
+| 后向回退 | 不差于对照 0.1396 | **0.0339** | 通过 |
+| `--no-jump` 逐位 | 全 0 | T17/CMD17 vs T16/CMD16 全 `0.000e+00` | 通过 |
+
+**5 项通过、1 项未通过 -> 按 18.4 尚不能定案。**
+
+## 六、分流结论（按 18.2 判定分流）
+
+命中 **"机体/腿碰地"** 这一支：落地姿态未收敛就撞地，应在落地缓冲里解决。
+
+- 排除"腿主动撑且 ctrl 饱和"：髋力矩 13.25 -> 11.80 N·m，限幅 40，零饱和帧；
+- 排除"单帧弹跳"：非轮接触持续约 19 ms，此后力平滑衰减 700 ms；
+- 排除"轮打滑/轮隙为正而力跃升"：峰时两轮 gap 仍为 -0.0034/-0.0035（接触中）。
+
+## 七、未做 / 遵守严禁项
+
+- 未改任何代码、未放宽 18.3 判据、未把二次峰归因于"冻结开关不好"从而撤回 pitch 优化；
+- 未执行 18.5 的 git 提交（18.4 未达成，且提交需单独授权）；
+- 未开始 18.6 的 capture point（归属未定，按要求不写代码）。
+
+================================================================
+19 节起：转向 capture point（pitch 预倾 / phi 冻结方案已冻结，不再推进）
+无预倾、无冻结、行程 0.12 作为新基线，须先做第 19.2.1 节逐位验证。
+================================================================
+
+--- 2026-10-18 收尾：pitch 路线回退 ---
+
+预倾与 phi 冻结的代码已由问题排查agent 直接回退到 0e91281，
+代码内 pretilt/freeze_phi 残留 0 命中，jump_stroke 默认恢复 0.12。
+回退前 diff 备份：C:/Users/20060/AppData/Local/Temp/pitch_revert_backup.patch
+
+数据与结论已归档到部署文档第 20 节（含两条路线全部实测、停止原因、
+压缩端点刀锋、重启所需最小改动、判据教训）。
+第 9~19 节中的实现指令作废，仅作历史。
+
+
+
+================================================================
+第 21.6.3 / 21.7 节：加 --retract-floor 与 C 模式 --phi-body-hold；对照结果五项 4 项不通过
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V22（落地 pitch 优化 第 21.6.3 / 21.7 节）
+
+## 一、代码改动（本轮 4 文件，全部为"不传参即原行为"的实验开关）
+
+```diff
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/control.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/control.py
+@@ -104,9 +104,14 @@
+-def _phi_force(leg_position, leg_velocity, pitch, l_ref=None) -> np.ndarray:
++def _phi_force(leg_position, leg_velocity, pitch, l_ref=None,
++               hold_body_frame: bool = False) -> np.ndarray:
+     world_ref = WORLD_TARGET_DEFAULT if l_ref is None else phi_eq(l_ref)
+-    phi_body_ref = phi_body_reference(world_ref, pitch)
++    # 第 21.6.2 节 C 模式：守机体系（去掉 +pitch），腿相对机体不动。
++    if hold_body_frame:
++        phi_body_ref = float(world_ref)
++    else:
++        phi_body_ref = phi_body_reference(world_ref, pitch)
+@@ @@ flight_leg_profile_torque
+                               retract_state=None, dt=0.0, pitch=0.0,
+-                              phi_control: bool = True):
++                              phi_control: bool = True,
++                              retract_floor: float | None = None,
++                              hold_body_frame: bool = False):
+-    target_retract = min(max(FLIGHT_RETRACT_FLOOR, lo), hi)
++    # 第 21.6.3 节：收腿目标下限可由参数覆盖；不传时仍用常量（默认值唯一来源）。
++    floor = FLIGHT_RETRACT_FLOOR if retract_floor is None else float(retract_floor)
++    target_retract = min(max(floor, lo), hi)
+@@ @@
+         phi = (_phi_force(leg_position, leg_velocity, pitch, l_ref,
++                          hold_body_frame=hold_body_frame)
+                + FEEDFORWARD_COUPLING * forces) * phi_ramp
+
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+     flight_phi_control: bool = True
++    # 第 21.6.3 节：飞行剖面收腿目标下限 [m]。默认等于 control.FLIGHT_RETRACT_FLOOR(0.16)。
++    retract_floor: float = 0.16
++    # 第 21.6.2 节 C 模式：飞行段守机体系摆角（与 flight_phi_control 是两个独立开关）。
++    phi_body_hold: bool = False
+
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+                 pitch=float(feedback.state.pitch),
+                 phi_control=bool(sim.config.flight_phi_control),
++                retract_floor=float(sim.config.retract_floor),
++                hold_body_frame=bool(sim.config.phi_body_hold))
+
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++    parser.add_argument("--retract-floor", type=float, default=0.16,
++                        help="飞行剖面收腿目标下限 [m]，默认 0.16（=control.FLIGHT_RETRACT_FLOOR）")
++    parser.add_argument("--phi-body-hold", action="store_true",
++                        help="C 模式：飞行段守机体系摆角（phi_body_ref=world_ref，去掉 +pitch）")
+```
+
+`FLIGHT_RETRACT_FLOOR` 常量保留未删；新参数只影响 `target_retract`。
+`--phi-body-hold` 与已有 `--no-flight-phi-control` 是两个独立开关（后者把 phi 力矩整体置零）。
+
+## 二、规格与代码冲突（照实上报，未自行处理）
+
+- 部署文档 21.6.3 称 `FLIGHT_RETRACT_FLOOR` **没有命令行入口**，但 `jump_diagnostic.py:320-326`
+  早已存在 `--flight-retract-floor`，做法是运行时给 `_control.FLIGHT_RETRACT_FLOOR` 赋值。
+- 现在两个入口并存：`--retract-floor` 走 config→函数参数（只影响剖面 `target_retract`）；
+  `--flight-retract-floor` 改全局常量（同时影响 FL2 的 `flight_leg_retract_torque`）。
+- 两者同传时剖面以新参数为目标，但 FL2 路径仍被旧参数改到。是否删旧入口，等裁定。
+
+## 三、共同自检（22.2 / 步骤 3：默认逐位验证，不能省）
+
+| 对比 | 结果 |
+|---|---|
+| JUMP22（三个新开关都不传）vs JUMP9（0e91281 基准） | `qpos=qvel=ctrl=0.000e+00`，12000/12000 帧 |
+| T22 vs T9 | `0.000e+00` |
+| CMD22 vs CMD9 | `0.000e+00` |
+| V22B（stroke 0.10 对照）vs V17B（pitch 代码时代的同参数） | `0.000e+00` |
+
+即：新增开关默认不改变任何行为，默认路径仍等于 `0e91281`。
+
+## 四、21.7 对照结果（`--phi-body-hold --retract-floor 0.22`，其余同 V17F：stroke 0.10）
+
+| 运行 | 文件 | 相位序 |
+|---|---|---|
+| V22B 同轮对照 | `results/V22B_baseline_run01.json.gz` | IDLE→COMPRESS@1.000→BRAKE@1.143→THRUST@1.286→FLIGHT@1.377→LANDING@1.693→RECOVER@1.709→IDLE@1.710 |
+| V22C C 模式 + 0.22 | `results/V22C_baseline_run01.json.gz` | IDLE→COMPRESS@1.000→BRAKE@1.143→THRUST@1.286→FLIGHT@1.377→LANDING@1.686→RECOVER@1.723→IDLE@1.724 |
+
+| 序 | 判据 | 要求 | V22B 对照 | V22C | 结果 |
+|---|---|---|---|---|---|
+| 1 | pitch 漂移（触地 − 释放） | 相对 V17F 的 -0.455 **按行程比例**下降（预期约 -0.30） | -0.7093 | **-0.3836** | **不通过**：行程比 0.085/0.145 = 0.586，按比例应为 -0.267；实测只到 -0.384（比例 0.843） |
+| 2 | 小腿间隙最小值 | >=0.010 m，且不得出现小腿接触 | `contact_geometry_other` 峰 **0** | `contact_geometry_other` 峰 **4** | **不通过**（仍有非"地-轮"接触；trace 无小腿点，无法给毫米数） |
+| 3 | 触地腿长 | <=0.400 m | 0.2961 | **0.3301** | 通过 |
+| 4 | gap | 不明显下降（对照同轮 V22B） | 0.21483 | **0.17718（-17.5%）** | **不通过**（且低于 0.200 硬下限） |
+| 5 | 落点 / 后向回退 | 不差于 V22B | s=+0.0093 / 0.1396 | **s=-0.0373 / 0.4114** | **不通过** |
+
+## 五、V22C 的完整数据（供核对）
+
+| 量 | V22B | V22C |
+|---|---|---|
+| 释放前 pitch | -0.0008 | -0.0008 |
+| 触地 pitch | -0.7101 | **-0.3843** |
+| 触地 φ_world | -0.0065 | **+0.2039** |
+| gap | 0.21483 | **0.17718** |
+| 飞行时长 | 0.316 s | 0.309 s |
+| 触地腿长（两腿较大值） | 0.2961 | 0.3301 |
+| 腿长范围（全程） | [0.1584, 0.2985] | **[0.0821, 0.4449]** |
+| 落点 s | +0.0093 | -0.0373 |
+| 后向回退 | 0.1396 | 0.4114 |
+| 末 s | -0.1303 | -0.4466 |
+| 触地底盘 z | 0.2794 | 0.2803 |
+| 触地帧冲击 | 436.9 N | 296.1 N |
+| 落地后 0.6 s 内冲击峰 | 436.9 N | **663.7 N**（伴随 other=4） |
+
+## 六、额外发现（只记录，未处理）
+
+1. V22C 的全程腿长出现 **0.0821 m（下限 0.114）与 0.4449 m（上限 0.430）**，但相位序没有 ABORT。
+   V22B 同指标为 [0.1584, 0.2985]。腿长越界检查在当前代码里没有在这些时刻触发，需要排查agent 确认判据覆盖范围。
+2. V22C 触地后仍出现非轮接触（other=4）与 663.7 N 的二次冲击，与第 18.2 节 V17F 的现象同类。
+
+## 七、结论（按 21.7）
+
+判据 1 **不满足"漂移按行程比例下降"**（实测比例 0.843，预期 0.586），按 21.7 规定
+"说明 21.4 的因果不成立，停下重看"，**未进入第 3、4 步**，未改 `retract_floor` 之外任何参数。
+
+其余三项（2/4/5）同时不通过：小腿仍碰地、gap 掉 17.5% 并跌破 0.200、落点与后向回退都变差。
+
+
+
+================================================================
+第 23.2 节（方案一：离地角动量注入）：takeoff_pitch_moment 加完；0.23 只换来 2% 的角速度
+测试agent-ds，2026-10-19
+================================================================
+
+VP编号：PITCH-V23（落地 pitch 优化 第 23.2 节）
+
+## 一、代码改动
+
+```diff
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/simulation.py
+     phi_body_hold: bool = False
++    # 第 23.2.3 节（方案一）：THRUST 段给两轮叠加的俯仰力矩 [N*m/轮]。默认 0.0 = 原行为。
++    takeoff_pitch_moment: float = 0.0
+
+--- a/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++++ b/wheel_leg_mujoco/gbc_mpc_wbc/loop.py
++        # 第 23.2.3 节：THRUST 段两轮叠加俯仰力矩偏置（默认 0.0 = 原行为）。
++        # 文档原写"叠加到 jump_command.wheel_torque"，但该字段在本仓库没有输出级消费者
++        # （只有 jump.py 赋值 + trace 记录），故改在写执行器前叠加，效果等价且可验证。
++        takeoff_moment = float(sim.config.takeoff_pitch_moment)
++        if (takeoff_moment != 0.0 and jump_command is not None
++                and jump_command.phase.value == "THRUST"):
++            torque = np.asarray(torque, dtype=float).copy()
++            torque[list(sim.dyn.wheel_actuators)] += takeoff_moment
+         write_actuator_output(d, torque)
+
+--- a/wheel_leg_mujoco/tools/jump_diagnostic.py
++    parser.add_argument("--takeoff-pitch-moment", type=float, default=0.0,
++                        help="THRUST 段两轮叠加的俯仰力矩 [N*m/轮]，默认 0.0 = 原行为")
+```
+
+## 二、规格与代码冲突（照实上报，未自行改文档）
+
+文档 23.2.3 写"施加：`jump_command.wheel_torque` 在 THRUST 段叠加 | 该字段已存在"。
+核对结果：该字段**只有赋值与 trace 记录，没有输出级消费者**
+（`grep wheel_owned|wheel_torque` 在 `gbc_mpc_wbc/loop.py` 之外只命中 `jump.py` 的 `JumpCommand` 构造与
+`Algorithm/jump.py` 的旧结构），往该字段叠加**不会影响执行器**。
+因此实现改在 `loop.py::write_actuator_output` 之前叠加，语义与文档一致（THRUST 段、两轮、每轮 N·m）。
+
+## 三、共同自检（默认逐位）
+
+| 对比 | 结果 |
+|---|---|
+| JUMP23（不传新开关，stroke 0.12）vs JUMP9 | `qpos=qvel=ctrl=0.000e+00`，12000/12000 |
+| T23 vs T9 | `0.000e+00` |
+| CMD23 vs CMD9 | `0.000e+00` |
+| V23A（`--takeoff-pitch-moment 0.0`）vs V22B（同参数、开关不传） | `0.000e+00`（见下表数值一致） |
+
+## 四、23.2.5 七项判据
+
+| 序 | 项 | 要求 | V23A（0.0） | V23B（0.23） | 结果 |
+|---|---|---|---|---|---|
+| 1 | gap | >=0.200 且降幅 <=1% | 0.21483 | **0.23113（+7.6%）** | 通过（未降） |
+| 2 | **释放时俯仰角速度** | 与理论 1.5 同号，量级 0.7~1.5 倍 | **-0.0113 rad/s** | **-0.0432 rad/s** | **不通过**：Δω = **-0.0319**（理论的 **2.1%**），且符号与 +1.5 相反 |
+| 3 | 触地 pitch | 相对对照改善 >=50% | -0.7101 | **-1.2105** | **不通过**（恶化 70%） |
+| 4 | 落点位移 | 相对对照 <=0.02 m | +0.0093 | **+0.0143**（差 0.005） | 通过 |
+| 5 | 腿长 / 关节 | 全程 [0.114, 0.430] | [0.1584, 0.2985] | **[0.0983, 0.4376]** | **不通过** |
+| 6 | 相位机 | 正常退出，无 ABORT | 七相位完整，ABORT 0 | **LANDING@1.715 → RECOVER@1.738 → ABORT@1.916** | **不通过** |
+| 7 | 不跳回归 | T/CMD 逐位全 0 | — | 见第三节 | 通过 |
+
+相位序：
+- V23A：`IDLE@0.000 -> COMPRESS@1.000 -> BRAKE@1.143 -> THRUST@1.286 -> FLIGHT@1.377 -> LANDING@1.693 -> RECOVER@1.709 -> IDLE@1.710`
+- V23B：`IDLE@0.000 -> COMPRESS@1.000 -> BRAKE@1.143 -> THRUST@1.286 -> FLIGHT@1.381 -> LANDING@1.715 -> RECOVER@1.738 -> ABORT@1.916`
+
+## 五、按 23.2.4 的偏差排查（偏差 >30% 时的那一步，已执行）
+
+| 检查项 | 结果 |
+|---|---|
+| 力矩是否被限幅吃掉 | **没有**。THRUST 段 `ctrl[4:6]` 范围 R[-0.441, 0.949]、L[-0.442, 0.948]，远低于 ±6 |
+| 偏置是否真的施加 | **施加了**。THRUST 首帧 `ctrl[4]` 由 -0.279 变为 -0.049（+0.23），逐帧可见 |
+| 推力段地面切向力（水平） | 0.0：∫F_t·dt = **+0.0996 N·s**（峰 8.3 N）；0.23：**+0.4555 N·s**（峰 23.6 N）|
+| 按 L=∫F_t·dt·z_com 预测的 Δω | **+0.82 rad/s**（0.23 与 0.0 之差 ×0.264 / 0.1142） |
+| 实测 Δω（释放帧） | **-0.032 rad/s**（方向与预测相反，量级 4%） |
+| 同窗口髋通道 | THRUST 段 ∫(c1-c3)dt：0.0 为 **+4.23 N·m·s**，0.23 为 **+4.46 N·m·s**（髋力矩范围 18~54 N·m） |
+
+即：轮力矩没被限幅、水平冲量也确实增加了约 0.36 N·s（预测应产生 +0.82 rad/s），
+但**没有转成机体俯仰角速度**；同一窗口的髋通道角冲量（≈4.3 N·m·s）比轮通道大一个数量级以上，
+机体俯仰角速度在释放前被髋通道主导（两个工况都只有 -0.01 ~ -0.04 rad/s）。
+
+## 六、V23B 的其余现象（只记录）
+
+- 释放延后 4 ms（1.377 -> 1.381）、飞行 0.316 -> 0.334 s、触地延后 22 ms；
+- 落地后 0.6 s 内冲击峰 588.4 N（对照 436.9 N），`contact_geometry_other` 峰 **19**（对照 0）——非轮接触大幅出现；
+- 后向回退 0.0000（对照 0.1396），末 s +0.2395（对照 -0.1303），即落地后是**向前**走；
+- ABORT 之后腿长仍到 0.0983 / 0.4376，越出 [0.114, 0.430]。
+
+## 七、结论
+
+1. 开关已加，默认 0.0 时与 `0e91281` 基准逐位一致（JUMP/T/CMD 三项全 0）。
+2. 按 23.2.4 的两次标定：**0.23 N·m/轮 只换来 Δω = -0.032 rad/s（理论 1.5 的 2.1%，且符号相反）**，
+   判据 2 不通过；判据 3/5/6 同时不通过（触地 pitch 恶化到 -1.21、腿长越界、ABORT）。
+3. 偏差排查指向"注入没有转成机体角速度"（限幅已排除，水平冲量确实增加），
+   按 23.2.4/23.5 **未放大参数、未改默认值、未动第二个参数**，停下等裁定。
