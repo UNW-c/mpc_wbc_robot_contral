@@ -293,6 +293,26 @@ class SimulationConfig:
     # 双质量块飞行规划（部署文档 v6 第 5 节 S1）：飞行段只用一条 z1(t) 轨迹出力矩。
     # 默认 False = 原行为（走 flight_leg_profile_torque）。
     flight_dual_mass: bool = False
+    # S2（部署文档 10.15 B3）：THRUST 末段把 desired_com_acceleration_z 斜坡降到离地值。
+    # 默认 False = 原行为（按几何判据离地，无释放段）。
+    release_ramp: bool = False
+    # S5-a（部署文档 10.24 D）：飞行段切向参考改成"保持离地总角动量" phi_ref = ∫H/(m1*L^2)dt。
+    # 默认 False = 原行为（phi_ref = phi_eq(L_ref)）。
+    flight_hold_momentum: bool = False
+    # S6（部署文档 10.32 D1）：压缩段锁水平参考——质心参考放到进入压缩帧的轮触地点正上方
+    # （d_n 目标 0），轮水平位置不再跟随。默认 False = 原行为。
+    jump_lock_horizontal: bool = False
+    # 文档 10.48 B1：THRUST 段把 angle_R/L + forward_velocity 换成角动量行 + 差模腿角行。
+    # 默认关；k_H [1/s]、k_HI [1/s^2] 是本轮唯一辨识的两个增益。
+    thrust_momentum_task: bool = False
+    thrust_momentum_kh: float = 0.0
+    thrust_momentum_khi: float = 0.0
+    # 文档 10.54/10.56：S9 = THRUST 两块水平计划 + 飞行段方案 (b)。默认关。
+    two_mass_takeoff: bool = False
+    # 10.68 设计输入（用户 2026-10-23）：计划触地腿长 / 落地缓冲终点腿长 [m]。
+    # 依据：已收敛 run 触地 L 0.295~0.338、落地 L 最小 0.19~0.24；离线落地髋扭峰 32.8 N*m（限 40）。
+    landing_length_td: float = 0.34
+    landing_length_end: float = 0.22
     jump_time: float = 1.0                 # [s] 起跳指令时刻
     wbc_gains: WbcGains = field(default_factory=WbcGains)
     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
@@ -363,6 +383,21 @@ class Gbc486MpcWbcSimulation:
         self.exhausted: dict[str, int] = {}
         # ---------------- 跳跃装配（方案 v3）----------------
         # 跳跃是独立状态：规划器只吃测量量（腿长/腿长率/接触/姿态），不持有模型与控制器对象。
+        # 10.54 B1-B3 / 10.56 D1：两块表（只在开关打开时建，耗时记 INFO）
+        self.two_mass_tables = None
+        if bool(config.two_mass_takeoff):
+            from . import two_mass as _two_mass
+            _limits = _leg_length_limits(self.model, mujoco.MjData(self.model),
+                                         self.pose.angle, margin=0.0)
+            _t0 = time.perf_counter()
+            self.two_mass_tables = _two_mass.build_tables(
+                self.model, self.data, float(config.nominal_length),
+                float(_limits[0]), float(_limits[1]))
+            _LOGGER.info("S9 两块表：建表耗时 %.2f s，D_td=%.4f dx_eq=%.4f theta_eq=%+.4f "
+                         "dH/dL'=%.4f dH/dphi'=%.4f",
+                         time.perf_counter() - _t0, self.two_mass_tables["D_td"],
+                         self.two_mass_tables["dx_eq"], self.two_mass_tables["theta_eq"],
+                         self.two_mass_tables["dH_dLdot"], self.two_mass_tables["dH_dphidot"])
         self.jump = None
         self._jump_started = False
         if config.jump_height is not None:
@@ -378,7 +413,14 @@ class Gbc486MpcWbcSimulation:
                 com_rise_ratio=float(ratio),
                 total_mass=float(np.sum(self.model.body_mass)),
                 leg_length_min=float(limits[0]), leg_length_max=float(limits[1]),
-                pitch_limit=float(self.mpc.settings.pitch_limit)))
+                pitch_limit=float(self.mpc.settings.pitch_limit),
+                # S2：下块质量 m1 由模型算（两轮 + 关节 jGH/jOP 所在体），与 control 同口径。
+                lower_mass=float(sum(
+                    self.model.body_mass[self.model.body(leg.wheel_body).id]
+                    + self.model.body_mass[int(self.model.joint(leg.passive_joints[0]).bodyid[0])]
+                    for leg in R.LEGS)),
+                release_ramp=bool(config.release_ramp),
+                two_mass_takeoff=bool(config.two_mass_takeoff)))
         self.scaled: dict[str, int] = {}
         self.timings = dict(mpc=[], wbc=[])
         # 第 0 步自检（2026-10-17，用户要求永久保留）：MPC 实际模型维数与 ZMP 摆腿通道的真实状态。

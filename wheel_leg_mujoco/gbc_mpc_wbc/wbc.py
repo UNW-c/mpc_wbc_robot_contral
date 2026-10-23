@@ -51,6 +51,10 @@ TASK_WEIGHTS = {
     # 代其作为竖直方向主任务（分析文档 C2）。权重来源：沿用被替代的 length_R/length_L
     # 在既有具名权重表中的名次 25；未做任何试数搜索，待问题排查agent复查。
     "com_vertical": 25.0,
+    # 10.54 C2 / 10.58 D3：S9 的 THRUST 任务名（名次沿用被替代任务：
+    # com_z/dx_rel 取 length 的 25，L_d/phi_d 取 angle 的 60）。
+    "com_z": 25.0, "dx_rel": 25.0,
+    "L_d": 60.0, "phi_d": 60.0,
 }
 
 BACKENDS = ("nullspace", "wls", "qp")

@@ -305,6 +305,48 @@ class Gbc486Dynamics:
         com_velocity = float(row @ data.qvel)
         return row, bias, float(com_position[2]), com_velocity
 
+    # ------------------------------------------------------------------ 角动量
+    def pitch_momentum_row(self) -> tuple[np.ndarray, float, float]:
+        """整机绕总质心的俯仰角动量观测 ``(A_H, bias, H)``，``H = A_H @ qvel``。
+
+        文档 10.48 A0 的口径：
+          ``A_H = sum_i [ (I_i*Jrot_i)_y + m_i*(r_z*Jpos_i,x - r_x*Jpos_i,z) ]``，
+          ``r = xipos_i - 整机质心``，``Jpos/Jrot`` 用 ``mj_jacBodyCom``。
+        ``bias = (A_H(q+eps*qvel) - A_H(q-eps*qvel)) @ qvel / (2*eps)``，与
+        ``rowset()`` 里其它行的 bias 写法一致（同一 ``_DIFFERENCE_DT``）。
+        """
+        row = self._momentum_row_from(self.data.qpos)
+        minus = self.data.qpos.copy()
+        plus = self.data.qpos.copy()
+        mujoco.mj_integratePos(self.model, plus, self.data.qvel, _DIFFERENCE_DT)
+        mujoco.mj_integratePos(self.model, minus, self.data.qvel, -_DIFFERENCE_DT)
+        row_plus = self._momentum_row_from(plus)
+        row_minus = self._momentum_row_from(minus)
+        bias = float(((row_plus - row_minus) @ self.data.qvel) / (2.0 * _DIFFERENCE_DT))
+        return row, bias, float(row @ self.data.qvel)
+
+    def _momentum_row_from(self, qpos: np.ndarray) -> np.ndarray:
+        """在 scratch data 上算 CMM 的俯仰行（不改动 live data）。"""
+        model, scratch = self.model, self.scratch
+        scratch.qpos[:] = qpos
+        scratch.qvel[:] = 0.0
+        mujoco.mj_kinematics(model, scratch)
+        mujoco.mj_comPos(model, scratch)
+        centre = np.asarray(scratch.subtree_com[0], dtype=float)
+        row = np.zeros(model.nv, dtype=float)
+        jacp = np.zeros((3, model.nv), dtype=float)
+        jacr = np.zeros((3, model.nv), dtype=float)
+        for index in range(1, model.nbody):
+            jacp[:] = 0.0
+            jacr[:] = 0.0
+            mujoco.mj_jacBodyCom(model, scratch, jacp, jacr, index)
+            rot = scratch.ximat[index].reshape(3, 3)
+            inertia = rot @ np.diag(model.body_inertia[index]) @ rot.T
+            offset = np.asarray(scratch.xipos[index], dtype=float) - centre
+            row += inertia[1, :] @ jacr
+            row += model.body_mass[index] * (offset[2] * jacp[0] - offset[0] * jacp[2])
+        return row
+
     def _evaluate_com_position(self, qpos: np.ndarray) -> np.ndarray:
         """Evaluate the same base-subtree COM definition on scratch data."""
         scratch = self.scratch

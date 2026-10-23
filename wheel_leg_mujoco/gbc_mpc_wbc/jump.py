@@ -76,6 +76,13 @@ class JumpConfig:
     # 把下降速度刹回。两者都满足接触可行域 -g < a_com_z；数值来源为用户批准，非自行试数。
     compress_acceleration_ratio: float = -0.5    # [-] a_com_z = ratio * g（负=向下）
     brake_acceleration_ratio: float = 0.5        # [-] a_com_z = ratio * g（正=支撑增强）
+    # S2（部署文档 10.15 B3）：THRUST 末段把 desired_com_acceleration_z 斜坡降到
+    # 离地值 a = -(m1/m2 + 1)*g（此时 F = -m1*g、N = 0），再进 FLIGHT。
+    # 默认 False = 原行为（不建斜坡、仍按几何判据离地）。
+    release_ramp: bool = False
+    release_ramp_seconds: float = 0.025          # [s] 文档 10.15 B3 给定的斜坡时长
+    lower_mass: float = 0.0                      # [kg] 下块质量 m1（两轮 + GH/OP），由模型算好传入
+    two_mass_takeoff: bool = False                # 10.58 D4：S9 计划终点出口（默认关）
 
     @property
     def compression_end(self) -> float:
@@ -109,6 +116,17 @@ class JumpConfig:
         """COMPRESS_BRAKE 阶段的质心竖直加速度 [m/s^2]（正=支撑增强，减速）。来源：用户
         2026-10-09 批准的 profile，a = +0.5 g，即 F_normal_total = 1.5 m g。"""
         return self.brake_acceleration_ratio * GRAVITY
+
+    def release_acceleration(self) -> float:
+        """离地瞬间要下发的竖直加速度目标 [m/s^2] = ``-g``（命令通道口径）。
+
+        为什么是 -g 而不是 -(1+k)*g：``desired_com_acceleration_z`` 经
+        ``dynamics.com_vertical_row()``（base 子树质心）作用在**整机质心**上，
+        所以它是 a_com。地面段下块被钉住（z1''=0），上块与整机质心满足
+        z2'' = (1+k)*a_com；令 F = -m1*g 时 z2'' = -(1+k)*g，
+        故 a_com = z2''/(1+k) = -g（文档 10.42 一、S7-1）。
+        """
+        return -GRAVITY
 
     def total_force(self) -> float:
         """施加在机体上的竖直等效力（整机）[N]。"""
@@ -150,6 +168,11 @@ class JumpObservation:
     wheel_gap: float = 0.0
     geometry_contact: tuple[bool, bool] = (False, False)
     thrust_applied: bool = False
+    # 10.58 D4：S9 计划时钟到点与核验结果（由控制层每拍给出，缺省值不触发）
+    plan_end: bool = False
+    plan_verified: bool = False
+    # 10.68：落地计划时钟到点（由控制层每拍给出，缺省值不触发）
+    landing_plan_end: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,6 +220,11 @@ class JumpPlanner:
         # 避免 release_end 在仍接地时触发 FLIGHT 后立即被几何接触误判落地。
         self._airborne_confirmed = False
         self._direction_lost_seen = {"R": False, "L": False}
+        # S2：释放段子状态（不新增 JumpPhase，文档 10.15 B3）
+        self._release_ramp_started = False
+        self._release_ramp_start = 0.0
+        self._release_ramp_from = 0.0
+        self._release_command_accel = 0.0
 
     # ------------------------------------------------------------------ 事件
     def start(self, time: float) -> JumpCommand:
@@ -209,6 +237,10 @@ class JumpPlanner:
         # 每跳复位（第 24 节）：这些是"本跳内"的状态，不复位会让第二跳沿用第一跳的离地锁存
         # 与方向丢失记录，导致第二跳的 LANDING 判据被前一次结果污染。
         self._airborne_confirmed = False
+        self._release_ramp_started = False
+        self._release_ramp_start = 0.0
+        self._release_ramp_from = 0.0
+        self._release_command_accel = 0.0
         self.direction_lost_R = False
         self.direction_lost_L = False
         self.direction_lost_isolated_R = False
@@ -317,6 +349,42 @@ class JumpPlanner:
             # 状态保险：蹬伸命令必须已经实际写入执行器，之后才允许评估离地。
             if not obs.thrust_applied:
                 return self._command(self.phase)
+            # D4（10.58）：S9 计划时钟到点即核验——通过进 FLIGHT，失败直接 ABORT。
+            # 开关打开时几何判据（gap / release_end）只作核验，不作触发。
+            if config.two_mass_takeoff and obs.plan_end:
+                if obs.plan_verified:
+                    self._enter(JumpPhase.FLIGHT, obs,
+                                "S9 计划终点 + 核验通过（腿长 %.4f m，gap=%.2f mm，腿长率 %+.3f）"
+                                % (obs.leg_length, 1.0e3 * obs.wheel_gap, obs.leg_length_rate))
+                else:
+                    return self._abort(obs.time,
+                                       "s9_plan_end_not_lifted(腿长 %.4f m, gap=%.3f mm)"
+                                       % (obs.leg_length, 1.0e3 * obs.wheel_gap))
+                return self._command(self.phase)
+            if config.two_mass_takeoff:
+                return self._command(self.phase)
+            # S2（文档 10.15 B3）：释放段。腿长到 release_end 起算，T_ramp 内把
+            # desired_com_acceleration_z 线性降到离地值，计时到点即进 FLIGHT（不看腿长）。
+            if config.release_ramp and self._release_ramp_started:
+                elapsed = float(obs.time) - self._release_ramp_start
+                frac = min(1.0, max(0.0, elapsed / max(float(config.release_ramp_seconds), 1.0e-9)))
+                target = config.release_acceleration()
+                self._release_command_accel = (self._release_ramp_from
+                                               + (target - self._release_ramp_from) * frac)
+                if elapsed >= float(config.release_ramp_seconds):
+                    self._enter(JumpPhase.FLIGHT, obs,
+                                "释放段完成（%.0f ms，腿长 %.4f m，腿长率 %+.3f m/s，gap=%.2f mm）"
+                                % (1.0e3 * float(config.release_ramp_seconds), obs.leg_length,
+                                   obs.leg_length_rate, 1.0e3 * obs.wheel_gap))
+                return self._command(self.phase)
+            if config.release_ramp and obs.leg_length >= config.release_end:
+                self._release_ramp_started = True
+                self._release_ramp_start = float(obs.time)
+                self._release_ramp_from = config.com_acceleration()
+                _LOGGER.info("释放段开始（t=%.3f s）：%.0f ms 内 a_z 从 %+.2f 降到 %+.2f m/s^2",
+                             float(obs.time), 1.0e3 * float(config.release_ramp_seconds),
+                             self._release_ramp_from, config.release_acceleration())
+                return self._command(self.phase)
             # 真离地判据：几何间隙张开（不是"法向力降到零"）。力的判定会误报——蹬伸期轮子仍
             # 压在地面时法向力也会掉到零；据此断开控制器会让机体在最需要控姿时失控（已实测）。
             if obs.wheel_gap > LIFTOFF_GAP:
@@ -340,6 +408,13 @@ class JumpPlanner:
                             % (obs.leg_length, 1.0e3 * obs.wheel_gap, obs.pitch * 57.2957795))
             return self._command(self.phase)
         if self.phase is JumpPhase.LANDING:
+            if config.two_mass_takeoff:
+                # 10.68：落地计划时钟到点即交还（计划终点 = 两块静止于 L_end）；腿长/姿态只记录
+                if obs.landing_plan_end:
+                    self._enter(JumpPhase.IDLE, obs,
+                                "S10 落地计划终点，交还控制器（腿长 %.4f m，俯仰 %.2f deg，俯仰率 %+.2f rad/s）"
+                                % (obs.leg_length, obs.pitch * 57.2957795, obs.pitch_rate))
+                return self._command(self.phase)
             if (all(obs.geometry_contact) and all(obs.contact)
                     and abs(obs.leg_length - config.leg_length_nominal) <= LANDING_BAND):
                 self._enter(JumpPhase.RECOVER, obs, "腿长回到标称邻域（%.4f m）" % obs.leg_length)
@@ -383,6 +458,9 @@ class JumpPlanner:
         if phase in (JumpPhase.THRUST,):
             # WP3：释放由 WBC 统一求解（质心竖直任务），不再叠加 tau_jump。
             # 目标来源：JumpConfig.com_acceleration()，符号为正表示质心向上。
+            # S2：释放段内按已经历时间线性插值到离地加速度。
+            if config.release_ramp and self._release_ramp_started:
+                acceleration = self._release_command_accel
             return JumpCommand(leg_force=config.leg_force(), leg_length_target=None,
                                wheel_owned=True,
                                wheel_torque=config.thrust_wheel_gain, hold_torque=False,

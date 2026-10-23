@@ -93,6 +93,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
     previous_com_time = None
     flight_leg_ref = None        # FL4：飞行剖面状态（跨帧保持）
     flight_dual_ref = None       # S1：双质量块飞行计划状态（跨帧保持）
+    momentum_state = None        # 10.48 B3：THRUST 角动量任务的积分/记录状态（每跳重建）
+    two_mass_state = None        # 10.54 C1：THRUST 两块计划的时钟与计划对象（每跳重建）
+    landing_state = None         # 10.68：LANDING 两块计划的时钟与计划对象（每跳重建）
+    s9_plan_end = False          # 10.58 D4：计划时钟到点（上一拍算，本拍进观测）
+    s9_plan_verified = False     # 10.58 D4：到点核验结果
     jump_landed = False          # LAND2：这一跳已落地的锁存（LANDING/RECOVER 置位，COMPRESS 清零）
     landed_frames = 0            # 落地后 ground 模式连续帧数（只做 landing_window 的帧计时）
     landing_reanchor_pending = False   # FL9：本跳是否已离地、等待落地重锚
@@ -183,6 +188,28 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             jump_command = sim.jump.start(float(d.time))
             flight_leg_ref = None                # 每跳复位飞行腿剖面状态
             flight_dual_ref = None               # 每跳复位双质量块飞行计划
+            momentum_state = ({"integral": 0.0, "last_t": None}
+                              if bool(sim.config.thrust_momentum_task) else None)
+            two_mass_state = ({"plan": None, "t0": None}
+                              if bool(sim.config.two_mass_takeoff) else None)
+            landing_state = ({"plan": None, "t0": None}
+                             if bool(sim.config.two_mass_takeoff) else None)
+            # S6（部署文档 10.32 D1）：压缩段锁水平参考。
+            # 轮水平位置参考锁在进入压缩帧的实测轮触地点，质心水平参考也放到该点正上方
+            # （即 d_n 目标 = 0），飞行/落地段的参考不在此改动。只动参考，不动增益。
+            if bool(sim.config.jump_lock_horizontal):
+                from . import robot as _lock_robot
+                _points = np.asarray(_lock_robot.wheel_contact_points(m, d), dtype=float)
+                _contact_x = float(np.mean(_points[:, 0]))
+                _base_x = float(d.qpos[0])
+                _target = float(sim.distance) + (_contact_x - _base_x)
+                sim.mpc.planner.soft_reanchor(
+                    _target, float(sim.dyn.attitude()[2]), reset_position=True)
+                _LOGGER.info(
+                    "S6 水平参考锁定：轮触地 x=%.4f m（相对参考坐标 %.4f），"
+                    "机体质心偏置 d_n=%.1f mm，参考位置 %.4f -> %.4f",
+                    _contact_x, _target - float(sim.distance), 1.0e3 * (_base_x - _contact_x),
+                    float(sim.distance), _target)
 
         # ------------------------------------------------------ 采样级（每物理步）
         if jump_command is None:
@@ -221,6 +248,39 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             leg = sim.dyn.leg_state()
             leg_rows = feedback.rows.leg[0]
             jump_wheel_gap = float(np.min(R.wheel_contact_points(m, d)[:, 2]))
+            # 10.62 E4：S9 计划终点核验——**当拍**算，判据用两轮法向力（N<=0），
+            # gap/接触估计器/腿长只记录。上一轮的"上一拍值"实现已删除。
+            s9_plan_end = False
+            s9_plan_verified = False
+            if two_mass_state is not None and two_mass_state.get("plan") is not None:
+                _s9 = two_mass_state["plan"]
+                s9_plan_end = bool(float(d.time) - float(two_mass_state["t0"]) >= float(_s9.T))
+                _n_now = np.asarray(feedback.forces[:, 2], dtype=float)
+                s9_plan_verified = bool(np.all(_n_now <= 0.0))
+                if s9_plan_end:
+                    _LOGGER.info(
+                        "S9 计划终点（当拍）：elapsed=%.4f T=%.4f N=[%.1f, %.1f] gap=%.4f mm L=%.4f 核验=%s",
+                        float(d.time) - float(two_mass_state["t0"]), float(_s9.T),
+                        float(_n_now[0]), float(_n_now[-1]),
+                        1.0e3 * float(jump_wheel_gap), float(leg[0]), s9_plan_verified)
+            # 10.68：上一拍已在 LANDING 时，首拍用实测状态生成落地计划；之后按计划时钟判到点
+            landing_plan_end = False
+            if (landing_state is not None and jump_command is not None
+                    and jump_command.phase.value == "LANDING"):
+                if landing_state.get("plan") is None:
+                    from . import two_mass as _lp
+                    _row, _bias, _zc_abs, _ = sim.dyn.com_vertical_row()
+                    _low = float(np.min(R.wheel_contact_points(m, d)[:, 2]))
+                    landing_state["plan"] = _lp.LandingPlan(
+                        sim.two_mass_tables, float(_zc_abs - _low), float(_row @ d.qvel),
+                        float(sim.config.landing_length_end), float(sim.two_mass_tables["M"]))
+                    landing_state["t0"] = float(d.time)
+                    _LOGGER.info("S10 落地计划：T=%.4f s、N 峰 %.1f N、zc0=%.4f vcz0=%+.3f -> L_end %.3f",
+                                 landing_state["plan"].T, landing_state["plan"].n_peak,
+                                 landing_state["plan"].zc0, landing_state["plan"].vcz0,
+                                 float(sim.config.landing_length_end))
+                landing_plan_end = bool(float(d.time) - float(landing_state["t0"])
+                                        >= float(landing_state["plan"].T))
             jump_command = sim.jump.update(JumpObservation(
                 time=float(d.time),
                 leg_length=0.5 * (float(leg[0]) + float(leg[2])),
@@ -231,7 +291,9 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 geometry_contact=tuple(bool(v) for v in sim.dyn.contact_geometry()[0]),
                 contact=feedback.decision.contact, pitch=float(feedback.state.pitch),
                 pitch_rate=float(feedback.state.pitch_rate),
-                thrust_applied=bool(thrust_applied_last)))
+                thrust_applied=bool(thrust_applied_last),
+                plan_end=bool(s9_plan_end), plan_verified=bool(s9_plan_verified),
+                landing_plan_end=bool(landing_plan_end)))
             if (explicit_jump_reference and jump_command is not None
                     and jump_command.active and jump_reference is None):
                 state = feedback.state.vector(sim.reduced.state_dim)
@@ -363,6 +425,13 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                                  and jump_command is not None and jump_command.active
                                  else None),
                 landing_window=(jump_landed and landed_frames < LANDING_WINDOW_FRAMES),
+                thrust_momentum=bool(sim.config.thrust_momentum_task),
+                k_momentum=float(sim.config.thrust_momentum_kh),
+                k_momentum_integral=float(sim.config.thrust_momentum_khi),
+                momentum_state=momentum_state,
+                two_mass_state=two_mass_state,
+                two_mass_tables=getattr(sim, "two_mass_tables", None),
+                landing_state=landing_state,
                 mpc_force_feedforward=mpc_force_feedforward,
                 wheel_radius=float(sim.reduced.wheel_radius))
             torque = outcome.torque
@@ -405,6 +474,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                                   - (sim.jump.config.leg_length_nominal
                                      - sim.jump.config.leg_length_min) * 0.5)
             landing_buffer = bool(jump_phase_value == "LANDING"
+                                  and not bool(sim.config.two_mass_takeoff)
                                   and float(d.qvel[2]) < 0.0
                                   and min(float(leg_now[0]), float(leg_now[2])) > compression_target)
         # FL5（2026-10-09）：飞行剖面门控改为“FLIGHT 相位或几何离地”（FL4 因只靠 gap>1mm，
@@ -426,7 +496,11 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
                 dt=float(m.opt.timestep), pitch=float(feedback.state.pitch),
                 plan=flight_dual_ref,
-                leg_length_nominal=sim.jump.config.leg_length_nominal)
+                leg_length_nominal=sim.jump.config.leg_length_nominal,
+                hold_momentum=bool(sim.config.flight_hold_momentum),
+                two_mass_table=getattr(sim, "two_mass_tables", None),
+                landing_length=(float(sim.config.landing_length_td)
+                                if bool(sim.config.two_mass_takeoff) else None))
         elif flight_profile:
             torque, flight_leg_ref = flight_leg_profile_torque(
                 sim.dyn, leg_now, leg_rate_now, float(d.qvel[2]),
@@ -484,6 +558,12 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 "wheel_torque": float(jump_command.wheel_torque),
                 "desired_com_acceleration_z": (None if jump_command.desired_com_acceleration_z is None
                                                else float(jump_command.desired_com_acceleration_z)),
+                # 10.48 B3：角动量任务的运行记录（H、H 的目标、积分状态、单拍耗时）
+                "momentum": (None if momentum_state is None else {
+                    "h": float(momentum_state.get("h", 0.0)),
+                    "h_des": float(momentum_state.get("h_des", 0.0)),
+                    "integral": float(momentum_state.get("integral", 0.0)),
+                    "row_ms": float(momentum_state.get("row_ms", 0.0))}),
                 "flight_leg_ref": (None if flight_leg_ref is None
                                    else [str(flight_leg_ref[0])]
                                         + [float(v) for v in flight_leg_ref[1:]]),
@@ -598,7 +678,8 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                     phase_transition["flight_by_geometry"] = bool(gap_now > LIFTOFF_GAP)
                     phase_transition["flight_max_wheel_gap"] = gap_now
                     _LOGGER.info("THRUST->FLIGHT 触发判据：%s（max wheel_gap=%.6f m，阈值 %.6f）",
-                                 "geometry" if gap_now > LIFTOFF_GAP else "release_end_fallback",
+                                 ("s9_plan_end_force" if bool(sim.config.two_mass_takeoff)
+                                  else ("geometry" if gap_now > LIFTOFF_GAP else "release_end_fallback")),
                                  gap_now, LIFTOFF_GAP)
                 previous_phase = current_phase
             last_thrust_applied = thrust_applied_now

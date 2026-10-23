@@ -185,7 +185,10 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              vmc_feedforward=False, leg_length_compression=False, leg_length_thrust=False,
              thrust_only=False, flight_zero_torque=False, flight_leg_retract=False,
              flight_leg_extend=False, mpc_force_feedforward=False, wheel_torque_limit=None,
-             flight_leg_preswing=0.0, flight_dual_mass=False,
+             flight_leg_preswing=0.0, flight_dual_mass=False, release_ramp=False,
+             flight_hold_momentum=False, jump_lock_horizontal=False,
+             thrust_momentum_task=False, thrust_momentum_kh=0.0, thrust_momentum_khi=0.0,
+             two_mass_takeoff=False,
              command_velocity=0.5, command_hold=3.0,
              command_yaw_rate=0.0, command_yaw_hold=None):
     RESULTS.mkdir(exist_ok=True)
@@ -195,7 +198,14 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
     config = SimulationConfig(jump_height=jump_height, jump_stroke=jump_stroke,
                               jump_time=jump_time, wheel_torque_limit=wheel_torque_limit,
                               flight_leg_preswing=flight_leg_preswing,
-                              flight_dual_mass=bool(flight_dual_mass))
+                              flight_dual_mass=bool(flight_dual_mass),
+                              release_ramp=bool(release_ramp),
+                              flight_hold_momentum=bool(flight_hold_momentum),
+                              jump_lock_horizontal=bool(jump_lock_horizontal),
+                              thrust_momentum_task=bool(thrust_momentum_task),
+                              thrust_momentum_kh=float(thrust_momentum_kh),
+                              thrust_momentum_khi=float(thrust_momentum_khi),
+                              two_mass_takeoff=bool(two_mass_takeoff))
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
     sim.run(_command(case, command_velocity, command_hold,
@@ -307,6 +317,20 @@ def main():
                         help="[rad] 触地前腿角终端预置（伸腿进度 0->1 生效），0=原行为")
     parser.add_argument("--flight-dual-mass", action="store_true",
                         help="S1：飞行段改用双质量块单轨迹规划（默认关）")
+    parser.add_argument("--release-ramp", action="store_true",
+                        help="S2：THRUST 末段 25 ms 把 a_z 斜坡降到离地值（默认关）")
+    parser.add_argument("--flight-hold-momentum", action="store_true",
+                        help="S5-a：飞行段切向参考改为保持离地总角动量（默认关）")
+    parser.add_argument("--jump-lock-horizontal", action="store_true",
+                        help="S6：压缩段锁定水平参考（质心参考放到轮触地点正上方，默认关）")
+    parser.add_argument("--thrust-momentum-task", action="store_true",
+                        help="10.48 B1：THRUST 段用角动量行+差模腿角行替换角度/前向速度行")
+    parser.add_argument("--thrust-momentum-kh", type=float, default=0.0,
+                        help="[1/s] 角动量回路比例 k_H（辨识参数）")
+    parser.add_argument("--thrust-momentum-khi", type=float, default=0.0,
+                        help="[1/s^2] 角动量回路积分 k_HI（辨识参数）")
+    parser.add_argument("--two-mass-takeoff", action="store_true",
+                        help="S9（10.54）：THRUST 两块计划 + 飞行段方案 (b)")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--mpc-force-feedforward", action="store_true",
@@ -323,11 +347,33 @@ def main():
         _control.FLIGHT_RETRACT_FLOOR = float(args.flight_retract_floor)
     if args.flight_retract_torque_limit is not None:
         _control.FLIGHT_RETRACT_TORQUE_LIMIT = float(args.flight_retract_torque_limit)
+    # 10.48 B1：角动量任务必须与腿长加速度通道同用；与 S6 水平锁定互斥。
+    if args.thrust_momentum_task and not args.leg_length_thrust:
+        parser.error("--thrust-momentum-task 需要同时打开 --leg-length-thrust")
+    if args.two_mass_takeoff:
+        for _flag, _value in (("--flight-dual-mass", args.flight_dual_mass),
+                              ("--leg-length-thrust", args.leg_length_thrust)):
+            if not _value:
+                parser.error("--two-mass-takeoff 需要同时打开 %s" % _flag)
+        for _flag, _value in (("--thrust-momentum-task", args.thrust_momentum_task),
+                              ("--jump-lock-horizontal", args.jump_lock_horizontal),
+                              ("--flight-hold-momentum", args.flight_hold_momentum)):
+            if _value:
+                parser.error("--two-mass-takeoff 与 %s 互斥" % _flag)
+    if args.thrust_momentum_task and args.jump_lock_horizontal:
+        parser.error("--thrust-momentum-task 与 --jump-lock-horizontal 不能同时打开")
     jump_height = None if args.no_jump else args.jump_height
     run_case(args.stage, args.case, args.run_id, args.duration, jump_height, args.jump_stroke,
              args.jump_time, explicit_jump_reference=args.explicit_jump_reference,
              flight_leg_preswing=args.flight_leg_preswing,
              flight_dual_mass=args.flight_dual_mass,
+             release_ramp=args.release_ramp,
+             flight_hold_momentum=args.flight_hold_momentum,
+             jump_lock_horizontal=args.jump_lock_horizontal,
+             thrust_momentum_task=args.thrust_momentum_task,
+             thrust_momentum_kh=args.thrust_momentum_kh,
+             thrust_momentum_khi=args.thrust_momentum_khi,
+             two_mass_takeoff=args.two_mass_takeoff,
              compression_only=args.compression_only,
              freeze_jump_reference=args.freeze_jump_reference,
              vmc_feedforward=args.vmc_feedforward,

@@ -29,8 +29,11 @@ import numpy as np
 from . import _circleg  # noqa: F401
 from .logging_setup import get_logger  # noqa: E402
 from .leg_angle_anchor import WORLD_TARGET_DEFAULT, phi_body_reference, phi_eq  # noqa: E402
+from .dynamics import leg_combination  # noqa: E402
+from . import two_mass as _two_mass  # noqa: E402
 from .jump import GRAVITY  # noqa: E402
 from Algorithm.wbc import ActuatorLimits  # noqa: E402
+from Algorithm.wbc.projection import TaskLevel  # noqa: E402
 
 _LOGGER = get_logger(__name__)
 
@@ -220,6 +223,9 @@ class DualMassFlightPlan:
     v0: float           # [m/s] 捕获帧机体竖直速度
     ratio: float        # [-] m1/m2
     phi_elapsed: float  # [s] phi 启用斜坡计时
+    flight: object | None = None   # 10.54 D：方案 (b) 的飞行计划（T/h/l_ref/phi_theta）
+    phi_ref: float = 0.0      # [rad] H-hold 的切向参考（世界系，增量积分）
+    h_target: float = 0.0     # [kg*m^2/s] 角动量保持目标（捕获帧实测总角动量 y 分量）
 
 
 def dual_mass_masses(dynamics) -> tuple[float, float]:
@@ -246,6 +252,27 @@ def _dual_mass_shape(u: float) -> tuple[float, float, float]:
     return DUAL_MASS_NORM * cubic, DUAL_MASS_NORM * first, DUAL_MASS_NORM * second
 
 
+def total_angular_momentum_y(dynamics) -> float:
+    """整机绕总质心的角动量 y 分量 [kg*m^2/s]（飞行段无外力矩，守恒）。
+
+    ``mj_objectVelocity`` 的线速度部分已按刚体质心给出（实测该口径下飞行段
+    H_y = -0.349 全程不变），所以直接用它，不再额外叠加 ω×(xipos-xpos)。
+    """
+    import mujoco
+    model, data = dynamics.model, dynamics.data
+    centre = data.subtree_com[0]
+    total = np.zeros(3)
+    for index in range(1, model.nbody):
+        velocity = np.zeros(6)
+        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY, index, velocity, 0)
+        omega = velocity[:3]
+        rot = data.ximat[index].reshape(3, 3)
+        inertia = rot @ np.diag(model.body_inertia[index]) @ rot.T
+        total += inertia @ omega + model.body_mass[index] * np.cross(
+            data.xipos[index] - centre, velocity[3:])
+    return float(total[1])
+
+
 def dual_mass_flight_plan(m1: float, m2: float, L0: float, v0: float,
                           L_td: float, L_tuck: float) -> tuple[float, float]:
     """解 (T, h)（文档 3.3 节）：T 由触地腿长，h 由最小腿长。无实数解返回 (nan, nan)。"""
@@ -261,19 +288,43 @@ def dual_mass_flight_plan(m1: float, m2: float, L0: float, v0: float,
 
 
 def dual_mass_flight_torque(dynamics, leg_position, leg_velocity, vertical_velocity,
-                            dt, pitch=0.0, plan=None, leg_length_nominal=0.28):
-    """飞行段单轨迹出力矩：``F = -m1*(z1''+g)``，``tau = J^T @ [F/2, F_phi]``。
+                            dt, pitch=0.0, plan=None,
+                            leg_length_nominal=0.28, hold_momentum=False,
+                            two_mass_table=None, landing_length=None):
+    """飞行段出力矩：``F = -m1*(z1''+g)`` + 轴向 PD，``tau = J^T [F_L, F_phi]``。
 
-    phi 通道不改（沿用 KP_PHI/KD_PHI + FEEDFORWARD_COUPLING 与 40 ms 启用斜坡，
-    文档 7.3：本版不碰 phi）。返回 ``(torque, new_plan)``。
+    phi 通道沿用 KP_PHI/KD_PHI + FEEDFORWARD_COUPLING 与 40 ms 启用斜坡（世界系参考
+    = ``phi_eq(L_ref)``）。返回 ``(torque, new_plan)``。
     """
     m1, m2 = dual_mass_masses(dynamics)
+    two_flight = None
+    if plan is None and two_mass_table is not None:
+        # 10.54 D：方案 (b)。T 由质心弹道与 D_td 解出，h 由最小腿长解出；
+        # l_ref 由 D(L) 表反查，world_ref 用流形 phi_theta。
+        two = _two_mass.TwoMassModel(dynamics.model, dynamics.data)
+        com_row, _com_bias, com_z_abs, _v = dynamics.com_vertical_row()
+        lowest = float(np.min(_two_mass.R.wheel_contact_points(dynamics.model,
+                                                              dynamics.data)[:, 2]))
+        vc = float(com_row @ dynamics.data.qvel)
+        two_flight = _two_mass.FlightPlan(
+            two_mass_table, vc, com_z_abs - lowest, FLIGHT_RETRACT_FLOOR,
+            D_td_flight=(None if landing_length is None
+                         else _two_mass.D_of_L(two_mass_table, float(landing_length))))
+        plan = DualMassFlightPlan(0.0, two_flight.T, two_flight.h, 0.0, vc,
+                                  two.mass_lower / two.mass_upper, 0.0,
+                                  flight=two_flight)
     if plan is None:
         L0 = max(float(leg_position[0]), float(leg_position[2]))
         v0 = float(vertical_velocity)
         T, h = dual_mass_flight_plan(m1, m2, L0, v0, float(leg_length_nominal),
                                      FLIGHT_RETRACT_FLOOR)
-        plan = DualMassFlightPlan(0.0, T, h, L0, v0, m1 / m2, 0.0)
+        # S5-a（文档 10.24 D）：切向参考改为"保持离地时的总角动量"：
+        #   phi' = H/(m1*L^2)，phi_ref 每拍增量积分（F2：不一次性积整段）。
+        _seed = 0 if float(leg_position[0]) >= float(leg_position[2]) else 2
+        plan = DualMassFlightPlan(
+            0.0, T, h, L0, v0, m1 / m2, 0.0,
+            phi_ref=float(leg_position[_seed + 1]) - float(pitch),
+            h_target=total_angular_momentum_y(dynamics) if hold_momentum else 0.0)
     ratio = plan.ratio
     u = 0.0 if plan.T <= 0.0 else min(1.0, plan.t / plan.T)
     shape, shape_d, shape_dd = _dual_mass_shape(u)
@@ -284,6 +335,16 @@ def dual_mass_flight_torque(dynamics, leg_position, leg_velocity, vertical_veloc
     travel = plan.v0 * plan.t - (1.0 + ratio) * GRAVITY * plan.t * plan.t / 2.0
     l_ref = plan.L0 + travel - (1.0 + ratio) * z1        # [m] L = z2 - z1
     v_ref = plan.v0 - (1.0 + ratio) * GRAVITY * plan.t - (1.0 + ratio) * z1_d  # [m/s] = dL_ref/dt
+    world_offset_plan = 0.0
+    if getattr(plan, "flight", None) is not None:
+        # 10.54 D：方案 (b) 的计划量（l_ref 由 D(L) 表反查，world_ref 用流形 phi_theta）
+        sample = plan.flight.sample(plan.t)
+        l_ref = sample["l_ref"]
+        v_ref = sample["v_ref"]
+        force_plan = -m1 * (sample["z1_dd"] + GRAVITY)
+        _k_theta = float(plan.flight.table.get("dtheta_dphi", 1.0))   # 10.68
+        world_offset_plan = (sample["phi_theta"] - phi_eq(float(l_ref))
+                             - float(pitch) * (1.0 - 1.0 / _k_theta))
     # 第 10.6 节：纯前馈会把误差积分成腿长漂移，补上沿用现有增益的反馈项
     # （3000/150 即 flight 剖面的 FLIGHT_RETRACT_KP/KD，按文档字面：F_cmd 为两腿合力，
     # 用较大腿的 L 与 Ldot 计算，再 /2 分给两腿）。
@@ -293,10 +354,17 @@ def dual_mass_flight_torque(dynamics, leg_position, leg_velocity, vertical_veloc
                    + FLIGHT_RETRACT_KD * (float(v_ref) - float(leg_velocity[larger])))
     forces = np.full(2, force_total / 2.0)
     phi_ramp = min(1.0, max(0.0, plan.phi_elapsed / FLIGHT_PHI_RAMP))
-    phi = (_phi_force(leg_position, leg_velocity, pitch, float(l_ref))
+    # S5-a：切向参考由"保持 H"解算（phi' = H/(m1*L_ref^2)），PD 增益不动。
+    world_offset = (plan.phi_ref - phi_eq(float(l_ref))) if hold_momentum else world_offset_plan
+    phi = (_phi_force(leg_position, leg_velocity, pitch, float(l_ref), world_offset=world_offset)
            + FEEDFORWARD_COUPLING * forces) * phi_ramp
     torque = _leg_wrench_torque(dynamics, forces, phi)
-    return torque, replace(plan, t=plan.t + float(dt), phi_elapsed=plan.phi_elapsed + float(dt))
+    next_phi_ref = plan.phi_ref
+    if hold_momentum:
+        radius = max(float(l_ref), 1.0e-6)
+        next_phi_ref = plan.phi_ref + plan.h_target / (m1 * radius * radius) * float(dt)
+    return torque, replace(plan, t=plan.t + float(dt), phi_elapsed=plan.phi_elapsed + float(dt),
+                           phi_ref=next_phi_ref)
 
 
 def landing_buffer_torque(dynamics, leg_position, leg_velocity,
@@ -365,7 +433,13 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
               jump_holds: dict | None = None, vmc_feedforward: bool = False,
               jump_config=None, leg_length_compression: bool = False,
               leg_length_thrust: bool = False, landing_window: bool = False,
-              mpc_force_feedforward: bool = False, wheel_radius: float | None = None) -> WbcOutcome:
+              mpc_force_feedforward: bool = False, wheel_radius: float | None = None,
+              thrust_momentum: bool = False, k_momentum: float = 0.0,
+              k_momentum_integral: float = 0.0,
+              momentum_state: dict | None = None,
+              two_mass_state: dict | None = None,
+              two_mass_tables: dict | None = None,
+              landing_state: dict | None = None) -> WbcOutcome:
     """控制级 B：求解一次 WBC，返回力矩与停机原因。
 
     ``mpc`` 由调用方**每拍传入**（不缓存）：腿长换挡会重建 MPC 对象，缓存会用到旧模型。
@@ -443,6 +517,164 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
             motion = tuple(replace(task, activation=0.0)
                            if task.name in ("length_R", "length_L") else task
                            for task in motion)
+    # ---- 文档 10.54 C2 / 10.56：THRUST 段换成两块水平计划 + 竖向 com_z ----
+    if (two_mass_state is not None and two_mass_tables is not None
+            and jump is not None and jump.active and jump.phase.value == "THRUST"):
+        table = two_mass_tables
+        two = _two_mass.TwoMassModel(dynamics.model, dynamics.data)
+        p1, p2 = two.block_state()
+        j1, j2 = two.block_jacobians()
+        com_row, com_bias, com_z_abs, _com_vz = dynamics.com_vertical_row()
+        lowest = float(np.min(_two_mass.R.wheel_contact_points(
+            dynamics.model, dynamics.data)[:, 2]))
+        plan = two_mass_state.get("plan")
+        if plan is None:
+            # 10.62 E1：竖向五次 + 分离端点；T 由一维求解给出（不是设定值）。
+            # 入口加速度取**实测** a_com（row@qacc + bias），不是常数目标。
+            _acc_meas = float(com_row @ dynamics.data.qacc + com_bias)
+            plan = _two_mass.TakeoffPlan(
+                table, float(com_z_abs - lowest), float(com_row @ dynamics.data.qvel), _acc_meas,
+                float(p2[0] - p1[0]), float((j2[0] - j1[0]) @ dynamics.data.qvel),
+                float(table["M"]),
+                float(np.sqrt(2.0 * GRAVITY * float(jump_config.target_height))))
+            two_mass_state["plan"] = plan
+            two_mass_state["t0"] = float(time_s)
+            _LOGGER.info("S9 THRUST 计划：T=%.4f s、N 峰 %.1f N（计划时钟起点 t=%.3f）"
+                         "L'(T)=%+.3f phi'(T)=%+.3f",
+                         plan.T, plan.n_peak, float(time_s), plan.ldot_end, plan.phidot_end)
+        elapsed = min(float(time_s) - float(two_mass_state["t0"]), plan.T)
+        zc_plan, vcz_plan, acc_plan = plan.zc(elapsed), plan.vcz(elapsed), plan.acc(elapsed)
+        dx_plan, dx_rate_plan, dx_acc_plan = plan.dx(elapsed), plan.dx_rate(elapsed), plan.dx_acc(elapsed)
+        kp_h, kd_h = tasks.gains.height_gains
+        kp_r, kd_r = tasks.gains.regularize_gains
+        zc_now = float(com_z_abs - lowest)
+        vcz_now = float(com_row @ dynamics.data.qvel)
+        dx_now = float(p2[0] - p1[0])
+        dx_rate_now = float((j2[0] - j1[0]) @ dynamics.data.qvel)
+        dx_bias = float(_two_mass.dx_rel_bias(dynamics))
+        com_task = TaskLevel(np.atleast_2d(np.asarray(com_row, dtype=float)),
+                             np.array([acc_plan + kp_h * (zc_plan - zc_now)
+                                       + kd_h * (vcz_plan - vcz_now)]),
+                             np.array([float(com_bias)]), name="com_z")
+        dx_task = TaskLevel(np.atleast_2d((j2[0] - j1[0])),
+                            np.array([dx_acc_plan + kp_h * (dx_plan - dx_now)
+                                      + kd_h * (dx_rate_plan - dx_rate_now)]),
+                            np.array([dx_bias]), name="dx_rel")
+        leg = dynamics.leg_state()
+        leg_rows_raw, leg_bias_raw = feedback.rows.leg
+        diff_rows, diff_bias = leg_combination(feedback.rows, -1.0)
+        common_rows, common_bias = leg_combination(feedback.rows, +1.0)
+        # D1（10.58）：L_d 是**差模**腿长（leg_combination(rows,-1)[0]），目标把两块/两腿的腿长差拉回 0。
+        # 第一版误写成共模腿长回 0.28（腿长当规划量），与 com_z 抢同一纵向自由度。
+        length_diff = 0.5 * (float(leg[0]) - float(leg[2]))
+        length_diff_rate = float(diff_rows[0] @ dynamics.data.qvel)
+        phi_diff = 0.5 * (float(leg[1]) - float(leg[3]))
+        phi_diff_rate = float(diff_rows[1] @ dynamics.data.qvel)
+        # D2：phi_d 行取负（与 wbc.py 的 angle 任务同一符号约定），目标同样把差模拉到 0。
+        l_d_task = TaskLevel(np.atleast_2d(diff_rows[0]),
+                             np.array([-kp_h * length_diff - kd_h * length_diff_rate]),
+                             np.array([float(diff_bias[0])]), name="L_d")
+        phi_d_task = TaskLevel(np.atleast_2d(-diff_rows[1]),
+                               np.array([kp_r * phi_diff - kd_r * (-phi_diff_rate)]),
+                               np.array([float(-diff_bias[1])]), name="phi_d")
+        kept = tuple(task for task in motion
+                     if task.name not in ("length_R", "length_L", "angle_R", "angle_L",
+                                          "forward_velocity"))
+        motion = kept + (com_task, dx_task, l_d_task, phi_d_task)
+    # ---- 文档 10.68：LANDING 段两块计划（与 THRUST 任务组对称，经 WBC 执行到计划终点）----
+    if (landing_state is not None and two_mass_tables is not None
+            and landing_state.get("plan") is not None
+            and jump is not None and jump.active and jump.phase.value == "LANDING"):
+        lplan = landing_state["plan"]
+        two = _two_mass.TwoMassModel(dynamics.model, dynamics.data)
+        p1, p2 = two.block_state()
+        j1, j2 = two.block_jacobians()
+        com_row, com_bias, com_z_abs, _com_vz = dynamics.com_vertical_row()
+        lowest = float(np.min(_two_mass.R.wheel_contact_points(
+            dynamics.model, dynamics.data)[:, 2]))
+        elapsed = float(time_s) - float(landing_state["t0"])
+        kp_h, kd_h = tasks.gains.height_gains
+        kp_r, kd_r = tasks.gains.regularize_gains
+        zc_now = float(com_z_abs - lowest)
+        vcz_now = float(com_row @ dynamics.data.qvel)
+        dx_now = float(p2[0] - p1[0])
+        dx_rate_now = float((j2[0] - j1[0]) @ dynamics.data.qvel)
+        h_step = 1.0e-3          # [s] dx 计划速度用中心差分步长（= 物理步长 model.opt.timestep）
+        dx_plan = lplan.dx_eq_at(elapsed)
+        dx_rate_plan = ((lplan.dx_eq_at(elapsed + h_step) - lplan.dx_eq_at(max(elapsed - h_step, 0.0)))
+                        / (h_step + min(elapsed, h_step)))
+        com_task = TaskLevel(np.atleast_2d(np.asarray(com_row, dtype=float)),
+                             np.array([lplan.acc(elapsed) + kp_h * (lplan.zc(elapsed) - zc_now)
+                                       + kd_h * (lplan.vcz(elapsed) - vcz_now)]),
+                             np.array([float(com_bias)]), name="com_z")
+        dx_task = TaskLevel(np.atleast_2d((j2[0] - j1[0])),
+                            np.array([kp_h * (dx_plan - dx_now) + kd_h * (dx_rate_plan - dx_rate_now)]),
+                            np.array([float(_two_mass.dx_rel_bias(dynamics))]), name="dx_rel")
+        leg = dynamics.leg_state()
+        diff_rows, diff_bias = leg_combination(feedback.rows, -1.0)
+        length_diff = 0.5 * (float(leg[0]) - float(leg[2]))
+        phi_diff = 0.5 * (float(leg[1]) - float(leg[3]))
+        l_d_task = TaskLevel(np.atleast_2d(diff_rows[0]),
+                             np.array([-kp_h * length_diff
+                                       - kd_h * float(diff_rows[0] @ dynamics.data.qvel)]),
+                             np.array([float(diff_bias[0])]), name="L_d")
+        phi_d_task = TaskLevel(np.atleast_2d(-diff_rows[1]),
+                               np.array([kp_r * phi_diff
+                                         + kd_r * float(diff_rows[1] @ dynamics.data.qvel)]),
+                               np.array([float(-diff_bias[1])]), name="phi_d")
+        kept = tuple(task for task in motion
+                     if task.name not in ("length_R", "length_L", "angle_R", "angle_L",
+                                          "forward_velocity"))
+        motion = kept + (com_task, dx_task, l_d_task, phi_d_task)
+
+    # ---- 文档 10.48 B2：THRUST 段把角度行/前向速度行换成"角动量 + 差模腿角" ----
+    # 只替换本段任务集：pitch/length/yaw/roll 与几何/相位判据一律不动。
+    if (thrust_momentum and jump is not None and jump.active
+            and jump.phase.value == "THRUST"):
+        _t_perf = time.perf_counter()
+        momentum_row, momentum_bias, momentum_h = dynamics.pitch_momentum_row()
+        rate = 0.0 if momentum_state is None else float(momentum_state.get("integral", 0.0))
+        if momentum_state is not None:
+            last = momentum_state.get("last_t")
+            if last is not None:
+                rate = float(momentum_state.get("integral", 0.0)) + momentum_h * max(
+                    0.0, float(time_s) - float(last))
+            momentum_state["integral"] = rate
+            momentum_state["last_t"] = float(time_s)
+            momentum_state["h"] = momentum_h
+            momentum_state["h_des"] = (-float(k_momentum) * momentum_h
+                                       - float(k_momentum_integral) * rate)
+            momentum_state["row_ms"] = (time.perf_counter() - _t_perf) * 1000.0
+        desired = (-float(k_momentum) * momentum_h - float(k_momentum_integral) * rate)
+        momentum_task = TaskLevel(
+            np.atleast_2d(np.asarray(momentum_row, dtype=float)),
+            np.array([desired]), np.array([float(momentum_bias)]), name="momentum_pitch")
+        # 差模腿角：摘掉 angle_R/L 后保持两腿腿角一致（沿用现有 angle 任务的半差与 kp_r/kd_r）
+        leg_rows_raw, leg_bias_raw = feedback.rows.leg
+        kp_r, kd_r = tasks.gains.regularize_gains
+        angle_row_r, angle_row_l = -leg_rows_raw[1], -leg_rows_raw[3]
+        angle_bias_r, angle_bias_l = -leg_bias_raw[1], -leg_bias_raw[3]
+        phi_d_row = 0.5 * (angle_row_r - angle_row_l)
+        phi_d_bias = 0.5 * (angle_bias_r - angle_bias_l)
+        leg_now = dynamics.leg_state()
+        phi_d_meas = 0.5 * ((0.0 - float(leg_now[1])) - (0.0 - float(leg_now[3])))
+        phi_d_rate = 0.5 * (float(angle_row_r @ dynamics.data.qvel)
+                            - float(angle_row_l @ dynamics.data.qvel))
+        phi_d_desired = 0.0 - kp_r * phi_d_meas - kd_r * phi_d_rate
+        phi_d_task = TaskLevel(np.atleast_2d(phi_d_row), np.array([phi_d_desired]),
+                               np.array([float(phi_d_bias)]), name="phi_d")
+        kept = tuple(task for task in motion
+                     if task.name not in ("angle_R", "angle_L", "forward_velocity"))
+        rebuilt = []
+        inserted = False
+        for task in kept:
+            rebuilt.append(task)
+            if not inserted and task.name in ("length_R", "length_L"):
+                rebuilt.extend((momentum_task, phi_d_task))
+                inserted = True
+        if not inserted:
+            rebuilt.extend((momentum_task, phi_d_task))
+        motion = tuple(rebuilt)
     blocks = tasks.contact_blocks(feedback.rows, feedback.decision.contact)
     # (c) WP3（2026-10-09）：正式路径不再调用 thrust_torque，也不再向 WBC 注入跳跃外部力。
     #     跳跃力统一由 com_vertical 任务求解；external_force 只保留真实外部扰动通道（当前为空）。
