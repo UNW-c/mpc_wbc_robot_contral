@@ -4909,3 +4909,212 @@ class LandingPlan:
 
     另外：起跳段计划终点核验的日志在跳跃结束后仍每拍打印（10573 行），
       是 loop.py 里核验未锁存的小问题，不影响结果，建议下一轮加一次性锁存。
+
+10.70 2026-10-23  S11-A：MPC 逐轮力上限改用名义法向力（交还后 40 ms 自激振荡）+ 10.69 两项遗留（问题排查agent；用户 2026-10-23 确认）
+
+  用户决定：A（本节）与 B（落地段水平速度计划，下一节）两项都做，分两轮部署，各自开关。
+
+  ----------------------------------------------------------------
+  A. 证据（s10_on 逐帧，只读）
+    A1 现象：全程 max|pitch| 0.3896 在 t=2.140 s（IDLE，交还后 233 ms），不在落地段（落地段 pitch -0.19 -> -0.06）。
+       2.02~2.18 s 出现周期 40 ms 的振荡：pitch' 在 +0.25 和 +6.4 之间来回，每个周期 pitch 净增约 +0.07。
+    A2 世界系/机体系腿角不是原因：起振时（t=2.020）pitch -0.008，两种口径只差 0.008 rad。
+       振荡期间世界系腿角保持在 -0.40~-0.48，机体系腿角从 -0.43 变到 -0.01，即腿在世界系里基本不动，机体绕轮转（是结果）。
+       MPC 的 theta 是独立状态，A/B 由 MuJoCo 线性化得到，机体系 phi_c 与 theta 的耦合已经包含在模型里。
+    A3 根因：Algorithm/mpc/controller.py::wheel_force_limit 取 |f_i| <= 0.75*mu*N_i，N_i = state.normal_forces，
+       是 sampling.chassis_state 给的单拍反解 N，没有经过估计器滤波。交还后轮地间隙在 ±0.1 mm 抖动：
+       估计器一直判接地，但单拍 N 会读到 0。
+       | t | 采样 N(R/L) | WBC 预测 N | MPC tau_c | 轮力 | relaxed |
+       |---|-------------|-----------|-----------|------|---------|
+       | 2.020 | 0 / 64 | 97 / 115 | +40 | 0 / 48.3（= 0.75*64.4，贴上限） | 0 |
+       | 2.040 | 122 / 137 | 62 / 60 | -40 | 65 / 68 | 0 |
+       | 2.060 | 0 / 0 | 114 / 110 | +40 | 0 / 0 | 1 |
+       | 2.080 | 123 / 118 | 47 / 43 | -40 | 62 / 61 | 0 |
+       | 2.100 | 0 / 0 | 132 / 131 | +40 | 0 / 0 | 1 |
+       | 2.120 | 131 / 123 | 27 / 22 | -40 | 53 / 50 | 0 |
+       | 2.160 | 0 / 0 | 116 / 136 | +40 | 0 / 0 | 1 |
+       4 次 tau_c=+40 都正好落在采样 N=0 的 MPC 拍上：轮力上限为 0，只能用髋力矩刹车，解保持 20 ms；
+       下一拍 N>0，解反号，又把轮子抬离。全 run 中"估计器判接地但采样 N<=0"的 MPC 拍：s1pd 0/571，s9f_on 38/153，s10_on 5/571。
+       名义上限 0.75*M*g/2 = 53.5 N；s10_on 全部 571 次 MPC 解中超过它的只有 2.040 / 2.080 两拍（就在振荡里）。
+    A4 次因（留给 B）：LANDING 段 vx 从 -0.228 变到 -0.591，等于 ∫Ft dt/M = -0.363。落地任务组没有前向速度任务；
+       交还时后退速度大，MPC 刹车摆腿 phi_c 到 0.30 rad，接地 N 降到 50~60 N。
+
+  ----------------------------------------------------------------
+  B. 修改（逐字替换，3 个文件；文件均为 CRLF，替换后保持 CRLF）
+
+  B1 文件 wheel_leg_mujoco/gbc_mpc_wbc/simulation.py（SimulationConfig）
+    原文：
+    landing_length_end: float = 0.22
+    改为：
+    landing_length_end: float = 0.22
+    # 10.70 A：MPC 逐轮力上限的法向力口径。False = 原行为（单拍采样反解 N）；
+    # True = 用 MPCSettings.nominal_normal_force（= M*g/2，见 gbc486_mpc_settings），
+    # 接触与否仍由估计器 decision.contact 决定。
+    mpc_nominal_normal: bool = False
+
+  B2 文件 wheel_leg_mujoco/gbc_mpc_wbc/loop.py
+
+   B2.1 MPC 调用（只改交给 MPC 的 state 副本；WBC、估计器、记录仍用原 feedback）
+    原文：
+            solution, sim._command = mpc_stage(
+                control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                feedback=feedback, command=command,
+                timings=sim.timings, counters=sim.counters)
+    改为：
+            _mpc_feedback = feedback
+            if bool(sim.config.mpc_nominal_normal):
+                # 10.70 A：normal_forces=None -> WheelMPC.wheel_force_limit 取 nominal_normal_force
+                from dataclasses import replace as _replace_a
+                _mpc_feedback = _replace_a(feedback, state=_replace_a(feedback.state, normal_forces=None))
+            solution, sim._command = mpc_stage(
+                control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
+                feedback=_mpc_feedback, command=command,
+                timings=sim.timings, counters=sim.counters)
+
+   B2.2 相位断言表（10.69 六：LANDING -> IDLE 被判非法）
+    原文：
+                    "IDLE": {"RECOVER", "ABORT"},
+    改为：
+                    "IDLE": {"RECOVER", "ABORT", "LANDING"},   # 10.70：S10 落地计划终点直接交还（10.68 B3.2）
+
+   B2.3 S9 计划终点日志只在 THRUST 末拍记（10.69 六：跳跃结束后每拍打印 10573 行）
+    原文：
+                if s9_plan_end:
+    改为：
+                if s9_plan_end and previous_jump_phase == "THRUST":   # 10.70：只在 THRUST 末拍记一次
+    说明：只改日志条件；s9_plan_end / s9_plan_verified 照旧进观测（jump.py 只在 THRUST 分支使用）。
+
+  B3 文件 wheel_leg_mujoco/tools/jump_diagnostic.py（4 处）
+    (a) 原文：
+             two_mass_takeoff=False,
+        改为：
+             two_mass_takeoff=False, mpc_nominal_normal=False,
+    (b) 原文：
+                              two_mass_takeoff=bool(two_mass_takeoff))
+        改为：
+                              two_mass_takeoff=bool(two_mass_takeoff),
+                              mpc_nominal_normal=bool(mpc_nominal_normal))
+    (c) 原文：
+                        help="S9（10.54）：THRUST 两块计划 + 飞行段方案 (b)")
+        改为：
+                        help="S9（10.54）：THRUST 两块计划 + 飞行段方案 (b)")
+    parser.add_argument("--mpc-nominal-normal", action="store_true",
+                        help="10.70 A：MPC 逐轮力上限用名义法向力 M*g/2（不用单拍采样 N）")
+    (d) 原文：
+             two_mass_takeoff=args.two_mass_takeoff,
+        改为：
+             two_mass_takeoff=args.two_mass_takeoff,
+             mpc_nominal_normal=args.mpc_nominal_normal,
+
+  ----------------------------------------------------------------
+  C. 自检（在工作区根目录照抄运行，输出原样贴进报告；和 E 不一致就停止并上报）
+      PYTHONUTF8=1 .venv/Scripts/python.exe - <<'EOF'
+      import sys
+      from dataclasses import replace
+      from types import SimpleNamespace
+      sys.path.insert(0, 'wheel_leg_mujoco')
+      import numpy as np
+      from gbc_mpc_wbc.sampling import Feedback
+      from gbc_mpc_wbc.simulation import SimulationConfig
+      from Algorithm.mpc import ChassisState, WheelMPC
+      print("mpc_nominal_normal 默认 =", SimulationConfig().mpc_nominal_normal)
+      st = ChassisState(normal_forces=(0.0, 64.4), contact=(True, True))
+      fb = Feedback(contact=(True, True), state=st, rows=None, decision=None, forces=None, other=None)
+      fb2 = replace(fb, state=replace(fb.state, normal_forces=None))
+      fake = SimpleNamespace(settings=SimpleNamespace(wheel_torque_limit=6.0, nominal_normal_force=14.546*9.81/2,
+                                                      friction_coefficient=1.0, friction_margin=0.75),
+                             model=SimpleNamespace(wheel_radius=0.077))
+      for name, s in (("原行为 N=(0, 64.4)", fb.state), ("10.70 A normal_forces=None", fb2.state),
+                      ("10.70 A 估计器判右轮离地", replace(fb2.state, contact=(False, True)))):
+          print("%-28s -> 轮力上限 %s" % (name, np.round(WheelMPC.wheel_force_limit(fake, s), 2).tolist()))
+      print("原 feedback.state.normal_forces 未被改动：", fb.state.normal_forces)
+      EOF
+
+  D. 然后
+    D1 回归 1：不带任何开关的 s1pd 命令行（run-id s11_reg），与 s1pd summary 全等、逐帧 qpos 差 0。
+    D2 回归 2：s10_on 命令行（不带 --mpc-nominal-normal，run-id s11_s10）与 s10_on 逐帧 qpos 差 0；
+       summary 只允许 phase_transition_assertion_failures 从 1 变成 0；日志里 "S9 计划终点（当拍）" 只出现 1 行。
+    D3 单点：s10_on 命令行 + --mpc-nominal-normal，run-id s11a_on，12 s。
+    D4 报告追加到文末，节号 10.71（CRLF）。内容：C 的输出原文；D1/D2 结果；D3 与 s10_on 对照表：
+       - 交还时刻与交还时 vx / pitch / pitch'
+       - 交还后 1.5 s 内：MPC 调用数、|tau_c| >= 39.9 次数、relaxed 次数、"估计器接地但采样 N<=0"的 MPC 拍数（记录用）
+       - 交还后 max pitch 与时刻、min pitch 与时刻、max|pitch'|
+       - 交还后最小单轮 N（采样）、轮接触点切向滑移速度峰值（|轮心 vx - ω*r|）
+       - 交还后 max|phi_c|（MPC 状态 6）、max|髋扭| / max|轮扭| / 饱和帧数
+       - 10.51 T_max、全程 max|pitch|、F3 三级判定（口径同 10.69）
+       不调参，不改 B 以外的代码。
+
+  E. C 节期望输出（问题排查agent 在副本 build/_s11v 上逐字应用 B 节全部替换后实际运行的结果；8 处原文在当前源码中各出现 1 次，
+     3 个文件 py_compile 通过；副本已删除）：
+      mpc_nominal_normal 默认 = False
+      原行为 N=(0, 64.4)              -> 轮力上限 [0.0, 48.3]
+      10.70 A normal_forces=None   -> 轮力上限 [53.51, 53.51]
+      10.70 A 估计器判右轮离地             -> 轮力上限 [0.0, 53.51]
+      原 feedback.state.normal_forces 未被改动： (0.0, 64.4)
+     第 1 行对应 s10_on t=2.020 实际的 MPC 解 [0.0, 48.3]（A3 表），说明自检复现了故障口径。
+     未做：仿真（按 10.64，由测试agent 在 D 节执行）。
+
+  F. 已知风险（实测时关注）
+    F1 名义上限 53.5 N 可能高于实际可用摩擦（实际 N 小于名义时），MPC 给的轮力可能让轮子打滑。WBC 的接触约束是硬约束，
+       所以这种情况会表现为 WBC 残差或滑移，而不是 MPC 不可行。D4 里滑移速度峰值就是看这个；峰值 > 0.05 m/s 记 WARN 上报。
+    F2 A 只去掉"上限随单拍 N 跳"的机制，不减少交还时的后退速度（A4）。摆腿刹车幅度预计和 s10_on 同量级，这部分由 B 处理。
+    F3 B 的方案在 A 的结果出来后写（下一节），用 s11a_on 作为基线。
+
+10.71 2026-10-23  S11-A（10.70 B-D）执行记录：交还后自激振荡消除，三级全过且更优
+
+  一、B 节修改（逐字替换，3 个文件）
+    simulation.py：mpc_nominal_normal: bool = False
+    loop.py：MPC 调用用 normal_forces=None 的 state 副本；断言表加 LANDING -> IDLE；
+            S9 计划终点日志只在 previous_jump_phase == "THRUST" 时记
+    jump_diagnostic.py：--mpc-nominal-normal
+
+  二、C 节自检（照抄运行，输出原样）
+    mpc_nominal_normal 默认 = False
+    原行为 N=(0, 64.4)              -> 轮力上限 [0.0, 48.3]
+    10.70 A normal_forces=None   -> 轮力上限 [53.51, 53.51]
+    10.70 A 估计器判右轮离地             -> 轮力上限 [0.0, 53.51]
+    原 feedback.state.normal_forces 未被改动： (0.0, 64.4)
+    与 10.70 E 期望输出**逐字一致**。
+
+  三、D1 / D2
+    D1 s11_reg（不带开关）vs s1pd：summary 全等、逐帧 qpos 差 0.000e+00。
+    D2 s11_s10（s10_on 命令行，不带 --mpc-nominal-normal）vs s10_on：
+       逐帧 qpos 差 0.000e+00；summary 唯一差异 =
+       phase_transition_assertion_failures: (1, 0)（断言表加了 LANDING -> IDLE）。
+       "S9 计划终点（当拍）"日志从 10573 行降为 **3 行**
+       （elapsed 跨越 T 到相位转换完成的 2-3 帧，previous_jump_phase 仍为 THRUST 的帧各记一次；
+        要到"恰好 1 行"需再加一次性锁存，属于 B 以外改动，未做）。
+
+  四、D3 单点 s11a_on（s10_on 命令行 + --mpc-nominal-normal，12 s）与 s10_on 对照
+
+    交还时刻同为 t=1.907 s，交还时 vx=-0.623、pitch=-0.0604、pitch'=+0.788（一致）。
+
+    | 量（交还后 1.5 s） | s10_on（无 A） | s11a_on（10.70 A） |
+    |---------------------|----------------|---------------------|
+    | MPC 调用数 | 75 | 75 |
+    | |tau_c| 峰 | 67.9 | **53.5** |
+    | |tau_c| >= 39.9 次数 | 8 | 10 |
+    | relaxed 次数 | 3 | **0** |
+    | "估计器接地但采样 N<=0" 的 MPC 拍 | 5 | 5 |
+    | max pitch / 时刻 | 0.3896 @ t=2.140 | **0.0009 @ t=2.422** |
+    | min pitch | -0.0604 | -0.0604 |
+    | max|pitch'| | 6.468 | **0.788** |
+    | 最小单轮 N（采样） | 0.0 | 0.0 |
+    | 轮接触点切向滑移速度峰 | 1.7892 m/s | **0.6291 m/s** |
+    | max|phi_c|（MPC 状态 6） | 0.4415 | 0.6513 |
+    | max|髋扭| / max|轮扭| / 饱和帧 | 25.2 / 5.90 / 0/0 | **15.9 / 5.55 / 0/0** |
+    | 10.51 T_max | 1.088 | **0.918** |
+    | 全程 max|pitch| | 0.3896 | **0.1937** |
+
+  五、F3 三级判定（口径同 10.69）
+    第 1 级：轮离地峰 0.22617 >= 0.200 ✓；离地 com_vxz[1] = 1.648 ∈ [1.546, 1.708] ✓；
+      ABORT 0 ✓；髋/轮不饱和 ✓；腿长 [0.1564, 0.3799] ✓ -> **通过**。
+    第 2 级：T_max 0.918 s <= 3.0 s ✓ -> **通过**。
+    第 3 级：触地 |pitch| 0.1888 < 0.5394 ✓；全程 max|pitch| 0.1937 < 0.5916 ✓ -> **通过**。
+
+  六、观察
+    自激振荡（10.70 A1 的 40 ms 周期 pitch 净增）在 A 开启后完全消失：
+      交还后 pitch 峰值从 0.3896 降到 0.0009，max|pitch'| 从 6.47 降到 0.79。
+      机制与 10.70 A3 一致：上限不再随单拍 N 归零，MPC 解不再保持 20 ms 后反号。
+    relaxed 3 -> 0；滑移速度峰 1.789 -> 0.629（仍 > 0.05，记 WARN 级别观察，见 10.70 F1）；
+      max|phi_c| 从 0.44 涨到 0.65（刹车摆腿更大，与 F2 预告同向，属于 B 要处理的部分）。

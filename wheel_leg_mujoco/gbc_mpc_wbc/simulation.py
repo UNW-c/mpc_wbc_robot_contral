@@ -313,6 +313,10 @@ class SimulationConfig:
     # 依据：已收敛 run 触地 L 0.295~0.338、落地 L 最小 0.19~0.24；离线落地髋扭峰 32.8 N*m（限 40）。
     landing_length_td: float = 0.34
     landing_length_end: float = 0.22
+    # 10.70 A：MPC 逐轮力上限的法向力口径。False = 原行为（单拍采样反解 N）；
+    # True = 用 MPCSettings.nominal_normal_force（= M*g/2，见 gbc486_mpc_settings），
+    # 接触与否仍由估计器 decision.contact 决定。
+    mpc_nominal_normal: bool = False
     jump_time: float = 1.0                 # [s] 起跳指令时刻
     wbc_gains: WbcGains = field(default_factory=WbcGains)
     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角

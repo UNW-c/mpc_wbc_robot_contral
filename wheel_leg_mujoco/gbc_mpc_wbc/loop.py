@@ -257,7 +257,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
                 s9_plan_end = bool(float(d.time) - float(two_mass_state["t0"]) >= float(_s9.T))
                 _n_now = np.asarray(feedback.forces[:, 2], dtype=float)
                 s9_plan_verified = bool(np.all(_n_now <= 0.0))
-                if s9_plan_end:
+                if s9_plan_end and previous_jump_phase == "THRUST":   # 10.70：只在 THRUST 末拍记一次
                     _LOGGER.info(
                         "S9 计划终点（当拍）：elapsed=%.4f T=%.4f N=[%.1f, %.1f] gap=%.4f mm L=%.4f 核验=%s",
                         float(d.time) - float(two_mass_state["t0"]), float(_s9.T),
@@ -358,9 +358,14 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
         # ---------------------------- 控制级 A：MPC（自己的节拍，与 WBC 异步）
         if landing_refresh or sim.timing.mpc_due(step):
             mpc_called = True
+            _mpc_feedback = feedback
+            if bool(sim.config.mpc_nominal_normal):
+                # 10.70 A：normal_forces=None -> WheelMPC.wheel_force_limit 取 nominal_normal_force
+                from dataclasses import replace as _replace_a
+                _mpc_feedback = _replace_a(feedback, state=_replace_a(feedback.state, normal_forces=None))
             solution, sim._command = mpc_stage(
                 control=sim.control, feedback_accum=sim.feedback, time_s=float(d.time),
-                feedback=feedback, command=command,
+                feedback=_mpc_feedback, command=command,
                 timings=sim.timings, counters=sim.counters)
 
         # ---- 离地档（用户 2026-10-07 要求）：离地检测生效后脱离控制器 ----
@@ -624,7 +629,7 @@ def run_loop(sim, command, duration: float, disturbances=(), viewer=None,
             phase_transition = None
             if current_phase != previous_phase:
                 allowed_predecessors = {
-                    "IDLE": {"RECOVER", "ABORT"},
+                    "IDLE": {"RECOVER", "ABORT", "LANDING"},   # 10.70：S10 落地计划终点直接交还（10.68 B3.2）
                     "COMPRESS": {"IDLE"},
                     "COMPRESS_BRAKE": {"COMPRESS"},
                     "THRUST": {"COMPRESS_BRAKE"},

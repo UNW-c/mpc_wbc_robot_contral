@@ -188,7 +188,7 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
              flight_leg_preswing=0.0, flight_dual_mass=False, release_ramp=False,
              flight_hold_momentum=False, jump_lock_horizontal=False,
              thrust_momentum_task=False, thrust_momentum_kh=0.0, thrust_momentum_khi=0.0,
-             two_mass_takeoff=False,
+             two_mass_takeoff=False, mpc_nominal_normal=False,
              command_velocity=0.5, command_hold=3.0,
              command_yaw_rate=0.0, command_yaw_hold=None):
     RESULTS.mkdir(exist_ok=True)
@@ -205,7 +205,8 @@ def run_case(stage, case, run_id, duration, jump_height, jump_stroke, jump_time,
                               thrust_momentum_task=bool(thrust_momentum_task),
                               thrust_momentum_kh=float(thrust_momentum_kh),
                               thrust_momentum_khi=float(thrust_momentum_khi),
-                              two_mass_takeoff=bool(two_mass_takeoff))
+                              two_mass_takeoff=bool(two_mass_takeoff),
+                              mpc_nominal_normal=bool(mpc_nominal_normal))
     sim = Gbc486MpcWbcSimulation(config)
     frames = []
     sim.run(_command(case, command_velocity, command_hold,
@@ -331,6 +332,8 @@ def main():
                         help="[1/s^2] 角动量回路积分 k_HI（辨识参数）")
     parser.add_argument("--two-mass-takeoff", action="store_true",
                         help="S9（10.54）：THRUST 两块计划 + 飞行段方案 (b)")
+    parser.add_argument("--mpc-nominal-normal", action="store_true",
+                        help="10.70 A：MPC 逐轮力上限用名义法向力 M*g/2（不用单拍采样 N）")
     parser.add_argument("--flight-leg-extend", action="store_true",
                         help="FL3：飞行腿剖面（上升收腿/下落伸腿）+ LANDING 缓冲")
     parser.add_argument("--mpc-force-feedforward", action="store_true",
@@ -374,6 +377,7 @@ def main():
              thrust_momentum_kh=args.thrust_momentum_kh,
              thrust_momentum_khi=args.thrust_momentum_khi,
              two_mass_takeoff=args.two_mass_takeoff,
+             mpc_nominal_normal=args.mpc_nominal_normal,
              compression_only=args.compression_only,
              freeze_jump_reference=args.freeze_jump_reference,
              vmc_feedforward=args.vmc_feedforward,
