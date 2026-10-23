@@ -536,7 +536,8 @@ def wbc_stage(*, control, tasks, dynamics, mpc, config, feedback, solution, feed
                 table, float(com_z_abs - lowest), float(com_row @ dynamics.data.qvel), _acc_meas,
                 float(p2[0] - p1[0]), float((j2[0] - j1[0]) @ dynamics.data.qvel),
                 float(table["M"]),
-                float(np.sqrt(2.0 * GRAVITY * float(jump_config.target_height))))
+                float(np.sqrt(2.0 * GRAVITY * float(jump_config.target_height))),
+                h_t=float(getattr(config, "thrust_h_t", -0.20)))
             two_mass_state["plan"] = plan
             two_mass_state["t0"] = float(time_s)
             _LOGGER.info("S9 THRUST 计划：T=%.4f s、N 峰 %.1f N（计划时钟起点 t=%.3f）"

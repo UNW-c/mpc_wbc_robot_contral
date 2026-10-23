@@ -5118,3 +5118,209 @@ class LandingPlan:
       机制与 10.70 A3 一致：上限不再随单拍 N 归零，MPC 解不再保持 20 ms 后反号。
     relaxed 3 -> 0；滑移速度峰 1.789 -> 0.629（仍 > 0.05，记 WARN 级别观察，见 10.70 F1）；
       max|phi_c| 从 0.44 涨到 0.65（刹车摆腿更大，与 F2 预告同向，属于 B 要处理的部分）。
+
+10.72 2026-10-23  S12-C：离地 H 目标可调（设计输入 H_t，默认 -0.20；测 H_t=0，失败回退 -0.10）（问题排查agent；用户 2026-10-23 确认）
+
+  用户决定：离地 H 目标 H_t 做成可配置设计输入；先测 H_t = 0，若失败再测 H_t = -0.10。
+  用户同时决定：方案 B（落地段水平速度计划）先做 C 后做；C 的替代方案是改 H_t，不是飞行段摆腿。
+
+  ----------------------------------------------------------------
+  A. 为什么改 H_t 而不是飞行段摆腿（更正 10.71 后的建议）
+
+    A1 飞行段 H 守恒（s11a_on：H 从 -0.2234 变到 -0.2203，293 帧），什么控制都改不了 H。
+    A2 触地 pitch 就是离地 H 的刚体项：10.53 E 预测 0.89*H = -0.199，实测 -0.189。
+    A3 飞行段要保持 pitch 不变，只能让腿摆吸收 H：H = -0.22 时腿角需摆 0.37 rad，
+       触地腿角 +0.247，远离平衡角 -0.126，10.53 E 已说明这会引入落地干涉。不建议。
+    A4 所以触地 pitch 在离地那一刻就由 H 决定，要降它只能在起跳时把 H 做小 = 改 H_t。
+
+  ----------------------------------------------------------------
+  B. 离线核算（只读，s11a_on THRUST 入口状态；target_height 0.135）
+
+    | H_t | T | N 峰 | 离地 L' | 离地 phi' | 离地 Δx' | 触地 pitch 预计 0.89*H_t |
+    |-----|---|------|---------|-----------|----------|--------------------------|
+    | -0.20（现状） | 0.110 | 514 | +2.308 | -0.662 | +0.201 | -0.178（实测 -0.189） |
+    | 0 | 0.110 | 514 | +2.309 | -1.694 | +0.417 | +0.000 |
+    | -0.10 | 0.110 | 514 | +2.308 | -1.178 | +0.309 | -0.089 |
+
+    端点方程：[∂zc/∂L ∂zc/∂phi; ∂H/∂L' ∂H/∂phi'] [L'; phi'] = [√(2g·0.135); H_t]。
+    矩阵条件数 3.8，H_t 变化只影响 phi' 和 Δx'，L' 和 T、N 峰不变（竖向计划与 H 无关）。
+
+    代价（H_t 越接近 0）：
+    - 离地 phi' 增大：-0.66 -> -1.69 rad/s。THRUST 段腿摆更快，髋扭矩需求增加；
+      10.53 F1 表（另一跳高 0.10 m）H_t=0 时髋扭峰 29.5（限 40）、轮扭峰 3.29（限 6）、Ft/N 0.172。
+      按 s11a_on 实测（轮扭 1.16）线性外推，H_t=0 时约 1.16 + (3.29-0.35) ≈ 4.1，仍在限内。
+    - 离地 Δx' 增大：+0.20 -> +0.42，离地 vx 更负（约 -0.31 vs -0.23）。这是 B 要处理的问题，C 不管。
+    - KP_PHI 跟踪 1.69 rad/s 的速度能力未实测，属已知风险（F1）。
+
+  ----------------------------------------------------------------
+  C. 修改（4 个文件，逐字替换；文件均为 CRLF，替换后保持 CRLF）
+
+  C1 文件 wheel_leg_mujoco/gbc_mpc_wbc/two_mass.py
+
+   C1.1 TakeoffPlan.__init__ 签名
+    原文：
+    def __init__(self, table: dict, zc0: float, vcz0: float, acc0: float,
+                 dx0: float, dx0_rate: float, mass_total: float, liftoff_speed: float,
+                 t_lo: float = 0.085, t_hi: float = 0.120) -> None:
+    改为：
+    def __init__(self, table: dict, zc0: float, vcz0: float, acc0: float,
+                 dx0: float, dx0_rate: float, mass_total: float, liftoff_speed: float,
+                 t_lo: float = 0.085, t_hi: float = 0.120, h_t: float = -0.20) -> None:
+
+   C1.2 端点速度方程里的 H_t
+    原文：
+        rhs = np.array([self.vcz_end, -0.20], dtype=float)
+    改为：
+        self.h_t = float(h_t)                                        # 10.72 C：离地 H 目标（设计输入）
+        rhs = np.array([self.vcz_end, self.h_t], dtype=float)
+
+  C2 文件 wheel_leg_mujoco/gbc_mpc_wbc/simulation.py（SimulationConfig）
+    原文：
+    mpc_nominal_normal: bool = False
+    改为：
+    mpc_nominal_normal: bool = False
+    # 10.72 C：离地 H 目标（设计输入，用户 2026-10-23 定；默认 -0.20 = 原行为）。
+    thrust_h_t: float = -0.20
+
+  C3 文件 wheel_leg_mujoco/gbc_mpc_wbc/control.py
+    原文：
+                float(np.sqrt(2.0 * GRAVITY * float(jump_config.target_height))))
+    改为：
+                float(np.sqrt(2.0 * GRAVITY * float(jump_config.target_height))),
+                h_t=float(getattr(config, "thrust_h_t", -0.20)))
+
+  C4 文件 wheel_leg_mujoco/tools/jump_diagnostic.py（4 处）
+    (a) 原文：
+             two_mass_takeoff=False, mpc_nominal_normal=False,
+        改为：
+             two_mass_takeoff=False, mpc_nominal_normal=False, thrust_h_t=-0.20,
+    (b) 原文：
+                              mpc_nominal_normal=bool(mpc_nominal_normal))
+        改为：
+                              mpc_nominal_normal=bool(mpc_nominal_normal),
+                              thrust_h_t=float(thrust_h_t))
+    (c) 原文：
+                        help="10.70 A：MPC 逐轮力上限用名义法向力 M*g/2（不用单拍采样 N）")
+        改为：
+                        help="10.70 A：MPC 逐轮力上限用名义法向力 M*g/2（不用单拍采样 N）")
+    parser.add_argument("--thrust-h-t", type=float, default=-0.20,
+                        help="10.72 C：离地 H 目标 [kg*m^2/s]，默认 -0.20")
+    (d) 原文：
+             mpc_nominal_normal=args.mpc_nominal_normal,
+        改为：
+             mpc_nominal_normal=args.mpc_nominal_normal,
+             thrust_h_t=args.thrust_h_t,
+
+  ----------------------------------------------------------------
+  D. 自检（在工作区根目录照抄运行，输出原样贴进报告；和 E 不一致就停止并上报）
+      PYTHONUTF8=1 .venv/Scripts/python.exe - <<'EOF'
+      import sys, math, numpy as np, mujoco
+      sys.path.insert(0, 'wheel_leg_mujoco')
+      from gbc_mpc_wbc import robot as R
+      from gbc_mpc_wbc import two_mass as TM
+      from gbc_mpc_wbc.simulation import SimulationConfig
+      m, d = R.load(); R.standing_pose(m, d, 0.28); mujoco.mj_forward(m, d)
+      tab = TM.build_tables(m, d, 0.28, 0.114, 0.430)
+      print("thrust_h_t 默认 =", SimulationConfig().thrust_h_t)
+      V = math.sqrt(2*9.81*0.135)
+      for ht in (-0.20, 0.0, -0.10):
+          p = TM.TakeoffPlan(tab, 0.178870, 0.0015, 3.362, 0.0631, -0.247, tab["M"], V, h_t=ht)
+          print("H_t %+.2f：T=%.4f N 峰 %.1f | 离地 L' %+.3f phi' %+.3f Δx' %+.3f | 触地 pitch 预计 0.89*H_t = %+.3f" % (
+              ht, p.T, p.n_peak, p.ldot_end, p.phidot_end, p.dx_rate_end, 0.89*ht))
+      EOF
+
+  E. D 节期望输出（问题排查agent 在副本 build/_s12v 上逐字应用 C 节全部替换后实际运行的结果；
+     8 处原文在当前源码中各出现 1 次，4 个文件 py_compile 通过；副本已删除）：
+      thrust_h_t 默认 = -0.2
+      H_t -0.20：T=0.1100 N 峰 514.0 | 离地 L' +2.308 phi' -0.662 Δx' +0.201 | 触地 pitch 预计 0.89*H_t = -0.178
+      H_t +0.00：T=0.1100 N 峰 514.0 | 离地 L' +2.309 phi' -1.694 Δx' +0.417 | 触地 pitch 预计 0.89*H_t = +0.000
+      H_t -0.10：T=0.1100 N 峰 514.0 | 离地 L' +2.308 phi' -1.178 Δx' +0.309 | 触地 pitch 预计 0.89*H_t = -0.089
+     第一行确认默认值不变；第二行与 s11a_on 实测（T=0.110、N 峰 514、phi' -0.662）完全一致。
+     未做：仿真（按 10.64，由测试agent 在 F 节执行）。
+
+  ----------------------------------------------------------------
+  F. 然后
+    F1 回归：不带 --thrust-h-t 的 s11a_on 命令行（run-id s12_reg），与 s11a_on 逐帧 qpos 差 0。
+    F2 单点 1：s11a_on 命令行 + --thrust-h-t 0.0，run-id s12c_h0，12 s。
+       失败判据（满足任一即停，回退 F3）：ABORT 或 髋扭 > 40 或 轮扭 > 6 或 离地 H 超出 [−0.05, +0.05]。
+    F3 单点 2（仅 F2 失败时）：s11a_on 命令行 + --thrust-h-t -0.1，run-id s12c_h1。
+    F4 报告追加到文末，节号 10.73（CRLF）。内容：D 的输出原文；F1 结果；
+       F2（或 F3）的：
+       - 起跳计划 T / N 峰、离地 L' / phi' / Δx'（计划 vs 实测）
+       - 离地 H（目标 vs 实测）、离地 vx
+       - 飞行段 H 守恒自检（起 / 末 / 范围）、全程 max|pitch| 及出现相位
+       - 触地 pitch / pitch' / 两块连线角
+       - 落地计划 T / N 峰、交还时 L / pitch / pitch' / vx
+       - 落地段髋 / 轮扭峰与饱和帧数、非轮几何触地帧数
+       - 10.51 T_max、F3 三级判定（口径同 10.71）
+       不调参，不改 C 以外的代码。
+
+  G. 已知风险
+    G1 KP_PHI 跟踪 1.69 rad/s（H_t=0）的腿摆速度能力未实测，若跟踪不上则离地 H 偏差大，触地 pitch 不如预期。
+    G2 离地 vx 更负（约 -0.31 vs -0.23），B 的水平速度计划起点变化，落地段摆腿需求增加。
+    G3 实测离地 H 与目标的偏差（s11a_on 是 -0.2235 vs -0.20，多 12%）可能在 H_t=0 时同量级，
+       表现为触地 pitch 不是 0 而是约 -0.02。
+    G4 若 F2 与 F3 都失败，维持 H_t = -0.20，C 方案终止，只保留开关。
+
+10.73 2026-10-23  S12-C（10.72 C-F）执行记录：H_t=0 三级全过，触地 pitch 变号（+0.14）
+
+  一、C 节修改（4 个文件，逐字替换）
+    two_mass.py：TakeoffPlan 加 h_t 形参，端点速度方程右端 zc'(T) 用 self.h_t
+    simulation.py：thrust_h_t: float = -0.20
+    control.py：TakeoffPlan 调用传入 h_t=getattr(config, "thrust_h_t", -0.20)
+    jump_diagnostic.py：--thrust-h-t（默认 -0.20）
+
+  二、D 节自检（照抄运行，输出原样）
+    thrust_h_t 默认 = -0.2
+    H_t -0.20：T=0.1100 N 峰 514.0 | 离地 L' +2.308 phi' -0.662 Δx' +0.201 | 触地 pitch 预计 0.89*H_t = -0.178
+    H_t +0.00：T=0.1100 N 峰 514.0 | 离地 L' +2.309 phi' -1.694 Δx' +0.417 | 触地 pitch 预计 0.89*H_t = +0.000
+    H_t -0.10：T=0.1100 N 峰 514.0 | 离地 L' +2.308 phi' -1.178 Δx' +0.309 | 触地 pitch 预计 0.89*H_t = -0.089
+    与 10.72 E 期望输出**逐字一致**（无差异）。
+
+  三、F1 回归
+    s12_reg（s11a_on 命令行，不带 --thrust-h-t）vs s11a_on：
+      summary 全等、逐帧 qpos 差 0.000e+00。
+
+  四、F2 单点 s12c_h0（s11a_on 命令行 + --thrust-h-t 0.0，12 s）
+
+    日志：
+      "THRUST -> FLIGHT（t=1.429 s）：S9 计划终点 + 核验通过（腿长 0.2848 m，gap=0.18 mm，腿长率 +2.286）"
+      "FLIGHT -> LANDING（t=1.722 s）：几何接触恢复（落地腿长 0.3679 m，间隙 -0.13 mm，姿态 8.06 deg）"
+      "S10 落地计划：T=0.1790 s、N 峰 347.8 N、zc0=0.3254 vcz0=-1.240 -> L_end 0.220"
+      "LANDING -> IDLE（t=1.903 s）：S10 落地计划终点，交还控制器（腿长 0.2214 m，俯仰 8.24 deg，俯仰率 -0.92 rad/s）"
+    ABORT 0 次。
+
+    | 项 | 计划/预期 | s12c_h0 实测 |
+    |----|-----------|--------------|
+    | 起跳计划 T / N 峰 | 0.110 / 514 | 0.1100 / 514.0 |
+    | 离地 L' | +2.309 | **+2.286** |
+    | 离地 phi' | -1.694 | **-1.700** |
+    | 离地 Δx' / vx | +0.417 / — | +0.417（计划）/ **-0.248** |
+    | 离地 H（目标 vs 实测） | 0.0 / ±0.05 | **-0.0255** |
+    | 离地 com_vxz[1] | 1.627±5% [1.546,1.708] | **+1.642** |
+    | 飞行段 H | 守恒 | 起 -0.0255 -> 末 -0.0253，范围 [-0.0268,-0.0249]，变化 0.0019 |
+    | 触地 pitch / pitch' / phi_w | 约 0 / — | **+0.1406 / +1.775 / -0.1613** |
+    | 落地计划 T / N 峰 | 0.179 / — | 0.1790 / 347.8 |
+    | 交还 L / pitch / pitch' / vx | 0.22 / — | **0.2216 / +0.1439 / -0.919 / -0.218** |
+    | 落地段髋 / 轮扭峰 / 饱和帧 | — | **21.7 / 0.81 / 0** |
+    | 非轮几何触地帧 | — | 0 |
+    | 10.51 T_max | <= 3.0 | **0.936 s** |
+    | 全程 max|pitch| | < 0.5916 | **0.2041 @ t=1.800（LANDING）** |
+
+    失败判据（任一即回退 F3）：ABORT=0 ✓、髋扭 21.7 <= 40 ✓、轮扭 0.81 <= 6 ✓、
+    离地 H -0.0255 ∈ [-0.05, +0.05] ✓ -> **不需回退，F3 未执行**。
+
+  五、F3 三级判定（口径同 10.71）
+    第 1 级：轮离地峰 0.22217 >= 0.200 ✓；离地 com_vxz[1] = 1.642 ∈ [1.546,1.708] ✓；
+      ABORT 0 ✓；髋 21.7 / 轮 0.81 不饱和 ✓；腿长 [0.1564, 0.3792] ✓ -> **通过**。
+    第 2 级：T_max 0.936 s <= 3.0 ✓ -> **通过**。
+    第 3 级：触地 |pitch| 0.1406 < 0.5394 ✓；全程 max|pitch| 0.2041 < 0.5916 ✓ -> **通过**。
+
+  六、观察
+    (1) 离地 phi' 实测 -1.700 与计划 -1.694 几乎一致，G1 担心的 KP_PHI 跟不上 1.69 rad/s
+        没有发生（KP_PHI 20.9 在该速率下正常跟踪）。
+    (2) 离地 H 实测 -0.0255（目标 0），偏差 0.0255（12%），与 10.72 G3 预告同量级；
+        触地 pitch 因此不是 0 而是 **+0.1406**（变号，抬头）。
+    (3) 触地 phi_w -0.1613、两块连线角仍接近静平衡。
+    (4) 交还 pitch +0.1439、pitch' -0.919：交还时刻机体正在回正，方向是向下回零。
+    (5) 交还后 pitch 一直为正、缓慢衰减（T_max 0.936 由 com_vx 通道最慢决定）。

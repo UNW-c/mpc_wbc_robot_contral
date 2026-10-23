@@ -229,7 +229,7 @@ class TakeoffPlan:
 
     def __init__(self, table: dict, zc0: float, vcz0: float, acc0: float,
                  dx0: float, dx0_rate: float, mass_total: float, liftoff_speed: float,
-                 t_lo: float = 0.085, t_hi: float = 0.120) -> None:
+                 t_lo: float = 0.085, t_hi: float = 0.120, h_t: float = -0.20) -> None:
         self.table = table
         self.zc0, self.vcz0, self.acc0 = float(zc0), float(vcz0), float(acc0)
         self.zc_end, self.vcz_end, self.acc_end = (float(table["D_td"]), float(liftoff_speed),
@@ -254,7 +254,8 @@ class TakeoffPlan:
         # 端点速度：解 [dzc/dL dzc/dphi; dH/dL' dH/dphi'] [L'; phi'] = [zc'(T); H_t]
         matrix = np.array([[table["dzc_dL"], table["dzc_dphi"]],
                            [table["dH_dLdot"], table["dH_dphidot"]]], dtype=float)
-        rhs = np.array([self.vcz_end, -0.20], dtype=float)
+        self.h_t = float(h_t)                                        # 10.72 C：离地 H 目标（设计输入）
+        rhs = np.array([self.vcz_end, self.h_t], dtype=float)
         self.ldot_end, self.phidot_end = (float(v) for v in np.linalg.solve(matrix, rhs))
         self.dx_end = float(table["dx_eq"])
         self.dx_rate_end = float(table["ddx_dL"] * self.ldot_end

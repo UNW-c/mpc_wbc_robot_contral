@@ -317,6 +317,8 @@ class SimulationConfig:
     # True = 用 MPCSettings.nominal_normal_force（= M*g/2，见 gbc486_mpc_settings），
     # 接触与否仍由估计器 decision.contact 决定。
     mpc_nominal_normal: bool = False
+    # 10.72 C：离地 H 目标（设计输入，用户 2026-10-23 定；默认 -0.20 = 原行为）。
+    thrust_h_t: float = -0.20
     jump_time: float = 1.0                 # [s] 起跳指令时刻
     wbc_gains: WbcGains = field(default_factory=WbcGains)
     # 8 状态模型的共模腿角状态限值 [rad]（偏差量）。依据 M0 扫描：L = 0.28 m 时共模腿角
