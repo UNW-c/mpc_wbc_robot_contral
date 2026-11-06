@@ -12,7 +12,10 @@
 /*.pdf
 /*.zip
 /提示词.md
+/AGENTS.md
 /.pytest_cache/
+/docs/agent交互文档*
+/docs/当前问题与待办 copy.md
 
 # 早期工作副本与过程视频；最终项目内容在 circleg/ 与 gbc486/ 下
 /wheel_leg_mujoco/
