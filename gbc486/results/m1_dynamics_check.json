@@ -1,0 +1,96 @@
+{
+  "mujoco": "3.13.0",
+  "L0": 0.42,
+  "selection": {
+    "max_error": 0.0,
+    "left_wheel_entry": -1.0
+  },
+  "structure": {
+    "constraint_rows": 13,
+    "constraint_rank": 13,
+    "constraint_cond": 75.10350016796389,
+    "motion_dof": 7,
+    "actuation_rows": 7,
+    "actuation_cols": 6,
+    "actuation_cond": 2.7647241571095225,
+    "underactuated_dims": 1,
+    "roll_vs_L_d_rank": 2,
+    "roll_vs_L_d_ratio": 0.0444052337950397,
+    "roll_L_d_cosine": 0.9807071008640196,
+    "planned_task_rank": 7,
+    "planned_task_ratio": 0.03538534650930861,
+    "planned_tasks": [
+      "pitch",
+      "roll",
+      "L_c",
+      "yaw",
+      "phi_c",
+      "phi_d",
+      "forward(heading)"
+    ],
+    "prefix_ranks": {
+      "pitch": 1,
+      "roll": 2,
+      "L_c": 3,
+      "yaw": 4,
+      "phi_c": 5,
+      "phi_d": 6,
+      "forward(heading)": 7
+    }
+  },
+  "kinematic": {
+    "samples": 20,
+    "step": 0.0001,
+    "leg_rate_rel_max": 7.661438538316464e-10,
+    "loop_rate_rel_max": 1.3442815430505049e-08,
+    "leg_bias_rel_max": 5.568618400394719e-05,
+    "loop_bias_rel_max": 2.426962474383877e-05
+  },
+  "vmc": {
+    "vmc_minus_model": [
+      -0.004077279587482552,
+      -0.0011011016766156456
+    ],
+    "leg_state": [
+      0.4200000000000001,
+      -0.050184423371687575,
+      0.4199999999999997,
+      -0.0501844233716855
+    ]
+  },
+  "simulation": {
+    "timestep": 0.0001,
+    "duration": 0.15,
+    "static_residual": 2.573027240682739e-05,
+    "static_leg_torque": [
+      -5.304262190420148,
+      5.336582960998854,
+      5.297088082412329,
+      -5.330375505774509
+    ],
+    "derivative_relative_p99": {
+      "task": 0.011397345320542039,
+      "contact": 0.004544896006818303,
+      "loop": 0.11825524151690137,
+      "leg": 0.0058318733294612625
+    },
+    "derivative_relative_max": {
+      "task": 0.10498410104238828,
+      "contact": 0.005658164073197192,
+      "loop": 0.21380314154006674,
+      "leg": 0.016312748542184664
+    },
+    "loop_velocity_max": 0.0029250580365682705,
+    "loop_acceleration_p99": 3.09452795306305,
+    "contact_velocity_max": 0.011223962346883219,
+    "contact_acceleration_p99": 1.270246192298307,
+    "recover_residual_p99": 0.00033507463038102617,
+    "force_heading_error_max": 0.07429934407144057,
+    "force_normal_error_max": 0.00676670756644171,
+    "normal_force_mean": 69.89212080221792,
+    "max_speed": 0.05550950253183373,
+    "joint_limits_hit": [],
+    "other_contacts": 0,
+    "final_pitch": 0.007295755892199196
+  }
+}

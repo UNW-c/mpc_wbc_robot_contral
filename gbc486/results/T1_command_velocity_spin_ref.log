@@ -1,0 +1,16 @@
+2026-11-06 22:38:29 INFO    Algorithm.mpc.controller: 方案 B：驾驶髋限 0.20 rad（起步 1.35 / 刹车 1.51），零指令髋限 0.65 rad（刹车 3.80 / 恢复 3.80）
+2026-11-06 22:38:29 INFO    Algorithm.mpc.controller: A1：髋限 0.65 rad；规划限值 起步 1.35 / 刹车 1.51 / 恢复 3.80 m/s^2；S 曲线 开（jerk 9.00 / 刹车 jerk 18.85 m/s^3）
+2026-11-06 22:38:29 INFO    gbc_mpc_wbc.simulation: 模型自检: variant=leg_input reduced.state_dim=8 mpc.model.state_dim=8 input_dim=3 zmp_reference=True zmp_split=1.000 zmp_crank_radius=0.2132 zmp_com_height=0.2644
+2026-11-06 22:38:29 INFO    Algorithm.supervision: Control mode disabled -> recovery, contact=(True, True), context=1
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=0.0000 measured=0.0000
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-11-06 22:38:29 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=2
+2026-11-06 22:38:29 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-11-06 22:38:29 WARNING Algorithm.mpc.controller: QP Hessian 条件数 1.196e+06 超过阈值 1.000e+06，缺失方向的正则可能不足（方案 §1.1）
+2026-11-06 22:38:40 INFO    Algorithm.mpc.planner: event=align Reference reset: hold_capture, s=0.0051 v=0.0000 yaw=6.1878 reset_position=False
+2026-11-06 22:38:43 INFO    gbc_mpc_wbc.loop: PERF 缓存统计：步数=6000 | rowset 重算/步=1.010（命中 6002）| joint_limit 重算/步=2.000（命中 1500）| lengths 重算/步=2.001（命中 30000）
+2026-11-06 22:38:49 INFO    __main__: diagnostic result written: C:\Users\20060\Desktop\circleg-robot\gbc486\results\T1_command_velocity_spin_ref.json.gz
+2026-11-06 22:38:49 INFO    __main__: summary: {"airborne_frames": 0, "frame_count": 6000, "max_abs_ctrl": [8.629271267784098, 8.039682173085843, 8.615466888912547, 8.021310780630252, 0.5045831071955118, 0.5051696507871553], "max_abs_pitch_rad": 3.528784367792058e-05, "max_abs_pitch_rate_rad_s": 0.0011531141508590106, "max_forward_displacement_m": 0.09734318474396828, "max_forward_velocity_m_s": 0.07340522802732843, "max_leg_length_m": 0.28046372798366753, "max_positive_wheel_gap_m": -9.99575735768643e-05, "min_leg_length_m": 0.2799330108715269, "mpc_calls": 300, "output_source_counts": {"wbc_update": 1500, "zero_order_hold": 4500}, "phase_frame_counts": {"NONE": 6000}, "phase_transition_assertion_failures": 0, "phase_transition_count": 0, "release_end_m": 0.28, "simulated_seconds": 6.000000000000338, "stop_reason": null, "thrust_applied_frames": 0, "thrust_command_built_frames": 0, "wbc_calls": 1500}

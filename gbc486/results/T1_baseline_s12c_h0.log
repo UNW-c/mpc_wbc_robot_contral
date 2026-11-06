@@ -1,0 +1,41 @@
+2026-10-23 17:40:24 INFO    Algorithm.mpc.controller: 方案 B：驾驶髋限 0.20 rad（起步 1.35 / 刹车 1.51），零指令髋限 0.65 rad（刹车 3.80 / 恢复 3.80）
+2026-10-23 17:40:24 INFO    Algorithm.mpc.controller: A1：髋限 0.65 rad；规划限值 起步 1.35 / 刹车 1.51 / 恢复 3.80 m/s^2；S 曲线 开（jerk 9.00 / 刹车 jerk 18.85 m/s^3）
+2026-10-23 17:40:29 INFO    gbc_mpc_wbc.simulation: S9 两块表：建表耗时 5.42 s，D_td=0.2644 dx_eq=0.0717 theta_eq=-0.3902 dH/dL'=-0.1423 dH/dphi'=-0.1940
+2026-10-23 17:40:30 INFO    gbc_mpc_wbc.simulation: 模型自检: variant=leg_input reduced.state_dim=8 mpc.model.state_dim=8 input_dim=3 zmp_reference=True zmp_split=1.000 zmp_crank_radius=0.2132 zmp_com_height=0.2644
+2026-10-23 17:40:30 INFO    Algorithm.supervision: Control mode disabled -> recovery, contact=(True, True), context=1
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=0.0000 measured=0.0000
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-23 17:40:30 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=2
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-23 17:40:30 WARNING Algorithm.mpc.controller: QP Hessian 条件数 1.196e+06 超过阈值 1.000e+06，缺失方向的正则可能不足（方案 §1.1）
+2026-10-23 17:40:30 INFO    Algorithm.mpc.planner: event=align Reference reset: hold_capture, s=0.0000 v=0.0000 yaw=-0.0000 reset_position=False
+2026-10-23 17:40:32 INFO    gbc_mpc_wbc.simulation: 起跳前预检：等效力 187.2 N/腿 | 压缩终点 0.1600 m | 当前腿长 0.2800 m
+2026-10-23 17:40:32 INFO    gbc_mpc_wbc.simulation: 起跳前预检通过：关节力矩峰值 31.10 N*m <= 限幅 40.00 N*m
+2026-10-23 17:40:32 INFO    gbc_mpc_wbc.jump: 跳跃开始：目标高度 0.135 m | 压缩行程 0.120 m | 压缩终点 0.1600 m | 加速行程(质心) 0.0831 m | 离地速度 1.627 m/s | 等效力 187.2 N/腿 | 加速时间 102.2 ms
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.jump: 跳跃相位 COMPRESS -> COMPRESS_BRAKE（t=1.157 s）：进入压缩制动（右 0.2190/-0.769，左 0.2190/-0.769）
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.jump: 跳跃相位 COMPRESS_BRAKE -> THRUST（t=1.316 s）：压缩完成且下降已制动（右 0.1564/+0.002，左 0.1564/+0.002）
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.control: S9 THRUST 计划：T=0.1100 s、N 峰 514.0 N（计划时钟起点 t=1.316）L'(T)=+2.309 phi'(T)=-1.694
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.loop: S9 计划终点（当拍）：elapsed=0.1110 T=0.1100 N=[0.0, 0.0] gap=0.1302 mm L=0.2802 核验=True
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.loop: S9 计划终点（当拍）：elapsed=0.1120 T=0.1100 N=[0.0, 0.0] gap=0.1547 mm L=0.2825 核验=True
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.loop: S9 计划终点（当拍）：elapsed=0.1130 T=0.1100 N=[0.0, 0.0] gap=0.1816 mm L=0.2848 核验=True
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.jump: 跳跃相位 THRUST -> FLIGHT（t=1.429 s）：S9 计划终点 + 核验通过（腿长 0.2848 m，gap=0.18 mm，腿长率 +2.286）
+2026-10-23 17:40:33 INFO    gbc_mpc_wbc.loop: THRUST->FLIGHT 触发判据：s9_plan_end_force（max wheel_gap=0.000182 m，阈值 0.001000）
+2026-10-23 17:40:33 INFO    Algorithm.supervision: Control mode ground -> airborne, contact=(False, False), context=3
+2026-10-23 17:40:33 INFO    Algorithm.mpc.planner: event=align Reference reset: jump_landing_once, s=-0.0407 v=-0.2751 yaw=0.0000 reset_position=True
+2026-10-23 17:40:34 INFO    Algorithm.supervision: Control mode airborne -> recovery, contact=(True, True), context=4
+2026-10-23 17:40:34 INFO    gbc_mpc_wbc.jump: 跳跃相位 FLIGHT -> LANDING（t=1.722 s）：几何接触恢复（落地腿长 0.3679 m，间隙 -0.13 mm，姿态 8.06 deg）
+2026-10-23 17:40:35 INFO    gbc_mpc_wbc.loop: S10 落地计划：T=0.1790 s、N 峰 347.8 N、zc0=0.3254 vcz0=-1.240 -> L_end 0.220
+2026-10-23 17:40:35 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=5
+2026-10-23 17:40:35 INFO    gbc_mpc_wbc.loop: 落地重锚定：reset_reference=True @ t=1.821 s，mpc/estimator/supervisor 已重锚
+2026-10-23 17:40:35 WARNING Algorithm.mpc.controller: QP Hessian 条件数 1.196e+06 超过阈值 1.000e+06，缺失方向的正则可能不足（方案 §1.1）
+2026-10-23 17:40:35 INFO    Algorithm.supervision: Control mode disabled -> recovery, contact=(True, True), context=1
+2026-10-23 17:40:35 INFO    Algorithm.mpc.planner: event=align Reference reset: jump_landing_once, s=-0.1967 v=-0.2740 yaw=0.0004 reset_position=True
+2026-10-23 17:40:35 INFO    gbc_mpc_wbc.jump: 跳跃相位 LANDING -> IDLE（t=1.903 s）：S10 落地计划终点，交还控制器（腿长 0.2214 m，俯仰 8.24 deg，俯仰率 -0.92 rad/s）
+2026-10-23 17:40:35 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=2
+2026-10-23 17:40:38 INFO    Algorithm.mpc.planner: event=align Reference reset: hold_capture, s=-0.2175 v=0.0000 yaw=0.0008 reset_position=False
+2026-10-23 17:41:02 INFO    gbc_mpc_wbc.loop: PERF 缓存统计：步数=12000 | rowset 重算/步=1.005（命中 12002）| joint_limit 重算/步=2.000（命中 2928）| lengths 重算/步=2.000（命中 85492）
+2026-10-23 17:41:15 INFO    __main__: diagnostic result written: C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\T1_baseline_s12c_h0.json.gz
+2026-10-23 17:41:15 INFO    __main__: summary: {"airborne_frames": 0, "frame_count": 12000, "max_abs_ctrl": [27.92953662787373, 28.533358101033684, 27.88045674490771, 28.505780434632662, 3.032557402871532, 3.03509568886939], "max_abs_pitch_rad": 0.20407684769328654, "max_abs_pitch_rate_rad_s": 1.8529855914088074, "max_forward_displacement_m": 0.25247917390767843, "max_forward_velocity_m_s": 0.5795051751397928, "max_leg_length_m": 0.3792396341551891, "max_positive_wheel_gap_m": 0.22216630273035431, "min_leg_length_m": 0.1564455779643614, "mpc_calls": 601, "output_source_counts": {"flight_leg_profile": 293, "wbc_update": 2928, "zero_order_hold": 8779}, "phase_frame_counts": {"COMPRESS": 157, "COMPRESS_BRAKE": 159, "FLIGHT": 293, "IDLE": 11097, "LANDING": 181, "THRUST": 113}, "phase_transition_assertion_failures": 0, "phase_transition_count": 6, "release_end_m": 0.28, "simulated_seconds": 11.999999999998789, "stop_reason": null, "thrust_applied_frames": 29, "thrust_command_built_frames": 113, "wbc_calls": 2928}

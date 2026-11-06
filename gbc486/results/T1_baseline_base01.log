@@ -1,0 +1,44 @@
+2026-10-21 18:57:30 INFO    Algorithm.mpc.controller: 方案 B：驾驶髋限 0.20 rad（起步 1.35 / 刹车 1.51），零指令髋限 0.65 rad（刹车 3.80 / 恢复 3.80）
+2026-10-21 18:57:30 INFO    Algorithm.mpc.controller: A1：髋限 0.65 rad；规划限值 起步 1.35 / 刹车 1.51 / 恢复 3.80 m/s^2；S 曲线 开（jerk 9.00 / 刹车 jerk 18.85 m/s^3）
+2026-10-21 18:57:31 INFO    gbc_mpc_wbc.simulation: 模型自检: variant=leg_input reduced.state_dim=8 mpc.model.state_dim=8 input_dim=3 zmp_reference=True zmp_split=1.000 zmp_crank_radius=0.2132 zmp_com_height=0.2644
+2026-10-21 18:57:31 INFO    Algorithm.supervision: Control mode disabled -> recovery, contact=(True, True), context=1
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=0.0000 measured=0.0000
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-21 18:57:31 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=2
+2026-10-21 18:57:31 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=0.0000 yaw=-0.0000 measured=0.0000
+2026-10-21 18:57:31 WARNING Algorithm.mpc.controller: QP Hessian 条件数 1.196e+06 超过阈值 1.000e+06，缺失方向的正则可能不足（方案 §1.1）
+2026-10-21 18:57:32 INFO    Algorithm.mpc.planner: event=align Reference reset: hold_capture, s=0.0000 v=0.0000 yaw=-0.0000 reset_position=False
+2026-10-21 18:57:34 INFO    gbc_mpc_wbc.simulation: 起跳前预检：等效力 225.8 N/腿 | 压缩终点 0.1600 m | 当前腿长 0.2800 m
+2026-10-21 18:57:34 INFO    gbc_mpc_wbc.simulation: 起跳前预检通过：关节力矩峰值 37.52 N*m <= 限幅 40.00 N*m
+2026-10-21 18:57:34 INFO    gbc_mpc_wbc.jump: 跳跃开始：目标高度 0.180 m | 压缩行程 0.120 m | 压缩终点 0.1600 m | 加速行程(质心) 0.0831 m | 离地速度 1.879 m/s | 等效力 225.8 N/腿 | 加速时间 88.5 ms
+2026-10-21 18:57:35 INFO    gbc_mpc_wbc.jump: 跳跃相位 COMPRESS -> COMPRESS_BRAKE（t=1.157 s）：进入压缩制动（右 0.2190/-0.769，左 0.2190/-0.769）
+2026-10-21 18:57:35 INFO    gbc_mpc_wbc.jump: 跳跃相位 COMPRESS_BRAKE -> THRUST（t=1.316 s）：压缩完成且下降已制动（右 0.1564/+0.002，左 0.1564/+0.002）
+2026-10-21 18:57:36 INFO    gbc_mpc_wbc.jump: 跳跃相位 THRUST -> FLIGHT（t=1.425 s）：推离完成（腿到达释放上限 0.2800 m，gap=-0.19 mm，轮即将离地）
+2026-10-21 18:57:36 INFO    gbc_mpc_wbc.loop: THRUST->FLIGHT 触发判据：release_end_fallback（max wheel_gap=-0.000189 m，阈值 0.001000）
+2026-10-21 18:57:36 INFO    Algorithm.supervision: Control mode ground -> airborne, contact=(False, False), context=3
+2026-10-21 18:57:36 INFO    Algorithm.mpc.planner: event=align Reference reset: jump_landing_once, s=-0.0368 v=-0.2574 yaw=0.0001 reset_position=True
+2026-10-21 18:57:36 WARNING gbc_mpc_wbc.loop: 输出侧护栏告警（不停机）：joint_limit:jAG,jIO
+2026-10-21 18:57:37 INFO    Algorithm.supervision: Control mode airborne -> recovery, contact=(True, True), context=4
+2026-10-21 18:57:37 INFO    gbc_mpc_wbc.jump: 跳跃相位 FLIGHT -> LANDING（t=1.747 s）：几何接触恢复（落地腿长 0.2996 m，间隙 -0.79 mm，姿态 -41.98 deg）
+2026-10-21 18:57:37 INFO    gbc_mpc_wbc.jump: 跳跃相位 LANDING -> RECOVER（t=1.765 s）：腿长回到标称邻域（0.2891 m）
+2026-10-21 18:57:37 INFO    gbc_mpc_wbc.jump: 跳跃相位 RECOVER -> IDLE（t=1.766 s）：姿态与腿长进入正常包线（俯仰 -44.11 deg），交还控制器
+2026-10-21 18:57:37 WARNING gbc_mpc_wbc.loop: 输出侧护栏告警（不停机）：attitude_guard
+2026-10-21 18:57:37 WARNING gbc_mpc_wbc.loop: 输出侧护栏告警（不停机）：joint_limit:jAG,jIO
+2026-10-21 18:57:38 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=5
+2026-10-21 18:57:38 INFO    gbc_mpc_wbc.loop: 落地重锚定：reset_reference=True @ t=1.893 s，mpc/estimator/supervisor 已重锚
+2026-10-21 18:57:38 WARNING Algorithm.mpc.controller: QP Hessian 条件数 1.196e+06 超过阈值 1.000e+06，缺失方向的正则可能不足（方案 §1.1）
+2026-10-21 18:57:38 INFO    Algorithm.supervision: Control mode disabled -> recovery, contact=(True, True), context=1
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0018 measured=-0.1188
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0019 measured=-0.1383
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0019 measured=-0.1571
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0020 measured=-0.1748
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0020 measured=-0.1911
+2026-10-21 18:57:38 INFO    Algorithm.supervision: Control mode recovery -> ground, contact=(True, True), context=2
+2026-10-21 18:57:38 INFO    Algorithm.mpc.planner: 参考软重锚: reset_position=False s=-0.1304 yaw=0.0020 measured=-0.2059
+2026-10-21 18:57:41 INFO    Algorithm.mpc.planner: event=align Reference reset: hold_capture, s=-0.2605 v=0.0000 yaw=0.0019 reset_position=False
+2026-10-21 18:58:12 INFO    gbc_mpc_wbc.loop: PERF 缓存统计：步数=12000 | rowset 重算/步=1.005（命中 12002）| joint_limit 重算/步=2.000（命中 2921）| lengths 重算/步=2.000（命中 85058）
+2026-10-21 18:58:28 INFO    __main__: diagnostic result written: C:\Users\20060\Desktop\circleg-robot\wheel_leg_mujoco\results\T1_baseline_base01.json.gz
+2026-10-21 18:58:28 INFO    __main__: summary: {"airborne_frames": 0, "frame_count": 12000, "max_abs_ctrl": [37.54692753214736, 37.32026822821681, 37.54535432831158, 37.32098223253775, 4.878573303168297, 4.91875948764802], "max_abs_pitch_rad": 0.7944763092036558, "max_abs_pitch_rate_rad_s": 5.018627798076913, "max_forward_displacement_m": 0.27086798901133735, "max_forward_velocity_m_s": 0.9844796841562116, "max_leg_length_m": 0.30171232341856874, "max_positive_wheel_gap_m": 0.22179675695755846, "min_leg_length_m": 0.1564455779643614, "mpc_calls": 601, "output_source_counts": {"flight_leg_profile": 322, "landing_buffer": 18, "wbc_update": 2916, "zero_order_hold": 8744}, "phase_frame_counts": {"COMPRESS": 157, "COMPRESS_BRAKE": 159, "FLIGHT": 322, "IDLE": 11234, "LANDING": 18, "RECOVER": 1, "THRUST": 109}, "phase_transition_assertion_failures": 0, "phase_transition_count": 7, "release_end_m": 0.28, "simulated_seconds": 11.999999999998789, "stop_reason": null, "thrust_applied_frames": 28, "thrust_command_built_frames": 109, "wbc_calls": 2921}

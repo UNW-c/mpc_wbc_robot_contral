@@ -1,0 +1,814 @@
+{
+  "mujoco": "3.13.0",
+  "circleg": {
+    "head": "516380d",
+    "algorithm_uncommitted": [],
+    "imported_sha256": {
+      "Algorithm/__init__.py": "9161f63a18bf",
+      "Algorithm/controllers.py": "e537a63156e4",
+      "Algorithm/estimator.py": "ac68708d3cce",
+      "Algorithm/geometry.py": "1524587dd68c",
+      "Algorithm/lqr.py": "1d817f3452e4",
+      "Algorithm/mpc/__init__.py": "89344fc3a7f2",
+      "Algorithm/mpc/contact.py": "f85b34b6c5ab",
+      "Algorithm/mpc/controller.py": "88aae4e059f4",
+      "Algorithm/mpc/model.py": "99d1dfcd7152",
+      "Algorithm/mpc/planner.py": "711ab804c95a",
+      "Algorithm/mpc/qp.py": "caa25ed6d5a3",
+      "Algorithm/mpc/trajectory.py": "977ff372714f",
+      "Algorithm/observers/__init__.py": "314872ecb584",
+      "Algorithm/observers/adaptive.py": "c09f57132a6c",
+      "Algorithm/observers/compensation.py": "44756cb24808",
+      "Algorithm/observers/eso.py": "7f3d76f7d801",
+      "Algorithm/observers/momentum.py": "a00d99945844",
+      "Algorithm/observers/rls.py": "f0e2757b188a",
+      "Algorithm/observers/validation.py": "1cb3979d2908",
+      "Algorithm/supervision.py": "4923fa279e92",
+      "Algorithm/timing.py": "b6c7af0d2e78",
+      "Algorithm/wbc/__init__.py": "44ae7af709e1",
+      "Algorithm/wbc/projection.py": "7a0ab3e7b523",
+      "Algorithm/wbc/schedule.py": "6c09ab3465c6",
+      "Algorithm/wbc/sns.py": "5a90db9588fc",
+      "Algorithm/wbc/task_qp.py": "9cf7850c651e",
+      "Algorithm/wbc/tasks.py": "633d804a868c",
+      "Algorithm/wbc/weighted.py": "98e7df0109a7"
+    }
+  },
+  "models": {
+    "held_leg": {
+      "state_dim": 6,
+      "input_dim": 2,
+      "A": [
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          8.958220450161479e-13,
+          -1.8422012241950218e-05,
+          0.34920591674172824,
+          8.613714303528957e-07,
+          7.782996117164029e-11,
+          -1.8551937533395865e-09
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          -3.518270354985169e-10,
+          2.8267932417464286e-05,
+          90.25341107677363,
+          -1.9571540773484582e-05,
+          -1.6364352257241663e-09,
+          -2.750932736095971e-08
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          -3.1104405075893515e-10,
+          5.4329205522417317e-08,
+          -0.04029419410980377,
+          -2.0964069510302077e-08,
+          -1.1955578671160594e-09,
+          -2.7680261735333903e-05
+        ]
+      ],
+      "B": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.06451156679363848,
+          0.06407244937587944
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          -0.789238740110819,
+          -0.7887562248056725
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.5432845639892229,
+          -0.5430044978001148
+        ]
+      ],
+      "eigen_real": [
+        9.500169797588896,
+        -9.50018925974391,
+        -1.3946781726270411e-05,
+        -1.3946781726270411e-05,
+        -1.1644436703334072e-06,
+        -1.7153652611711562e-05
+      ],
+      "unstable_pole": 9.500169797588896,
+      "half_track": 0.24500000000049502,
+      "yaw_inertia": 0.45107176084620054,
+      "wheel_radius": 0.077,
+      "metadata": {
+        "equilibrium_pitch": 3.529941628713375e-06,
+        "nominal_pitch_acceleration": -1.8630937597768035e-14,
+        "nominal_forward_acceleration": 2.724362530890653e-05,
+        "mapping_rank": 20,
+        "com_height": 0.36446820439500105,
+        "total_mass": 14.546000000000001
+      },
+      "linearization": {
+        "dt": 0.02,
+        "perturbation": "dz 1 rad-ish / du 1 unit，逐级缩小 10 倍",
+        "error_coarse": 7.304591382295555e-05,
+        "error_fine": 7.305144291980259e-07,
+        "error_tiny": 7.304548414049927e-09,
+        "ratio_coarse_to_fine": 99.99243122842473,
+        "ratio_fine_to_tiny": 100.00815762859735
+      }
+    },
+    "leg_input": {
+      "state_dim": 8,
+      "input_dim": 3,
+      "A": [
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          -1.5356537927131014e-11,
+          -1.1121192615971244e-05,
+          11.285620494637437,
+          -1.3733639452859518e-07,
+          -2.986773697290224e-11,
+          -5.1249913126803935e-09,
+          -8.174353380269652,
+          -2.3323005327843856e-07
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.8722782934689627e-10,
+          -2.7155985435462245e-05,
+          7.230005583894186,
+          -1.198984564640197e-05,
+          5.765073766138351e-10,
+          -2.921649677626465e-09,
+          -39.184867978374825,
+          -1.0763114705955828e-06
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          -7.31741598737623e-11,
+          3.931121243415034e-08,
+          -0.0625924349833629,
+          -1.877203497898175e-08,
+          -9.878111783406807e-10,
+          -2.7680129381353696e-05,
+          0.059814702412316505,
+          2.318738462955133e-08
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          2.0888257866639343e-10,
+          -6.674150249555412e-05,
+          -99.97682973725485,
+          9.12975571031375e-06,
+          3.3016144769478295e-10,
+          3.0350801061153156e-08,
+          71.24832215015836,
+          -2.709664940330685e-05
+        ]
+      ],
+      "B": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          -0.024047503265067768,
+          -0.02437412970237712,
+          -1.028194555750493
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          -0.11694568391393227,
+          -0.1173171398557627,
+          7.8055027000600345
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.5434651268303204,
+          -0.5428241644354309,
+          0.0020963844527807423
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.8095756620895945,
+          0.808547309251844,
+          9.399390568036816
+        ]
+      ],
+      "eigen_real": [
+        -10.466132148314436,
+        10.466110724368194,
+        -5.126167268595342e-06,
+        -5.126167268595342e-06,
+        -1.3842431087750587e-05,
+        -1.3842431087750587e-05,
+        3.7383601407743015e-07,
+        -1.8900510105718176e-05
+      ],
+      "unstable_pole": 10.466110724368194,
+      "half_track": 0.24500000000049493,
+      "yaw_inertia": 0.45107176084620176,
+      "wheel_radius": 0.077,
+      "metadata": {
+        "equilibrium_pitch": -2.3237857164309044e-15,
+        "tau_trim": 0.06561150219216623,
+        "phi_c": 0.0,
+        "nominal_leg_angle": -0.05018442337136687,
+        "nominal_pitch_acceleration": -1.203202921957709e-13,
+        "nominal_forward_acceleration": 2.7243625275855876e-05,
+        "nominal_leg_acceleration": 2.709630890491888e-13,
+        "mapping_rank": 20,
+        "com_height": 0.36446820439499805,
+        "total_mass": 14.546000000000001
+      },
+      "linearization": {
+        "dt": 0.02,
+        "perturbation": "dz 1 rad-ish / du 1 unit，逐级缩小 10 倍",
+        "error_coarse": 1.2683208588195174,
+        "error_fine": 0.0051789468600210165,
+        "error_tiny": 9.228948169046763e-06,
+        "ratio_coarse_to_fine": 244.89937686179897,
+        "ratio_fine_to_tiny": 561.1632837413516
+      }
+    }
+  },
+  "runs": [
+    {
+      "backend": "nullspace",
+      "model_variant": "held_leg",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 30.00000000001368,
+      "requested": 30.0,
+      "mpc_calls": 1495,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 7500,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 7476,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 7476
+      },
+      "max_abs_pitch": 0.0002526304210131006,
+      "max_abs_roll": 2.174750822383795e-08,
+      "max_abs_s": 0.0002216653061547622,
+      "final_s": -2.651409088551169e-05,
+      "max_abs_v": 0.0008289123490816293,
+      "final_v": -1.3409053285334143e-13,
+      "max_leg_length_error": 0.000418185658394854,
+      "max_torque": [
+        5.304249102672622,
+        5.336590604425815,
+        5.297078601077475,
+        5.330380815226142,
+        0.004179932043925765,
+        0.004267452160670905
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 0.8509499998581305,
+          "p95": 1.3979100000369726,
+          "max": 43.14090000025317
+        },
+        "wbc": {
+          "p50": 1.8683499999951891,
+          "p95": 3.0863700001646057,
+          "max": 60.995399999683286
+        }
+      },
+      "case": "stand30",
+      "variant": "held_leg",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 0.0002216653061547622,
+        "peak_pitch": 0.0002526304210131006,
+        "peak_v": 0.0008289123490816293,
+        "peak_yaw": 8.73737821693458e-05,
+        "settle_s": 0.0,
+        "settle_pitch": 0.0,
+        "final_s": -2.651409088551169e-05,
+        "final_v": -1.3409053285334143e-13,
+        "final_pitch": 7.913921445652724e-06,
+        "tail_s_span": 3.9567297599159626e-14,
+        "tail_pitch_span": 4.1618230332807725e-14
+      }
+    },
+    {
+      "backend": "nullspace",
+      "model_variant": "held_leg",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 11.999999999998789,
+      "requested": 12.0,
+      "mpc_calls": 595,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 3000,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 2976,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 2976
+      },
+      "max_abs_pitch": 0.06298446258536242,
+      "max_abs_roll": 1.2144736169375753e-05,
+      "max_abs_s": 0.0648924771120715,
+      "final_s": -9.559359914659854e-06,
+      "max_abs_v": 0.24096652438303928,
+      "final_v": -7.993665647111933e-05,
+      "max_leg_length_error": 0.000418185658394854,
+      "max_torque": [
+        6.685252404993119,
+        5.651965907037767,
+        6.832924858758293,
+        5.595373197570801,
+        1.0324816332946327,
+        1.0854175282486065
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 0.973350000094797,
+          "p95": 1.5283050001926304,
+          "max": 11.789000000135275
+        },
+        "wbc": {
+          "p50": 1.9095499999366439,
+          "p95": 3.1019299999798013,
+          "max": 50.4518999996435
+        }
+      },
+      "case": "push_fwd",
+      "variant": "held_leg",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 0.0648924771120715,
+        "peak_pitch": 0.06298446258536242,
+        "peak_v": 0.24096652438303928,
+        "peak_yaw": 0.021844769771676383,
+        "settle_s": 2.1959999999999997,
+        "settle_pitch": 1.9240000000000004,
+        "final_s": -9.559359914659854e-06,
+        "final_v": -7.993665647111933e-05,
+        "final_pitch": 1.7404282185163635e-05,
+        "tail_s_span": 0.0004101713610837668,
+        "tail_pitch_span": 0.00028325476900033475
+      }
+    },
+    {
+      "backend": "nullspace",
+      "model_variant": "held_leg",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 11.999999999998789,
+      "requested": 12.0,
+      "mpc_calls": 595,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 3000,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 2976,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 2976
+      },
+      "max_abs_pitch": 0.0002526304210131006,
+      "max_abs_roll": 0.02535431477076374,
+      "max_abs_s": 0.0002216653061547622,
+      "final_s": -2.6506210663370635e-05,
+      "max_abs_v": 0.0013374135872965998,
+      "final_v": 2.5526367330591104e-08,
+      "max_leg_length_error": 0.006206831739375751,
+      "max_torque": [
+        5.5716760523898685,
+        5.612678356036375,
+        7.354332993678186,
+        7.749307301822785,
+        0.03667721642626979,
+        0.02495387938353654
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 0.9018999996897037,
+          "p95": 1.4293049999196223,
+          "max": 3.675299999940762
+        },
+        "wbc": {
+          "p50": 1.9098499999472551,
+          "p95": 3.0413299999509036,
+          "max": 49.790999999913765
+        }
+      },
+      "case": "push_lat",
+      "variant": "held_leg",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 0.00015634658773670959,
+        "peak_pitch": 0.00020820465618026586,
+        "peak_v": 0.0013374135872965998,
+        "peak_yaw": 0.010759863234569515,
+        "settle_s": 0.0,
+        "settle_pitch": 0.0,
+        "final_s": -2.6506210663370635e-05,
+        "final_v": 2.5526367330591104e-08,
+        "final_pitch": 7.90005416003812e-06,
+        "tail_s_span": 2.002954715762236e-07,
+        "tail_pitch_span": 1.0216580556979144e-07
+      }
+    },
+    {
+      "backend": "nullspace",
+      "model_variant": "leg_input",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 30.00000000001368,
+      "requested": 30.0,
+      "mpc_calls": 1495,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 7500,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 7476,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 7476
+      },
+      "max_abs_pitch": 5.585842577351545e-05,
+      "max_abs_roll": 2.1747507951169086e-08,
+      "max_abs_s": 5.7754077567659764e-05,
+      "final_s": -1.4304174289853087e-05,
+      "max_abs_v": 0.000484957819403689,
+      "final_v": 6.897498150139618e-13,
+      "max_leg_length_error": 0.00041818565839502053,
+      "max_torque": [
+        5.304249102672622,
+        5.336590604425815,
+        5.297078601077475,
+        5.330380815226142,
+        0.006516447532806183,
+        0.006582327846893679
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 1.0962000001200067,
+          "p95": 1.7832350001526718,
+          "max": 16.751200000271638
+        },
+        "wbc": {
+          "p50": 1.7805500001486507,
+          "p95": 2.9447250001794596,
+          "max": 72.98629999968398
+        }
+      },
+      "case": "stand30",
+      "variant": "leg_input",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 5.7754077567659764e-05,
+        "peak_pitch": 5.585842577351545e-05,
+        "peak_v": 0.000484957819403689,
+        "peak_yaw": 1.0412710889345792e-05,
+        "settle_s": 0.0,
+        "settle_pitch": 0.0,
+        "final_s": -1.4304174289853087e-05,
+        "final_v": 6.897498150139618e-13,
+        "final_pitch": -4.047511599414376e-07,
+        "tail_s_span": 2.0613964026960745e-13,
+        "tail_pitch_span": 6.678384092891369e-14
+      },
+      "leg_angle_tracking": {
+        "max_abs_dev": 0.00066188943429734,
+        "ref_max_abs_dev": 0.00066216416492705,
+        "max_abs_error": 6.293482137351462e-07
+      }
+    },
+    {
+      "backend": "nullspace",
+      "model_variant": "leg_input",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 11.999999999998789,
+      "requested": 12.0,
+      "mpc_calls": 595,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 3000,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 2976,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 2976
+      },
+      "max_abs_pitch": 0.0035288448955895246,
+      "max_abs_roll": 6.697637282098749e-06,
+      "max_abs_s": 0.019037128789297565,
+      "final_s": -1.4311352516659913e-05,
+      "max_abs_v": 0.19999999999685372,
+      "final_v": -4.879347063931531e-13,
+      "max_leg_length_error": 0.00041818565839502053,
+      "max_torque": [
+        6.55960351995542,
+        7.131070050461482,
+        6.600213404763208,
+        7.106640627346943,
+        2.005324514800054,
+        2.008876186626174
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 1.2126999999964028,
+          "p95": 1.989799999728347,
+          "max": 57.96149999969202
+        },
+        "wbc": {
+          "p50": 1.7346500001167442,
+          "p95": 2.9486249999990823,
+          "max": 45.66320000003543
+        }
+      },
+      "case": "push_fwd",
+      "variant": "leg_input",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 0.019037128789297565,
+        "peak_pitch": 0.0035288448955895246,
+        "peak_v": 0.19999999999685372,
+        "peak_yaw": 0.0022667875864327176,
+        "settle_s": 0.4039999999999999,
+        "settle_pitch": 0.0,
+        "final_s": -1.4311352516659913e-05,
+        "final_v": -4.879347063931531e-13,
+        "final_pitch": -4.06049350914132e-07,
+        "tail_s_span": 5.290256773298721e-12,
+        "tail_pitch_span": 9.243474952302835e-13
+      },
+      "leg_angle_tracking": {
+        "max_abs_dev": 0.18770176058488072,
+        "ref_max_abs_dev": 0.1877446474948808,
+        "max_abs_error": 0.000253211851392543
+      }
+    },
+    {
+      "backend": "nullspace",
+      "model_variant": "leg_input",
+      "completed": true,
+      "stop_reason": null,
+      "simulated": 11.999999999998789,
+      "requested": 12.0,
+      "mpc_calls": 595,
+      "mpc_fallbacks": 0,
+      "mpc_relaxed": 0,
+      "wbc_calls": 3000,
+      "wbc_fallback": 0,
+      "wbc_clip": 0,
+      "wbc_infeasible": 0,
+      "exhausted": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 2976,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "scaled": {
+        "pitch": 0,
+        "roll": 0,
+        "yaw": 0,
+        "height": 0,
+        "forward_velocity": 0,
+        "leg_tracking": 0,
+        "leg_differential": 0
+      },
+      "modes": {
+        "recovery": 24,
+        "ground": 2976
+      },
+      "max_abs_pitch": 0.0001434586152818279,
+      "max_abs_roll": 0.025353518563436643,
+      "max_abs_s": 0.0007852808767172621,
+      "final_s": -1.4304301462179998e-05,
+      "max_abs_v": 0.0032790050866877414,
+      "final_v": -2.622143507248527e-11,
+      "max_leg_length_error": 0.006202804036829823,
+      "max_torque": [
+        5.551409276234687,
+        5.595771171203793,
+        7.3508725546504845,
+        7.731055925793714,
+        0.04171532885308318,
+        0.0608387231941227
+      ],
+      "timing_ms": {
+        "mpc": {
+          "p50": 1.398200000039651,
+          "p95": 2.085409999949661,
+          "max": 5.160300000170537
+        },
+        "wbc": {
+          "p50": 1.7086000002564106,
+          "p95": 2.797414999963621,
+          "max": 76.30229999995208
+        }
+      },
+      "case": "push_lat",
+      "variant": "leg_input",
+      "v_cmd": 0.0,
+      "w_cmd": 0.0,
+      "metrics": {
+        "peak_s": 0.0007852808767172621,
+        "peak_pitch": 0.0001434586152818279,
+        "peak_v": 0.0032790050866877414,
+        "peak_yaw": 0.010764439914908462,
+        "settle_s": 0.0,
+        "settle_pitch": 0.0,
+        "final_s": -1.4304301462179998e-05,
+        "final_v": -2.622143507248527e-11,
+        "final_pitch": -4.0477413900175275e-07,
+        "tail_s_span": 3.304026083871114e-09,
+        "tail_pitch_span": 7.122263041008548e-10
+      },
+      "leg_angle_tracking": {
+        "max_abs_dev": 0.004514815530530743,
+        "ref_max_abs_dev": 0.004502186305261457,
+        "max_abs_error": 0.004368866842345401
+      }
+    }
+  ]
+}
