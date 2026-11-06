@@ -152,7 +152,6 @@ gbc486/
 | [docs/jump.md](docs/jump.md) | 双质量块模型、起跳/飞行/落地规划、实测结果 |
 | [docs/debugging.md](docs/debugging.md) | 六个典型问题的现象、根因、修法与证据 |
 | [docs/testing.md](docs/testing.md) | 四个工况的命令、指标、数据文件与复现步骤 |
-| [docs/learning.md](docs/learning.md) | 从构型到 MPC/WBC/跳跃的阅读路线与练习 |
 
 ## 已知限制
 
