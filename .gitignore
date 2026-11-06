@@ -8,12 +8,16 @@
 /References
 /urdf_to_mjcf_tool
 
-# Downloaded third-party reference material (papers, upstream repos, surveys)
-# INDEX.md 保留在版本控制内，二进制资料不入库
-/docs/references/mpc-wbc/papers/
-/docs/references/mpc-wbc/repos/
-/docs/references/mpc-wbc/reports/
-/docs/references/mpc-wbc/_tmp/
+# 本地参考资料与私有提示词，不入库
+/*.pdf
+/*.zip
+/提示词.md
+/.pytest_cache/
+
+# 早期工作副本与过程视频；最终项目内容在 circleg/ 与 gbc486/ 下
+/wheel_leg_mujoco/
+/videos/
+/build/
 
 # Local CAD model files and control records
 /SW_Model/
