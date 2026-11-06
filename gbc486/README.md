@@ -108,7 +108,7 @@ python tools/video.py --tag demo --duration 4.0 --fps 50 `
 |---|---|---|---|
 | 前行 | 0 → 1.5 m/s，保持 3 s，随后停车 | 1.23 s 达到 1.45 m/s，稳态 1.50 m/s，4.0 s 停稳，里程 4.25 m，最大俯仰 0.08° | [mp4](videos/serial_forward_50fps.mp4) |
 | 原地转圈 | 偏航 1.5 rad/s，保持 4.2 s | 实际偏航率峰值 1.536 rad/s，4.2 s 转过约 355°，纵向漂移 0.10 m，最大俯仰 0.002° | [mp4](videos/serial_spin_50fps.mp4) |
-| 原地跳跃 | 目标质心抬升 0.135 m | 轮离地峰值 222 mm，落地收敛 0.936 s，全程 max\|pitch\| 11.7°，触地峰值法向力 347.8 N | [mp4](videos/serial_jump_50fps.mp4) |
+| 原地跳跃 | 目标质心抬升 0.135 m | 轮离地峰值 222 mm，落地后 0.67 s 进入稳态，全程 max\|pitch\| 11.7°，落地 0.2 s 窗口法向力峰值 344.3 N | [mp4](videos/serial_jump_50fps.mp4) |
 | 前进 + 跳跃 | 1.0 m/s 指令，1.5 s 起跳 | 轮离地峰值 221 mm，全程 max\|pitch\| 11.3°，落地后 0.5 s 内速度回到 1.0 m/s，无零法向力帧 | [mp4](videos/serial_forward_jump_50fps.mp4) |
 
 ![跳跃曲线](docs/images/jump_two_mass.png)
