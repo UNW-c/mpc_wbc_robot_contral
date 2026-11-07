@@ -2,9 +2,9 @@
 
 偏心曲柄式轮腿机器人的 MuJoCo 仿真项目。每条腿只有一个髋关节，通过 60 mm 曲柄把轮心挂在髋轴上；轮毂电机直驱轮圈。项目保留两条控制路径：LQR 平衡控制和 8 状态 MPC + WBC。
 
-![曲柄传动演示](docs/images/demo_mechanism.gif)
+![原地跳跃](docs/images/jump_preview.gif)
 
-> 曲柄从上死点转到下死点再转回，展示机身在轮圈内部的升降过程。完整动画见 [docs/images/demo_mechanism.gif](docs/images/demo_mechanism.gif)。
+> 原地跳跃：压缩、蹬伸、飞行、落地。完整视频见 [videos/serial_jump_50fps.mp4](videos/serial_jump_50fps.mp4)。
 
 ## 构型
 
@@ -30,6 +30,8 @@
 | 高度 / 腿长 | 两髋同向 | 4→10 N·m（按行程排程） |
 
 曲柄带来两个死点：`q = 0` 和 `q = π` 处所需髋力矩为零，`dq/dL` 趋于无穷。默认姿态放在上死点，机身最低、髋电机零负载；腿长指令必须限速，髋角要进 MPC 状态约束并做独立保护。
+
+曲柄传动动画见 [docs/images/demo_mechanism.gif](docs/images/demo_mechanism.gif)。
 
 ## 两条控制路径
 
@@ -64,7 +66,14 @@ python -m APP.mujoco_mpc_wbc --viewer
 | 原地跳跃 | 1.0 s 触发 | 底座高度 0.193→0.585 m，飞行约 0.53 s，max\|pitch\| 0.627 rad |
 | 前进+跳跃 | 1.0 m/s，1.5 s 起跳 | 里程 4.61 m，max\|pitch\| 0.625 rad |
 
-前行和跳跃的姿态指标明显弱于串腿项目。跳跃用的是早期的单质量/腿长方案，不是双质量块规划；这部分还没有重做。
+四个工况的 640×480 / 50 fps 视频：
+
+- [前行](videos/serial_forward_50fps.mp4)
+- [原地转圈](videos/serial_spin_50fps.mp4)
+- [原地跳跃](videos/serial_jump_50fps.mp4)
+- [前进+跳跃](videos/serial_forward_jump_50fps.mp4)
+
+前行和跳跃的姿态指标明显弱于串腿项目。跳跃仍是早期的单质量/腿长方案，尚未改用双质量块规划。
 
 ## 快速开始
 
@@ -98,6 +107,7 @@ circleg/
 
 | 文档 | 内容 |
 |---|---|
+| [docs/testing.md](docs/testing.md) | 四个标准工况的命令、指标与复现步骤 |
 | [docs/reference/轮圈腿技术文档.md](docs/reference/轮圈腿技术文档.md) | 构型约束、控制栈分层、每层的物理依据、跳跃方案 |
 | [docs/reference/构型与控制逻辑.md](docs/reference/构型与控制逻辑.md) | 拓扑、尺寸、质量、LQR 设计、通道权限与限幅排程 |
 | [docs/reference/控制器技术文档_MPC与WBC.md](docs/reference/控制器技术文档_MPC与WBC.md) | 8 状态 MPC、ZMP 参考、WBC 任务与三种求解后端 |

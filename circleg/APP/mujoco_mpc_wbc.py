@@ -479,8 +479,13 @@ class MuJoCoMpcWbcSimulation:
         return (balance[0], motion[-1], balance[1]), motion[:-1]
 
     def run(self, command, duration: float, viewer=None, disturbances=None, allow_driving=False,
-            jump_times=None, jump_key=None, reset_key=None):
-        """Integrate the scenario; a supplied passive viewer is synced at real-time pace."""
+            jump_times=None, jump_key=None, reset_key=None,
+            frame_callback=None, frame_interval: float = 0.0):
+        """Integrate the scenario; a supplied passive viewer is synced at real-time pace.
+
+        ``frame_callback(data)`` 每 ``frame_interval`` 秒仿真时间调用一次，用于离屏录像；
+        默认不调用，不影响控制与记录。
+        """
         if np.isnan(duration) or duration <= 0:
             raise ValueError("duration must be positive")
         infinite = not np.isfinite(duration)
@@ -509,6 +514,7 @@ class MuJoCoMpcWbcSimulation:
         wrench = np.zeros(6)
         total_steps = None if infinite else int(np.ceil(duration / self.robot.timestep))
         step = 0
+        next_frame = 0.0
         while total_steps is None or step < total_steps:
             step_wall_start = time.perf_counter()
             if viewer is not None and reset_key is not None and reset_key():
@@ -664,6 +670,10 @@ class MuJoCoMpcWbcSimulation:
             if not np.all(np.isfinite(np.r_[data.qpos, data.qvel, data.ctrl])):
                 self.stop_reason = "nonfinite_state"
                 break
+            if (frame_callback is not None and frame_interval > 0.0
+                    and self.robot.time >= next_frame):
+                frame_callback(data)
+                next_frame += frame_interval
             if step % self.config.record_stride == 0:
                 self.records.append(self._sample_record())
             attitude = self.dynamics.attitude(data)

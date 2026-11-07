@@ -14,3 +14,7 @@ ruckig>=0.9
 # Tests (pytest.ini + tests/).
 pytest>=8.0
 
+# 演示动画与离线录像
+matplotlib>=3.8
+imageio-ffmpeg>=0.4
+
