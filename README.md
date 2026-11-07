@@ -4,7 +4,7 @@
 
 | 项目 | 构型 | 控制栈 | 状态 |
 |---|---|---|---|
-| [`circleg/`](circleg/) | 偏心曲柄轮圈腿 | LQR + 8 状态 MPC + WBC | 代码已迁入，文档与视频整理中 |
+| [`circleg/`](circleg/) | 偏心曲柄轮圈腿 | LQR + 8 状态 MPC + WBC | 代码、文档、四个测试视频完成 |
 | [`gbc486/`](gbc486/) | 五连杆串联腿 | 8 状态 MPC + WLS 全身控制 + 双质量块跳跃 | 代码、文档、四个测试视频完成 |
 
 两个项目各自带 `Algorithm/`、模型、测试、文档和视频，互不 import。它们最初在同一个工作区开发，串腿早期复用过 circleg 的算法层；后来发现两套部署的模型和任务差异无法共用，已经拆成两份独立副本。
@@ -42,7 +42,7 @@
 | 原地跳跃 | 能完整起跳/落地，max\|pitch\| 0.627 rad |
 | 前进+跳跃 1.0 m/s | 能跑完，max\|pitch\| 0.625 rad |
 
-轮圈腿的跳跃仍是早期的单质量/腿长方案，姿态指标明显弱于串腿，文档和视频还在整理。详细设计见 [`circleg/docs/reference/轮圈腿技术文档.md`](circleg/docs/reference/轮圈腿技术文档.md) 与 [`circleg/docs/reference/构型与控制逻辑.md`](circleg/docs/reference/构型与控制逻辑.md)。
+轮圈腿的跳跃仍是早期的单质量/腿长方案，姿态指标明显弱于串腿。四个工况的视频在 [`circleg/videos/`](circleg/videos/)，详细设计见 [`circleg/docs/reference/轮圈腿技术文档.md`](circleg/docs/reference/轮圈腿技术文档.md) 与 [`circleg/docs/reference/构型与控制逻辑.md`](circleg/docs/reference/构型与控制逻辑.md)。
 
 ## 快速开始
 
