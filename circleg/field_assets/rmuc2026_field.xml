@@ -1,0 +1,138 @@
+<mujoco model="rmuc2026_field">
+  <!--
+    RMUC 2026 比赛场地几何，用于 MuJoCo 物理测试。
+
+    来源: https://github.com/SUNTuwu/RMUC26-sim
+          src/sim_assets/meshes/  (分支 main, commit c3c58691ca76bf3d6bdb498a9d148c448daf1499, 2026-07-20)
+
+    坐标系: 米制, Z 轴向上, 场地中心位于原点。与 MuJoCo 原生约定一致, 无需旋转或缩放。
+    场地尺寸: 地板 29.1 x 16.1 m (X -14.55..14.55, Y -8.05..8.05), 地板顶面 Z=0,
+              地板下方有 0.5 m 裙边。周边对局区边界为 X ±13.6 m, Y ±7.0 m。
+
+    碰撞几何: 41 个静态棱柱 (mesh_collision_env/), 每个 8-16 顶点、12-28 面。
+    视觉几何: mesh_view/mesh_view.obj, 450 顶点 / 911 面, 覆盖整个场地。
+
+    已知限制:
+      1. MuJoCo 的 type="mesh" 碰撞体使用网格的凸包, 凹形结构会被自动填平。
+      2. 接触参数 (friction / solref / solimp) 未在本文件中指定, 使用 MuJoCo 全局默认值。
+         该参数当前无依据, 待实测辨识确定; 若需按 RoboMaster 场地材料标定, 需自备
+         滑动/停止距离实测数据后再写入, 不要凭感觉填。
+      3. 本文件不是官方几何, 而是第三方项目的人工简化模型, 精度低于 CAD。
+
+    渲染分组: 碰撞 geom 放在 group 3 (默认隐藏), 视觉 geom 放在 group 1 (默认显示)。
+              在 MuJoCo 查看器里切换 group 3 可显示/隐藏碰撞体。
+
+    与机器人组合时: MuJoCo 的全局 <option> 取自父模型, 组合后本文件的 timestep 不生效,
+                    需要由你的机器人 XML 决定并自行校验。
+  -->
+
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <asset>
+    <mesh name="mesh_base" file="mesh_collision_env/mesh_base.obj"/>
+    <mesh name="mesh_base_1" file="mesh_collision_env/mesh_base_1.obj"/>
+    <mesh name="mesh_land_center" file="mesh_collision_env/mesh_land_center.obj"/>
+    <mesh name="mesh_land_high_a" file="mesh_collision_env/mesh_land_high_a.obj"/>
+    <mesh name="mesh_land_high_a_1" file="mesh_collision_env/mesh_land_high_a_1.obj"/>
+    <mesh name="mesh_land_high_b" file="mesh_collision_env/mesh_land_high_b.obj"/>
+    <mesh name="mesh_land_high_b_1" file="mesh_collision_env/mesh_land_high_b_1.obj"/>
+    <mesh name="mesh_land_high_c" file="mesh_collision_env/mesh_land_high_c.obj"/>
+    <mesh name="mesh_land_high_c_1" file="mesh_collision_env/mesh_land_high_c_1.obj"/>
+    <mesh name="mesh_land_low" file="mesh_collision_env/mesh_land_low.obj"/>
+    <mesh name="mesh_land_ramp_a" file="mesh_collision_env/mesh_land_ramp_a.obj"/>
+    <mesh name="mesh_land_ramp_a_1" file="mesh_collision_env/mesh_land_ramp_a_1.obj"/>
+    <mesh name="mesh_land_ramp_b" file="mesh_collision_env/mesh_land_ramp_b.obj"/>
+    <mesh name="mesh_land_ramp_b_1" file="mesh_collision_env/mesh_land_ramp_b_1.obj"/>
+    <mesh name="mesh_land_ramp_c" file="mesh_collision_env/mesh_land_ramp_c.obj"/>
+    <mesh name="mesh_land_ramp_c_1" file="mesh_collision_env/mesh_land_ramp_c_1.obj"/>
+    <mesh name="mesh_land_ramp_d" file="mesh_collision_env/mesh_land_ramp_d.obj"/>
+    <mesh name="mesh_land_ramp_d_1" file="mesh_collision_env/mesh_land_ramp_d_1.obj"/>
+    <mesh name="mesh_land_stronghold" file="mesh_collision_env/mesh_land_stronghold.obj"/>
+    <mesh name="mesh_land_stronghold_1" file="mesh_collision_env/mesh_land_stronghold_1.obj"/>
+    <mesh name="mesh_outpost" file="mesh_collision_env/mesh_outpost.obj"/>
+    <mesh name="mesh_outpost_1" file="mesh_collision_env/mesh_outpost_1.obj"/>
+    <mesh name="mesh_rune" file="mesh_collision_env/mesh_rune.obj"/>
+    <mesh name="mesh_tunnel_side_a" file="mesh_collision_env/mesh_tunnel_side_a.obj"/>
+    <mesh name="mesh_tunnel_side_a_1" file="mesh_collision_env/mesh_tunnel_side_a_1.obj"/>
+    <mesh name="mesh_tunnel_side_b" file="mesh_collision_env/mesh_tunnel_side_b.obj"/>
+    <mesh name="mesh_tunnel_side_b_1" file="mesh_collision_env/mesh_tunnel_side_b_1.obj"/>
+    <mesh name="mesh_tunnel_top_a" file="mesh_collision_env/mesh_tunnel_top_a.obj"/>
+    <mesh name="mesh_tunnel_top_a_1" file="mesh_collision_env/mesh_tunnel_top_a_1.obj"/>
+    <mesh name="mesh_tunnel_top_b" file="mesh_collision_env/mesh_tunnel_top_b.obj"/>
+    <mesh name="mesh_tunnel_top_b_1" file="mesh_collision_env/mesh_tunnel_top_b_1.obj"/>
+    <mesh name="mesh_wall_a" file="mesh_collision_env/mesh_wall_a.obj"/>
+    <mesh name="mesh_wall_a_1" file="mesh_collision_env/mesh_wall_a_1.obj"/>
+    <mesh name="mesh_wall_b" file="mesh_collision_env/mesh_wall_b.obj"/>
+    <mesh name="mesh_wall_b_1" file="mesh_collision_env/mesh_wall_b_1.obj"/>
+    <mesh name="mesh_wall_c" file="mesh_collision_env/mesh_wall_c.obj"/>
+    <mesh name="mesh_wall_c_1" file="mesh_collision_env/mesh_wall_c_1.obj"/>
+    <mesh name="mesh_wall_d" file="mesh_collision_env/mesh_wall_d.obj"/>
+    <mesh name="mesh_wall_d_1" file="mesh_collision_env/mesh_wall_d_1.obj"/>
+    <mesh name="mesh_wall_e" file="mesh_collision_env/mesh_wall_e.obj"/>
+    <mesh name="mesh_wall_e_1" file="mesh_collision_env/mesh_wall_e_1.obj"/>
+    <mesh name="mesh_view" file="mesh_view/mesh_view.obj"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" pos="0 0 12" dir="0 0 -1" diffuse="0.9 0.9 0.9" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <!-- 场地碰撞体: 41 个静态棱柱, 由 mesh_collision_env/ 的网格直接生成 -->
+    <geom name="c_mesh_base" type="mesh" mesh="mesh_base" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_base_1" type="mesh" mesh="mesh_base_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_center" type="mesh" mesh="mesh_land_center" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_a" type="mesh" mesh="mesh_land_high_a" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_a_1" type="mesh" mesh="mesh_land_high_a_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_b" type="mesh" mesh="mesh_land_high_b" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_b_1" type="mesh" mesh="mesh_land_high_b_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_c" type="mesh" mesh="mesh_land_high_c" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_high_c_1" type="mesh" mesh="mesh_land_high_c_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_low" type="mesh" mesh="mesh_land_low" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_a" type="mesh" mesh="mesh_land_ramp_a" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_a_1" type="mesh" mesh="mesh_land_ramp_a_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_b" type="mesh" mesh="mesh_land_ramp_b" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_b_1" type="mesh" mesh="mesh_land_ramp_b_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_c" type="mesh" mesh="mesh_land_ramp_c" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_c_1" type="mesh" mesh="mesh_land_ramp_c_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_d" type="mesh" mesh="mesh_land_ramp_d" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_ramp_d_1" type="mesh" mesh="mesh_land_ramp_d_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_stronghold" type="mesh" mesh="mesh_land_stronghold" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_land_stronghold_1" type="mesh" mesh="mesh_land_stronghold_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_outpost" type="mesh" mesh="mesh_outpost" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_outpost_1" type="mesh" mesh="mesh_outpost_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_rune" type="mesh" mesh="mesh_rune" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_side_a" type="mesh" mesh="mesh_tunnel_side_a" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_side_a_1" type="mesh" mesh="mesh_tunnel_side_a_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_side_b" type="mesh" mesh="mesh_tunnel_side_b" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_side_b_1" type="mesh" mesh="mesh_tunnel_side_b_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_top_a" type="mesh" mesh="mesh_tunnel_top_a" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_top_a_1" type="mesh" mesh="mesh_tunnel_top_a_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_top_b" type="mesh" mesh="mesh_tunnel_top_b" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_tunnel_top_b_1" type="mesh" mesh="mesh_tunnel_top_b_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_a" type="mesh" mesh="mesh_wall_a" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_a_1" type="mesh" mesh="mesh_wall_a_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_b" type="mesh" mesh="mesh_wall_b" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_b_1" type="mesh" mesh="mesh_wall_b_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_c" type="mesh" mesh="mesh_wall_c" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_c_1" type="mesh" mesh="mesh_wall_c_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_d" type="mesh" mesh="mesh_wall_d" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_d_1" type="mesh" mesh="mesh_wall_d_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_e" type="mesh" mesh="mesh_wall_e" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+    <geom name="c_mesh_wall_e_1" type="mesh" mesh="mesh_wall_e_1" group="3" rgba="0 0 0 0" contype="1" conaffinity="1"/>
+
+    <!-- 对局区边界挡板: 复现原项目 scene_builder.py 从 sim_config.yaml 生成的四个 box。
+         参数来源 sim_bringup/config/sim_config.yaml: boundary_x ±13.6, boundary_y ±7.0,
+         boundary_wall_thickness 0.05, boundary_wall_height 1.2。这是项目自定的机器人
+         包围代理, 不是官方规则书里的钢制围栏几何。 -->
+    <geom name="boundary_pos_x" type="box" pos="13.65 0 0.6" size="0.05 7.0 0.6" group="3" rgba="0 0 1 0.15" contype="1" conaffinity="1"/>
+    <geom name="boundary_neg_x" type="box" pos="-13.65 0 0.6" size="0.05 7.0 0.6" group="3" rgba="0 0 1 0.15" contype="1" conaffinity="1"/>
+    <geom name="boundary_pos_y" type="box" pos="0 7.05 0.6" size="13.6 0.05 0.6" group="3" rgba="0 0 1 0.15" contype="1" conaffinity="1"/>
+    <geom name="boundary_neg_y" type="box" pos="0 -7.05 0.6" size="13.6 0.05 0.6" group="3" rgba="0 0 1 0.15" contype="1" conaffinity="1"/>
+
+    <!-- 场地视觉网格: 不参与碰撞 -->
+    <geom name="v_field" type="mesh" mesh="mesh_view" group="1" contype="0" conaffinity="0"/>
+
+    <!-- 默认出生点: 来源 sim_config.yaml 的 robot_init_location [-4.0, -4.0, 0.4]。
+         该点位于中心高地 (X -4.8..4.8, Y -4.97..4.97, 顶面 Z=0.3) 上, 离地 0.1 m。 -->
+    <site name="spawn" pos="-4 -4 0.4" size="0.02" rgba="0.2 1 0.2 0.5"/>
+  </worldbody>
+</mujoco>
