@@ -4,7 +4,7 @@
 
 | 项目 | 构型 | 控制栈 | 状态 |
 |---|---|---|---|
-| [`circleg/`](circleg/) | 偏心曲柄轮圈腿 | LQR + 8 状态 MPC + WBC | 代码、文档、四个测试视频完成 |
+| [`circleg/`](circleg/) | 偏心曲柄轮圈腿 | 8 状态 MPC + WBC | 代码、文档、四个测试视频完成 |
 | [`gbc486/`](gbc486/) | 五连杆串联腿 | 8 状态 MPC + WLS 全身控制 + 双质量块跳跃 | 代码、文档、四个测试视频完成 |
 
 两个项目各自带 `Algorithm/`、模型、测试、文档和视频，互不 import。它们最初在同一个工作区开发，串腿早期复用过 circleg 的算法层；后来发现两套部署的模型和任务差异无法共用，已经拆成两份独立副本。
@@ -28,10 +28,9 @@
 
 ## 项目二：Circleg 轮圈腿
 
-`circleg/` 是偏心曲柄式轮圈腿。每条腿一个髋关节通过 60 mm 曲柄把轮心挂在髋轴上，机身在轮圈内部升降。项目保留两条控制路径：
+`circleg/` 是偏心曲柄式轮圈腿。每条腿一个髋关节通过 60 mm 曲柄把轮心挂在髋轴上，机身在轮圈内部升降。轮圈腿的机械模型、MJCF 与初始仿真框架来自 CirclegRobot 开源项目；本仓库在其基础上完成 MPC + WBC 控制、跳跃与测试整理。
 
-- LQR：`circleg/main.py`，固定/可调腿长的平衡与速度控制；
-- MPC + WBC：`circleg/APP/mujoco_mpc_wbc.py`，8 状态模型、ZMP 参考和 WLS/零空间求解器。
+控制入口是 `circleg/APP/mujoco_mpc_wbc.py`：8 状态模型（`hip_input`）、ZMP 参考，以及 WLS/零空间两种 WBC 求解后端。
 
 当前实测（默认 `hip_input` + `tuned-fast-accel` + QP）：
 
@@ -68,7 +67,6 @@ python tools/video.py --help               # 离线录像
 
 ```powershell
 cd circleg
-python main.py --terrain plane             # LQR 交互仿真
 python -m APP.mujoco_mpc_wbc --duration 10 --terrain plane   # MPC/WBC 无界面
 python -m APP.mujoco_mpc_wbc --viewer      # MPC/WBC 交互
 ```
@@ -79,11 +77,10 @@ python -m APP.mujoco_mpc_wbc --viewer      # MPC/WBC 交互
 .
 ├── circleg/                 轮圈腿项目（自包含）
 │   ├── Algorithm/           算法库副本
-│   ├── APP/                 应用层、LQR 与 MPC/WBC 入口
+│   ├── APP/                 应用层、MPC/WBC 入口
 │   ├── URDF_Model/          MJCF 模型、网格、场地
 │   ├── tests/               单元与回归测试
-│   ├── docs/                设计文档与参考资料
-│   └── main.py              LQR 入口
+│   └── docs/                设计文档与参考资料
 ├── gbc486/                  串联腿项目（自包含）
 │   ├── Algorithm/           算法库副本
 │   ├── gbc_mpc_wbc/         GBC486 适配层、MPC/WBC、跳跃
@@ -107,4 +104,4 @@ python -m APP.mujoco_mpc_wbc --viewer      # MPC/WBC 交互
 
 本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，仅限个人学习、学术研究与技术交流。
 
-控制栈的早期版本来自 CirclegRobot 工作区。两个项目现在各自维护自己的算法副本；历史调试记录保留在各自的 `docs/reference/` 下。
+控制栈的早期版本来自 CirclegRobot 工作区。轮圈腿的机械模型、MJCF 与初始仿真框架来自 CirclegRobot 开源项目；两个项目现在各自维护自己的算法副本，历史调试记录保留在各自的 `docs/reference/` 下。

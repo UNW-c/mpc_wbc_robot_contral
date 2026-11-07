@@ -1,6 +1,6 @@
 # Circleg 轮圈腿机器人仿真
 
-偏心曲柄式轮腿机器人的 MuJoCo 仿真项目。每条腿只有一个髋关节，通过 60 mm 曲柄把轮心挂在髋轴上；轮毂电机直驱轮圈。项目保留两条控制路径：LQR 平衡控制和 8 状态 MPC + WBC。
+偏心曲柄式轮腿机器人的 MuJoCo 仿真项目。每条腿只有一个髋关节，通过 60 mm 曲柄把轮心挂在髋轴上；轮毂电机直驱轮圈。轮圈腿的机械模型、MJCF 与初始仿真框架来自 CirclegRobot 开源项目；本仓库在其基础上完成 8 状态 MPC + WBC 控制、跳跃与测试整理。
 
 ![原地跳跃](docs/images/jump_preview.gif)
 
@@ -33,18 +33,7 @@
 
 曲柄传动动画见 [docs/images/demo_mechanism.gif](docs/images/demo_mechanism.gif)。
 
-## 两条控制路径
-
-### LQR
-
-入口 `main.py`。状态为 `[x, pitch, v, pitch_rate]`，左右轮使用同一套 LQR 增益。支持固定腿长、腿长调节、线速度和偏航角速度，键盘与 Xbox/SDL 手柄都可输入。
-
-```powershell
-python main.py --terrain plane
-python main.py --terrain rough --headless --duration 10
-```
-
-### MPC + WBC
+## 控制栈
 
 入口 `APP/mujoco_mpc_wbc.py`。上层 8 状态 MPC（`model_variant=hip_input`）以两轮纵向力和共模髋力矩为输入，下层 WBC 以 250 Hz 分配任务。默认 `tuned-fast-accel` preset、QP 后端。
 
@@ -83,21 +72,20 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` 包含 MuJoCo、NumPy、SciPy、OSQP、Ruckig、pygame、pynput 和 pytest。Linux 下的手柄输入需要图形会话；Wayland 需要启用 X11/XWayland 后端。
+`requirements.txt` 包含 MuJoCo、NumPy、SciPy、OSQP、Ruckig、pygame、pynput、matplotlib、imageio-ffmpeg 和 pytest。Linux 下的手柄输入需要图形会话；Wayland 需要启用 X11/XWayland 后端。
 
 ## 目录结构
 
 ```text
 circleg/
-├── Algorithm/               算法库：LQR、MPC、WBC、观测器、状态估计
-├── APP/                     应用层：LQR 入口、MPC/WBC 入口、MuJoCo 适配
+├── Algorithm/               算法库：MPC、WBC、观测器、状态估计
+├── APP/                     应用层：MPC/WBC 入口、MuJoCo 适配
 ├── URDF_Model/              MJCF 模型、网格、场地
 ├── tests/                   单元测试、回归测试、参数扫描
 ├── docs/
 │   ├── reference/           设计文档与调试记录
 │   └── images/              演示图
-├── tools/demo_mechanism.py  曲柄传动动画
-├── main.py                  LQR 入口
+├── tools/                   曲柄动画、离线录像、工况指标
 ├── conftest.py
 ├── pytest.ini
 └── requirements.txt
@@ -109,7 +97,7 @@ circleg/
 |---|---|
 | [docs/testing.md](docs/testing.md) | 四个标准工况的命令、指标与复现步骤 |
 | [docs/reference/轮圈腿技术文档.md](docs/reference/轮圈腿技术文档.md) | 构型约束、控制栈分层、每层的物理依据、跳跃方案 |
-| [docs/reference/构型与控制逻辑.md](docs/reference/构型与控制逻辑.md) | 拓扑、尺寸、质量、LQR 设计、通道权限与限幅排程 |
+| [docs/reference/构型与控制逻辑.md](docs/reference/构型与控制逻辑.md) | 拓扑、尺寸、质量、通道权限与限幅排程 |
 | [docs/reference/控制器技术文档_MPC与WBC.md](docs/reference/控制器技术文档_MPC与WBC.md) | 8 状态 MPC、ZMP 参考、WBC 任务与三种求解后端 |
 | [docs/reference/MPC-WBC方案.md](docs/reference/MPC-WBC方案.md) | 早期 MPC + 零空间 WBC 方案与构型硬限制 |
 | [docs/reference/测试结果与数据分析.md](docs/reference/测试结果与数据分析.md) | 各轮测试记录与数据 |
@@ -138,6 +126,10 @@ python -m pytest -q
 - **时间轴**：早期 viewer 调试的时间轴与物理时间不一致，本文指标以 headless 记录为准；viewer 里的时间不能直接当参考。
 - **模型参数**：质量、惯量和几何来自 `URDF_Model/mjcf/*.xml` 和 CAD 导出；换轮或加配重后需要重测。
 - **场地**：`field` 地形可用，但尚未做完整通过性验证。
+
+## 开源来源
+
+轮圈腿的机械模型、MJCF 与初始仿真框架来自 CirclegRobot 开源项目。原始框架的目录结构、模型文件和许可证声明予以保留；本仓库在其基础上完成 8 状态 MPC + WBC 控制、跳跃、测试与文档整理。
 
 ## 许可证与致谢
 
