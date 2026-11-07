@@ -100,8 +100,9 @@ circleg/
 | [docs/reference/构型与控制逻辑.md](docs/reference/构型与控制逻辑.md) | 拓扑、尺寸、质量、通道权限与限幅排程 |
 | [docs/reference/控制器技术文档_MPC与WBC.md](docs/reference/控制器技术文档_MPC与WBC.md) | 8 状态 MPC、ZMP 参考、WBC 任务与三种求解后端 |
 | [docs/reference/MPC-WBC方案.md](docs/reference/MPC-WBC方案.md) | 早期 MPC + 零空间 WBC 方案与构型硬限制 |
-| [docs/reference/测试结果与数据分析.md](docs/reference/测试结果与数据分析.md) | 各轮测试记录与数据 |
-| [docs/reference/算法漏洞排查记录.md](docs/reference/算法漏洞排查记录.md) | 算法层排查历史 |
+| [docs/reference/算法部署方案与代码地图.md](docs/reference/算法部署方案与代码地图.md) | 代码结构与模块职责 |
+
+原始调试记录已归档，不随仓库发布。
 
 ## 测试
 
